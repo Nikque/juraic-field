@@ -15,7 +15,7 @@
 #include <thread>
 #include <unordered_set>
 
-namespace puyo {
+namespace juraic {
 
 char colorChar(Cell color) { return ".RGBYP"[color]; }
 
@@ -40,10 +40,10 @@ std::string pathToUtf8(const std::filesystem::path& path) {
 
 void printSolution(std::ostream& out, const Solution& solution, uint64_t seed) {
     BitField copy = solution.field;
-    const int puyos = solution.field.count();
+    const int pieces = solution.field.count();
     out << "seed=" << seed << "\n";
     out << "chains=" << runChain(copy).chains << "\n";
-    out << "puyos=" << puyos << ", extra_puyos=" << puyos - 4 * solution.targetChain << "\n";
+    out << "pieces=" << pieces << ", extra_pieces=" << pieces - 4 * solution.targetChain << "\n";
     out << "field (top row first; columns left to right):\n";
     for (int y = H - 1; y >= 0; --y) {
         for (int x = 0; x < W; ++x) out << colorChar(solution.field.get(x, y)) << ' ';
@@ -162,7 +162,8 @@ GeneratorConfig loadConfig(const std::filesystem::path& path) {
         const size_t equal = line.find('=');
         if (equal == std::string::npos)
             throw std::runtime_error("expected key=value at config.ini line " + std::to_string(lineNumber));
-        const std::string key = trim(line.substr(0, equal)), value = trim(line.substr(equal + 1));
+        std::string key = trim(line.substr(0, equal));
+        const std::string value = trim(line.substr(equal + 1));
         if (key.empty() || value.empty())
             throw std::runtime_error("empty key or value at config.ini line " + std::to_string(lineNumber));
         if (!seen.insert(key).second) throw std::runtime_error("duplicate config key: " + key);
@@ -172,8 +173,8 @@ GeneratorConfig loadConfig(const std::filesystem::path& path) {
         else if (key == "beam_width") config.beamWidth = parsePositiveInt(value, key);
         else if (key == "restarts") config.restarts = parsePositiveInt(value, key);
         else if (key == "candidates_per_parent") config.candidatesPerParent = parsePositiveInt(value, key);
-        else if (key == "max_extra_puyos") config.maxExtraPuyos = orZero();
-        else if (key == "min_extra_puyos") config.minExtraPuyos = orZero();
+        else if (key == "max_extra_pieces") config.maxExtraPieces = orZero();
+        else if (key == "min_extra_pieces") config.minExtraPieces = orZero();
         else if (key == "target_chain") config.targetChain = parsePositiveInt(value, key);
         else if (key == "target_success_count") config.targetSuccessCount = parsePositiveInt(value, key);
         else if (key == "threads") config.threads = orZero();
@@ -184,13 +185,13 @@ GeneratorConfig loadConfig(const std::filesystem::path& path) {
     for (const char* key : {"initial_seed", "color_count", "beam_width", "restarts", "candidates_per_parent",
                             "target_success_count"})
         if (!seen.contains(key)) throw std::runtime_error(std::string("missing config key: ") + key);
-    if (config.colorCount != 4 && config.colorCount != 5) throw std::runtime_error("color_count must be 4 or 5");
+    if (config.colorCount < 3 || config.colorCount > 5) throw std::runtime_error("color_count must be 3, 4 or 5");
     if (config.targetChain < MIN_TARGET_CHAIN || config.targetChain > MAX_TARGET_CHAIN)
         throw std::runtime_error("target_chain must be between 1 and 19");
-    if (config.maxExtraPuyos > W * H - 4 * config.targetChain)
-        throw std::runtime_error("max_extra_puyos exceeds 78 - 4 * target_chain");
-    if (config.minExtraPuyos > config.maxExtraPuyos)
-        throw std::runtime_error("min_extra_puyos must not exceed max_extra_puyos");
+    if (config.maxExtraPieces > W * H - 4 * config.targetChain)
+        throw std::runtime_error("max_extra_pieces exceeds 78 - 4 * target_chain");
+    if (config.minExtraPieces > config.maxExtraPieces)
+        throw std::runtime_error("min_extra_pieces must not exceed max_extra_pieces");
     if (config.threads > 256) throw std::runtime_error("threads must be at most 256");
     return config;
 }
@@ -212,7 +213,7 @@ int runGenerator(const std::filesystem::path& configPath, const GeneratorHooks* 
                   << ", beam_width=" << config.beamWidth << ", restarts=" << config.restarts
                   << ", candidates_per_parent=" << config.candidatesPerParent
                   << ", target_success_count=" << config.targetSuccessCount
-                  << ", max_extra_puyos=" << config.maxExtraPuyos << ", min_extra_puyos=" << config.minExtraPuyos
+                  << ", max_extra_pieces=" << config.maxExtraPieces << ", min_extra_pieces=" << config.minExtraPieces
                   << ", target_chain=" << config.targetChain << ", threads=" << threads << "\n";
 
         const auto outputPath = outputDirectory / URL_FILE;
@@ -330,4 +331,4 @@ int runGenerator(const std::filesystem::path& configPath, const GeneratorHooks* 
     }
 }
 
-} // namespace puyo
+} // namespace juraic

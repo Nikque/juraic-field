@@ -15,27 +15,24 @@
 #include <string>
 #include <vector>
 
-namespace puyo {
+namespace juraic {
 
 constexpr int MIN_TARGET_CHAIN = 1;
 constexpr int MAX_TARGET_CHAIN = 19;
 
 struct Solution {
     BitField field;        // the board right after the last pair has been placed
-    FieldBits trigger;     // the four puyos of the first wave
+    FieldBits trigger;     // the four pieces of the first wave
     unsigned firePairs = 0; // pair positions (reach.h ids) that can be the last pair
     int targetChain = MAX_TARGET_CHAIN;
 };
 
-// The two cells of pair position `id` on this board (its topmost puyos).
+// The two cells of pair position `id` on this board (its topmost pieces).
 FieldBits pairCells(const BitField& field, int id);
 // Pair positions that can be the last placement: removing the pair leaves a
 // board on which nothing clears, the pair can appear, and the position is
 // reachable. Uses the shortcuts that hold for boards made by this generator.
 unsigned firePairs(const BitField& field, FieldBits trigger);
-// The same set found from the definition alone, for any compact board
-// (used for boards that were not made by this generator, e.g. loaded files).
-unsigned firePairsByDefinition(const BitField& field);
 // Checks every condition of a valid result directly, by simulation, without
 // relying on how the board was made. Returns an empty string when valid.
 std::string verifySolution(const Solution& s);
@@ -47,8 +44,8 @@ struct GeneratorConfig {
     int restarts = 0;
     int candidatesPerParent = 0;
     int targetSuccessCount = 0;
-    int maxExtraPuyos = 0;
-    int minExtraPuyos = 0;
+    int maxExtraPieces = 0;
+    int minExtraPieces = 0;
     int targetChain = MAX_TARGET_CHAIN;
     int threads = 0; // 0 = automatic
 };
@@ -92,4 +89,4 @@ uint64_t parseSeed(const std::string& text);
 int parsePositiveInt(const std::string& text, const std::string& key);
 void printSolution(std::ostream& out, const Solution& solution, uint64_t seed);
 
-} // namespace puyo
+} // namespace juraic

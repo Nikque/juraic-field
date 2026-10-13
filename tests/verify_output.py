@@ -13,7 +13,7 @@ A result is valid when
      and the first wave is the printed trigger;
   3. after the chain the cell where pairs appear (column 3, row 12) is empty;
   4. at least one "last pair" is printed, and for every printed pair:
-     a. it is the two topmost puyos of one column, or the topmost puyos of two
+     a. it is the two topmost pieces of one column, or the topmost pieces of two
         neighbouring columns;
      b. without the pair nothing clears;
      c. without the pair the cell where pairs appear is empty;
@@ -60,13 +60,13 @@ def heights(board):
     return [sum(1 for (x, _) in board if x == column) for column in range(6)]
 
 
-MAX_HOP = 2  # lower columns the lifted axis puyo can cross before it must land
+MAX_HOP = 4  # lower columns the lifted axis piece can cross before it must land
 
 
 def column_reachable(h, target):
     """Can the falling pair travel from column 3 to `target`?
 
-    11 or lower: always passable. 13: never. 12: only while the axis puyo is
+    11 or lower: always passable. 13: never. 12: only while the axis piece is
     lifted to row 13 (wall crossing). It is lifted by a quick turn at the
     spawn (both neighbours 12+), by a floor kick on a column exactly 11 high,
     or by standing on a 12-high column; once lifted it may hop over up to
@@ -106,7 +106,7 @@ def column_reachable(h, target):
 
 
 def pair_candidates(board):
-    """Every pair of topmost puyos: (kind, frozenset of two cells)."""
+    """Every pair of topmost pieces: (kind, frozenset of two cells)."""
     h = heights(board)
     for x in range(6):
         if h[x] >= 2:
@@ -164,7 +164,7 @@ def verify(text, allow_extra=False):
         # 4 and 5: the printed last pairs are exactly the valid ones
         valid = {(kind, cells) for kind, cells in pair_candidates(board) if pair_is_valid(board, kind, cells)}
         assert printed, "no last pair"
-        assert printed <= set(pair_candidates(board)), "a printed pair is not made of topmost puyos"
+        assert printed <= set(pair_candidates(board)), "a printed pair is not made of topmost pieces"
         assert printed <= valid, "a printed last pair is not valid"
         assert valid <= printed, "a valid last pair was not found"
 

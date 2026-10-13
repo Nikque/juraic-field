@@ -17,12 +17,12 @@ def run(settings, directory):
                           capture_output=True, encoding="utf-8", timeout=30)
 
 
-with tempfile.TemporaryDirectory(prefix="puyo-cli-test-") as temp:
+with tempfile.TemporaryDirectory(prefix="juraic-cli-test-") as temp:
     root = pathlib.Path(temp)
     for index, (target, extra) in enumerate([(1, 0), (1, 1), (1, 2), (5, 3), (10, 2)]):
         directory = root / str(index)
         directory.mkdir()
-        settings = dict(base, target_chain=target, min_extra_puyos=extra, max_extra_puyos=extra)
+        settings = dict(base, target_chain=target, min_extra_pieces=extra, max_extra_pieces=extra)
         result = run(settings, directory)
         assert result.returncode == 0, result.stderr
         counts = verify(result.stdout, True)
@@ -49,12 +49,18 @@ with tempfile.TemporaryDirectory(prefix="puyo-cli-test-") as temp:
     directory.mkdir()
     result = run(dict(base, beam_width=1, candidates_per_parent=1, restarts=1), directory)
     assert result.returncode in (0, 1)
-    assert "target_chain=19" in result.stdout and "max_extra_puyos=0" in result.stdout
+    assert "target_chain=19" in result.stdout and "max_extra_pieces=0" in result.stdout
+    # Extra pieces: a chain of five with three pieces left over.
+    directory = root / "extra"
+    directory.mkdir()
+    result = run(dict(base, target_chain=5, min_extra_pieces=3, max_extra_pieces=3), directory)
+    assert result.returncode == 0, result.stderr
+    assert verify(result.stdout, True) == {"5-chain/23-cell": 1}
     for index, overrides in enumerate([
-        dict(target_chain=0), dict(target_chain=20), dict(max_extra_puyos=-1),
-        dict(target_chain=19, max_extra_puyos=3),
-        dict(target_chain=18, max_extra_puyos=7),
-        dict(min_extra_puyos=2, max_extra_puyos=1),
+        dict(target_chain=0), dict(target_chain=20), dict(max_extra_pieces=-1),
+        dict(target_chain=19, max_extra_pieces=3),
+        dict(target_chain=18, max_extra_pieces=7),
+        dict(min_extra_pieces=2, max_extra_pieces=1),
     ]):
         directory = root / f"invalid-{index}"
         directory.mkdir()

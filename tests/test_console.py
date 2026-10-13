@@ -6,7 +6,7 @@ import tempfile
 import shutil
 
 helper, executable = map(str, map(pathlib.Path, sys.argv[1:3]))
-with tempfile.TemporaryDirectory(prefix="puyo-console-") as temp:
+with tempfile.TemporaryDirectory(prefix="juraic-console-") as temp:
     report = pathlib.Path(temp) / "report.txt"
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW

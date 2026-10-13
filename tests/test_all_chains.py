@@ -1,7 +1,7 @@
 """Generate and independently verify every supported setting.
 
-Chain lengths 1..19, four and five colours, and for each the smallest, an odd,
-and the largest number of extra puyos (78 - 4 * chain). The independent
+Chain lengths 1..19, three to five colours, and for each the smallest, an odd,
+and the largest number of extra pieces (78 - 4 * chain). The independent
 verifier checks the full definition of a valid board, so this run is what
 confirms that the shortcuts taken inside the C++ search hold for every setting,
 not only for 19 chains.
@@ -20,17 +20,17 @@ config.read(sys.argv[2], encoding="utf-8-sig")
 defaults = {key: int(value) for key, value in config["Generator"].items()}
 per_case = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 results = []
-with tempfile.TemporaryDirectory(prefix="puyo-all-chains-") as temp:
+with tempfile.TemporaryDirectory(prefix="juraic-all-chains-") as temp:
     root = Path(temp)
     for chain in range(1, 20):
         capacity = 78 - 4 * chain
-        for colors in (4, 5):
+        for colors in (3, 4, 5):
             for low, high in sorted({(0, 0), (1, 1), (capacity, capacity), (0, capacity)}):
                 path = root / f"c{chain}-colors{colors}-extra{low}-{high}"
                 path.mkdir()
                 settings = dict(defaults, initial_seed=42, target_chain=chain,
-                                color_count=colors, min_extra_puyos=low,
-                                max_extra_puyos=high, target_success_count=per_case,
+                                color_count=colors, min_extra_pieces=low,
+                                max_extra_pieces=high, target_success_count=per_case,
                                 restarts=max(20000, defaults["restarts"]))
                 source = path / "config.ini"
                 source.write_text("".join(f"{key}={value}\n" for key, value in settings.items()))

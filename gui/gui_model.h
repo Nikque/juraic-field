@@ -1,6 +1,6 @@
 #pragma once
 // Data shared by the GUI, its tests and the result files: settings text,
-// playback frames and the versioned .puyo archive. All game logic comes from
+// playback frames and the versioned .jfchain archive. All game logic comes from
 // the engine (core/ and generator/); nothing is re-implemented for display.
 #include "../generator/generator.h"
 #include <array>
@@ -10,8 +10,8 @@
 #include <stdexcept>
 #include <utility>
 
-namespace puyo_gui {
-using namespace puyo;
+namespace juraic_gui {
+using namespace juraic;
 using Point = std::pair<int, int>; // x from the left 0..5, y from the bottom 0..12
 
 // A plain grid for drawing, editing and files. Unlike the engine's bit planes
@@ -61,8 +61,8 @@ inline std::string configText(const GeneratorConfig& c) {
       << "beam_width = " << c.beamWidth << '\n'
       << "candidates_per_parent = " << c.candidatesPerParent << '\n'
       << "restarts = " << c.restarts << '\n'
-      << "min_extra_puyos = " << c.minExtraPuyos << '\n'
-      << "max_extra_puyos = " << c.maxExtraPuyos << '\n'
+      << "min_extra_pieces = " << c.minExtraPieces << '\n'
+      << "max_extra_pieces = " << c.maxExtraPieces << '\n'
       << "threads = " << c.threads << '\n';
     return o.str();
 }
@@ -84,15 +84,15 @@ inline GeneratorConfig parseInputs(const std::array<std::string, INPUT_COUNT>& t
     c.targetSuccessCount = parsePositiveInt(t[1], "target_success_count");
     c.initialSeed = parseSeed(t[2]);
     c.colorCount = parsePositiveInt(t[3], "color_count");
-    c.minExtraPuyos = orZero(t[4], "min_extra_puyos");
-    c.maxExtraPuyos = orZero(t[5], "max_extra_puyos");
+    c.minExtraPieces = orZero(t[4], "min_extra_pieces");
+    c.maxExtraPieces = orZero(t[5], "max_extra_pieces");
     c.beamWidth = parsePositiveInt(t[6], "beam_width");
     c.candidatesPerParent = parsePositiveInt(t[7], "candidates_per_parent");
     c.restarts = parsePositiveInt(t[8], "restarts");
     c.threads = orZero(t[9], "threads");
     if (c.targetChain < 1 || c.targetChain > 19) throw std::runtime_error("連鎖数は1〜19です。");
-    if (c.colorCount != 4 && c.colorCount != 5) throw std::runtime_error("色数は4または5です。");
-    if (c.minExtraPuyos > c.maxExtraPuyos || c.maxExtraPuyos > 78 - 4 * c.targetChain)
+    if (c.colorCount < 3 || c.colorCount > 5) throw std::runtime_error("色数は3〜5です。");
+    if (c.minExtraPieces > c.maxExtraPieces || c.maxExtraPieces > 78 - 4 * c.targetChain)
         throw std::runtime_error("余剰は 0 ≤ 下限 ≤ 上限 ≤ 78−4×連鎖数 です。");
     if (c.threads > 256) throw std::runtime_error("スレッド数は0（自動）〜256です。");
     return c;
@@ -100,14 +100,14 @@ inline GeneratorConfig parseInputs(const std::array<std::string, INPUT_COUNT>& t
 
 struct Frame {
     Board board;
-    std::vector<Point> marked; // white rings: the puyos that clear first
+    std::vector<Point> marked; // white rings: the pieces that clear first
     std::vector<Point> pair;   // yellow rings: a last pair that fires the chain
     std::string label;
     int chain = 0;
     int score = 0;
 };
 // Frame 0 is the board right before it fires; then, for every wave, the board
-// with the cleared puyos removed (survivors keep their height) and the board
+// with the cleared pieces removed (survivors keep their height) and the board
 // after gravity.
 inline std::vector<Frame> timeline(const Solution& s) {
     const std::string problem = verifySolution(s);
@@ -141,11 +141,11 @@ struct Record {
     uint64_t seed = 0;
     std::filesystem::path path;
 };
-// Versioned, bounded archive. Version 2: board, trigger and last pairs.
-// Version 1 (v0.3.0) also held a build sequence, which is read and ignored.
+// Versioned, bounded archive. Version 2: board, trigger and last pairs. (Files of v0.4.0 and before - another
+// first word, and in v0.3.0 version 1 with a build sequence - are not read any more.)
 inline void saveRecord(const std::filesystem::path& path, const Solution& s, uint64_t seed) {
     std::ofstream o(path, std::ios::binary);
-    o << "PUYO_GUI 2\n" << seed << ' ' << s.targetChain << '\n';
+    o << "JURAIC_FIELD_CHAIN 2\n" << seed << ' ' << s.targetChain << '\n';
     int h[W];
     s.field.heights(h);
     for (int x = 0; x < W; ++x) {
@@ -165,8 +165,8 @@ inline Record loadRecord(const std::filesystem::path& path) {
     int version;
     Record r;
     r.path = path;
-    if (!(in >> magic >> version) || magic != "PUYO_GUI" || (version != 1 && version != 2))
-        throw std::runtime_error("対応する.puyo形式ではありません。");
+    if (!(in >> magic >> version) || magic != "JURAIC_FIELD_CHAIN" || version != 2)
+        throw std::runtime_error("対応する盤面ファイルの形式ではありません。");
     std::string seed;
     in >> seed >> r.solution.targetChain;
     r.seed = parseSeed(seed);
@@ -189,29 +189,12 @@ inline Record loadRecord(const std::filesystem::path& path) {
         point(p);
         r.solution.trigger |= FieldBits::cell(p.first, p.second);
     }
-    if (version == 2) {
-        if (!(in >> r.solution.firePairs) || !r.solution.firePairs || r.solution.firePairs >> PAIR_POSITIONS)
-            throw std::runtime_error("不正な最後の1組です。");
-    } else {
-        int count;
-        if (!(in >> count) || count < 2 || count > 41) throw std::runtime_error("不正な組数です。");
-        for (int i = 0; i < count; ++i) {
-            Point a, b;
-            int colorA, colorB, setupClear;
-            char orientation;
-            std::string controls;
-            point(a);
-            point(b);
-            if (!(in >> colorA >> colorB >> orientation >> setupClear >> std::quoted(controls)) || controls.size() > 200)
-                throw std::runtime_error("不正な構築手順です。");
-        }
-        r.solution.firePairs = firePairsByDefinition(r.solution.field);
-        if (!r.solution.firePairs) throw std::runtime_error("この盤面には、発火できる最後の1組がありません（現在の判定規則）。");
-    }
+    if (!(in >> r.solution.firePairs) || !r.solution.firePairs || r.solution.firePairs >> PAIR_POSITIONS)
+        throw std::runtime_error("不正な最後の1組です。");
     std::string tail;
     if (in >> tail) throw std::runtime_error("結果ファイルに余分なデータがあります。");
     const std::string problem = verifySolution(r.solution);
     if (!problem.empty()) throw std::runtime_error("結果ファイルのエンジン検証に失敗しました: " + problem);
     return r;
 }
-} // namespace puyo_gui
+} // namespace juraic_gui

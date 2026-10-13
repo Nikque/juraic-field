@@ -3,7 +3,7 @@ import pathlib,sys
 root=pathlib.Path(sys.argv[1])
 def read(path):
     lines=path.read_text().splitlines()
-    assert lines[0]=='PUYO_BOARD 1'
+    assert lines[0]=='JURAIC_FIELD_BOARD 1'
     return [list(map(int,row.split())) for row in lines[1:]][::-1]
 def fall(b):
     for x in range(6):
@@ -47,7 +47,7 @@ def simulate(b):
         fall(b)
     return b,chain,score
 for i in range(500):
-    final,chain,score=simulate(read(root/f'{i}.puyoboard'))
+    final,chain,score=simulate(read(root/f'{i}.jfboard'))
     assert final==read(root/f'{i}.final'),i
     assert [chain,score]==list(map(int,(root/f'{i}.stats').read_text().split())),i
 print('PASS independent simulation of 500 boards: specials, walls, row13, chains and scores')

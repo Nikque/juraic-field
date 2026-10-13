@@ -6,21 +6,21 @@
 // Holes inside a column are representable, so the same type serves the
 // generator (compact columns) and the editor / game (floating cells).
 //
-// Rules implemented here (Puyo Puyo Tsu):
+// Rules implemented here (the Tsu rules of the real game, the game this program follows; the README names it):
 //  - only the twelve visible rows connect and clear; the 13th row never does,
 //    but it falls when the cells below it disappear;
-//  - a wave clears every group of four or more same-coloured normal puyos,
-//    together with the garbage puyos touching them.
+//  - a wave clears every group of four or more same-coloured normal pieces,
+//    together with the garbage pieces touching them.
 #include "field_bits.h"
 #include <array>
 #include <cstring>
 #if defined(_MSC_VER)
 #include <intrin.h>
-#elif PUYO_SSE
+#elif JURAIC_SSE
 #include <cpuid.h>
 #endif
 
-namespace puyo {
+namespace juraic {
 
 using Cell = uint8_t;
 constexpr Cell EMPTY = 0, GARBAGE = 6;
@@ -29,7 +29,7 @@ constexpr int MAX_COLORS = 5;
 // BMI2 PEXT/PDEP is fast on Intel since Haswell and AMD since Zen 3, and very
 // slow (microcoded) on AMD Zen 1 / Zen 2. Decided once at start-up.
 namespace detail {
-#if PUYO_SSE
+#if JURAIC_SSE
 inline void cpuid(unsigned leaf, unsigned r[4]) {
 #if defined(_MSC_VER)
     __cpuidex(reinterpret_cast<int*>(r), int(leaf), 0);
@@ -61,6 +61,17 @@ inline bool fastPext = false;
 inline uint64_t pext64(uint64_t, uint64_t) { return 0; }
 inline uint64_t pdep64(uint64_t, uint64_t) { return 0; }
 #endif
+// The number of bits set. A processor on which PEXT is fast has an instruction for it, which is
+// then used as it is. (The library's own function asks on every call whether the processor has
+// one and carries a way without it: in the middle of the AI's search that is most of its code.)
+#if defined(_MSC_VER) && JURAIC_SSE
+inline int countBitsFast(uint64_t v) { return int(__popcnt64(v)); } // only where fastPext is true
+__declspec(noinline) inline int countBitsAnywhere(uint64_t v) { return std::popcount(v); }
+inline int countBits(uint64_t v) { return fastPext ? countBitsFast(v) : countBitsAnywhere(v); }
+#else
+inline int countBitsFast(uint64_t v) { return std::popcount(v); }
+inline int countBits(uint64_t v) { return std::popcount(v); }
+#endif
 // Portable PEXT for one 16-bit column.
 inline uint16_t compactColumn(unsigned value, unsigned keep) {
     unsigned out = 0, bit = 1;
@@ -70,7 +81,7 @@ inline uint16_t compactColumn(unsigned value, unsigned keep) {
 }
 } // namespace detail
 
-// Same-colour adjacency of normal puyos inside the twelve visible rows.
+// Same-colour adjacency of normal pieces inside the twelve visible rows.
 struct Links {
     FieldBits u, d, l, r; // the cell has a same-coloured neighbour above / below / left / right
 };
@@ -97,12 +108,15 @@ struct BitField {
             plane[i] = code >> i & 1 ? plane[i] | bit : plane[i].without(bit);
     }
     bool empty() const { return occupied().empty(); }
-    int count() const { return occupied().count(); }
+    int count() const {
+        const FieldBits occ = occupied();
+        return detail::countBits(occ.low()) + detail::countBits(occ.high());
+    }
     // Number of cells in each column; equals the height when there are no holes.
     void heights(int h[W]) const {
-        uint16_t c[W];
-        occupied().columns(c);
-        for (int x = 0; x < W; ++x) h[x] = std::popcount(c[x]);
+        const FieldBits occ = occupied();
+        const uint64_t half[2] = {occ.low(), occ.high()};
+        for (int x = 0; x < W; ++x) h[x] = detail::countBits(uint16_t(half[x >> 2] >> ((x & 3) * 16)));
     }
     bool operator==(const BitField& o) const {
         return plane[0] == o.plane[0] && plane[1] == o.plane[1] && plane[2] == o.plane[2];
@@ -135,13 +149,6 @@ struct BitField {
         const Seeds s = seeds(links());
         return (s.three | s.pairU | s.pairR).any();
     }
-    // All normal puyos that belong to a group of four or more.
-    FieldBits clearMask() const {
-        const Links k = links();
-        const Seeds s = seeds(k);
-        const FieldBits seed = s.three | s.pairU | s.pairU.up() | s.pairR | s.pairR.right();
-        return seed | (seed & k.u).up() | (seed & k.d).down() | (seed & k.r).right() | (seed & k.l).left();
-    }
     // The group containing `start`, following the links.
     static FieldBits group(FieldBits start, const Links& k) {
         for (FieldBits g = start;;) {
@@ -150,7 +157,9 @@ struct BitField {
             g = next;
         }
     }
-    // Garbage puyos (visible rows only) touching the given cleared cells.
+    // The number of cells of a set (as FieldBits::count; see detail::countBits).
+    static int cells(FieldBits b) { return detail::countBits(b.low()) + detail::countBits(b.high()); }
+    // Garbage pieces (visible rows only) touching the given cleared cells.
     FieldBits garbageNextTo(FieldBits cleared) const {
         return garbage() & MASK_12 & (cleared.up() | cleared.down() | cleared.left() | cleared.right());
     }
@@ -159,29 +168,31 @@ struct BitField {
         for (auto& p : plane) p = p.without(cells);
     }
     // Gravity: every column is compacted towards the floor (holes disappear).
-    void drop() {
+    // False when no cell had to move.
+    bool drop() {
         const FieldBits occ = occupied();
         const uint64_t keep[2] = {occ.low(), occ.high()};
-        uint16_t c[W];
-        occ.columns(c);
-        uint16_t full[W];
-        for (int x = 0; x < W; ++x) full[x] = uint16_t((1u << std::popcount(c[x])) - 1);
-        const FieldBits target = FieldBits::fromColumns(full);
-        if (target == occ) return;
+        // Where the cells of each column come to rest: as many cells as it holds, from the floor up
+        // (FieldBits::settled: all columns at once, in the register).
+        const FieldBits rest = occ.settled();
+        if (rest == occ) return false;
         if (detail::fastPext) {
-            const uint64_t to[2] = {target.low(), target.high()};
+            const uint64_t to[2] = {rest.low(), rest.high()};
             for (auto& p : plane)
                 p = FieldBits::fromHalves(detail::pdep64(detail::pext64(p.low(), keep[0]), to[0]),
                                           detail::pdep64(detail::pext64(p.high(), keep[1]), to[1]));
         } else {
+            uint16_t c[W];
+            occ.columns(c);
             for (auto& p : plane) {
                 uint16_t v[W];
                 p.columns(v);
                 for (int x = 0; x < W; ++x)
-                    if (c[x] != full[x]) v[x] = detail::compactColumn(v[x], c[x]);
+                    if (c[x] & (c[x] + 1)) v[x] = detail::compactColumn(v[x], c[x]); // (a column with a hole)
                 p = FieldBits::fromColumns(v);
             }
         }
+        return true;
     }
     // Opens `count` empty cells at row `slot` of column x and fills them.
     void insert(int x, int slot, int count, Cell code) {
@@ -221,9 +232,9 @@ struct KeyHash {
 // ---- One wave and a whole chain ------------------------------------------
 
 struct Wave {
-    FieldBits cleared; // normal puyos that disappeared
-    FieldBits garbage; // garbage puyos that disappeared with them
-    int puyos = 0;     // number of normal puyos cleared
+    FieldBits cleared; // normal pieces that disappeared
+    FieldBits garbage; // garbage pieces that disappeared with them
+    int pieces = 0;     // number of normal pieces cleared
     int colors = 0;    // number of distinct colours cleared
     int groups = 0;    // number of groups cleared
     int groupBonus = 0;
@@ -237,11 +248,11 @@ constexpr int groupBonus(int size) { return size >= 11 ? 10 : size >= 5 ? size -
 inline int waveScore(const Wave& w, int chain) {
     const int c = chain < 1 ? 1 : chain > 19 ? 19 : chain;
     const int bonus = CHAIN_BONUS[c] + COLOR_BONUS[w.colors] + w.groupBonus;
-    return 10 * w.puyos * (bonus < 1 ? 1 : bonus);
+    return 10 * w.pieces * (bonus < 1 ? 1 : bonus);
 }
 
 // Finds what the next wave clears without changing the field.
-// With details=false only `cleared`, `garbage` and `puyos` are filled in.
+// With details=false only `cleared`, `garbage` and `pieces` are filled in.
 inline bool findWave(const BitField& f, Wave& w, bool details = true) {
     const Links k = f.links();
     const BitField::Seeds s = BitField::seeds(k);
@@ -250,12 +261,25 @@ inline bool findWave(const BitField& f, Wave& w, bool details = true) {
     w = {};
     w.cleared = seed | (seed & k.u).up() | (seed & k.d).down() | (seed & k.r).right() | (seed & k.l).left();
     w.garbage = f.garbageNextTo(w.cleared);
-    w.puyos = w.cleared.count();
+    w.pieces = BitField::cells(w.cleared);
     if (!details) return true;
+    if (w.pieces < 8) {
+        // (fewer than eight pieces in all are one group of one colour)
+        w.colors = w.groups = 1;
+        w.groupBonus = groupBonus(w.pieces);
+        return true;
+    }
     for (Cell color = 1; color <= MAX_COLORS; ++color) {
         FieldBits rest = w.cleared & f.colorMask(color);
         if (rest.empty()) continue;
         ++w.colors;
+        // (fewer than eight cells of a colour are one group: two groups of four or more have eight)
+        const int cells = rest.count();
+        if (cells < 8) {
+            ++w.groups;
+            w.groupBonus += groupBonus(cells);
+            continue;
+        }
         while (rest.any()) {
             uint16_t c[W];
             rest.columns(c);
@@ -288,4 +312,4 @@ inline ChainResult runChain(BitField& f) {
     return r;
 }
 
-} // namespace puyo
+} // namespace juraic

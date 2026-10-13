@@ -32,11 +32,12 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     ok = ok && GetConsoleOutputCP() == 932;
     if (argc >= 4) {
-        // Run the shipped executable or launcher in this CP932 console.
+        // Run the shipped executable or launcher in this CP932 console. (The launcher by an explicit
+        // path: with NoDefaultCurrentDirectoryInExePath set, cmd does not look into the current folder.)
         wchar_t comspec[32768]{};
         GetEnvironmentVariableW(L"COMSPEC", comspec, 32768);
         const bool launcher = std::wstring(argv[3]) == L"cmd";
-        std::wstring command = launcher ? std::wstring(L"\"") + comspec + L"\" /d /c \"call run.cmd < nul\"" :
+        std::wstring command = launcher ? std::wstring(L"\"") + comspec + L"\" /d /c \"call .\\run.cmd < nul\"" :
             std::wstring(L"\"") + argv[2] + L"\" config.ini";
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);

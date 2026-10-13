@@ -9,7 +9,7 @@
 #include <random>
 #include <set>
 
-using namespace puyo;
+using namespace juraic;
 
 static void check(bool ok, const char* message) {
     if (!ok) throw std::runtime_error(message);
@@ -121,7 +121,7 @@ static void testWaves(std::mt19937_64& rng) {
             if (!more) break;
             check(cells(w.cleared) == expected.cleared, "cleared cells");
             check(cells(w.garbage) == expected.garbage, "garbage cells");
-            check(w.puyos == int(expected.cleared.size()) && w.colors == expected.colors &&
+            check(w.pieces == int(expected.cleared.size()) && w.colors == expected.colors &&
                   w.groups == expected.groups && w.groupBonus == expected.bonus, "wave details");
             check(sameCells(f, g), "board after gravity");
         }
@@ -212,7 +212,7 @@ static void testPredecessors(std::mt19937_64& rng) {
         for (const auto& p : found) {
             BitField g = p.field;
             Wave w;
-            check(stepWave(g, w) && w.groups == 1 && w.puyos == 4 && w.cleared == p.trigger && g == f, "one step back");
+            check(stepWave(g, w) && w.groups == 1 && w.pieces == 4 && w.cleared == p.trigger && g == f, "one step back");
         }
     }
     check(withTrigger > 100, "predecessor test must cover boards with a trigger");
@@ -240,7 +240,7 @@ static void testFirePairs(std::mt19937_64& rng) {
         const int colors = i % 2 ? 4 : 5;
         BitField f;
         FieldBits trigger;
-        // A residual board with some extra puyos, then random steps back.
+        // A residual board with some extra pieces, then random steps back.
         const int extra = int(rng() % 30);
         for (int n = 0; n < extra; ++n) {
             int h[W];
@@ -299,7 +299,9 @@ static void testReach(std::mt19937_64& rng) {
     check(pairs({0, 12, 5, 11, 0, 0}) >> 7 & 1, "floor kick on one side, hop over the spawn column");
     check(pairs({12, 3, 5, 11, 0, 0}) >> 6 & 1, "floor kick on one side, hop over the spawn column and one more");
     check(pairs({0, 12, 5, 3, 11, 0}) >> 7 & 1, "floor kick two columns away, hop back over two columns");
-    check(!(pairs({12, 3, 5, 3, 11, 0}) >> 6 & 1), "no hop over three columns");
+    check(pairs({12, 3, 5, 3, 11, 0}) >> 6 & 1, "floor kick three columns away, hop back over three columns");
+    check(pairs({12, 3, 5, 3, 3, 11}) >> 6 & 1, "floor kick at the far wall, hop back over four columns");
+    check(!(pairs({12, 3, 5, 3, 3, 10}) >> 6 & 1), "no hop without a lift");
     check(!(pairs({0, 12, 5, 10, 0, 0}) >> 7 & 1), "a column 10 high gives no lift");
     check(!(pairs({0, 12, 5, 12, 11, 0}) >> 7 & 1) == false, "quick turn between two walls");
     check(!(pairs({0, 12, 5, 3, 12, 0}) >> 7 & 1), "a wall on the other side cannot be used without a lift");
@@ -356,21 +358,21 @@ static void testGeneration() {
     // Whole searches for several settings; every result must pass the direct check.
     int found = 0;
     for (int chain : {1, 2, 5, 10, 19})
-        for (int colors : {4, 5})
+        for (int colors : {3, 4, 5})
             for (int extra : {0, 1, 78 - 4 * chain}) {
                 GeneratorConfig config;
                 config.colorCount = colors;
                 config.beamWidth = 48;
                 config.candidatesPerParent = 2;
                 config.targetChain = chain;
-                config.minExtraPuyos = config.maxExtraPuyos = extra;
+                config.minExtraPieces = config.maxExtraPieces = extra;
                 for (int attempt = 1; attempt <= 300; ++attempt) {
                     Rng rng(7, uint64_t(attempt));
                     const auto s = generateOne(config, rng);
                     if (!s) continue;
                     const std::string problem = verifySolution(*s);
                     check(problem.empty(), problem.c_str());
-                    check(s->field.count() == 4 * chain + extra, "puyo count");
+                    check(s->field.count() == 4 * chain + extra, "piece count");
                     Rng again(7, uint64_t(attempt));
                     const auto t = generateOne(config, again);
                     check(t && t->field == s->field && t->firePairs == s->firePairs, "same seed, same board");
@@ -378,7 +380,7 @@ static void testGeneration() {
                     break;
                 }
             }
-    check(found == 30, "every setting must produce a board");
+    check(found == 45, "every setting must produce a board");
 }
 
 int main() {
@@ -401,7 +403,7 @@ int main() {
         testRng();
         testGeneration();
         std::cout << "All core tests passed"
-#if PUYO_SSE
+#if JURAIC_SSE
                   << " (SSE field bits).\n";
 #else
                   << " (portable field bits).\n";

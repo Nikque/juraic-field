@@ -1,8 +1,8 @@
-seed=101, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=3, max_extra_puyos=0, min_extra_puyos=0, target_chain=19, threads=2
+seed=101, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=3, max_extra_pieces=0, min_extra_pieces=0, target_chain=19, threads=2
 再試行 1/100000 | 段階 0/19 | 生成 0/3
 seed=101
 chains=19
-puyos=76, extra_puyos=0
+pieces=76, extra_pieces=0
 field (top row first; columns left to right):
 . R Y Y G B 
 . B Y B B B 
@@ -24,7 +24,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 1/3
 seed=101
 chains=19
-puyos=76, extra_puyos=0
+pieces=76, extra_pieces=0
 field (top row first; columns left to right):
 G R . B Y G 
 B Y . R Y R 
@@ -46,7 +46,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 2/3
 seed=101
 chains=19
-puyos=76, extra_puyos=0
+pieces=76, extra_pieces=0
 field (top row first; columns left to right):
 G B . . G G 
 G G Y B R R 
@@ -68,11 +68,11 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 3/3
 目標数 3 件のユニークな19連鎖盤面を生成しました。
 試行数: 6, 重複スキップ数: 0
-seed=102, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_puyos=1, min_extra_puyos=1, target_chain=19, threads=2
+seed=102, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_pieces=1, min_extra_pieces=1, target_chain=19, threads=2
 再試行 1/100000 | 段階 0/19 | 生成 0/2
 seed=102
 chains=19
-puyos=77, extra_puyos=1
+pieces=77, extra_pieces=1
 field (top row first; columns left to right):
 . B Y G R R 
 G G Y R R G 
@@ -94,7 +94,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 1/2
 seed=102
 chains=19
-puyos=77, extra_puyos=1
+pieces=77, extra_pieces=1
 field (top row first; columns left to right):
 G B . G R R 
 B R B G R G 
@@ -116,11 +116,11 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 2/2
 目標数 2 件のユニークな19連鎖盤面を生成しました。
 試行数: 2, 重複スキップ数: 0
-seed=103, colors=5, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_puyos=2, min_extra_puyos=2, target_chain=19, threads=2
+seed=103, colors=5, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_pieces=2, min_extra_pieces=2, target_chain=19, threads=2
 再試行 1/100000 | 段階 0/19 | 生成 0/2
 seed=103
 chains=19
-puyos=78, extra_puyos=2
+pieces=78, extra_pieces=2
 field (top row first; columns left to right):
 Y R Y P G Y 
 Y G G G G Y 
@@ -142,7 +142,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 1/2
 seed=103
 chains=19
-puyos=78, extra_puyos=2
+pieces=78, extra_pieces=2
 field (top row first; columns left to right):
 R Y P Y Y R 
 Y G Y P R G 
@@ -164,11 +164,11 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 2/2
 目標数 2 件のユニークな19連鎖盤面を生成しました。
 試行数: 8, 重複スキップ数: 0
-seed=104, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=3, max_extra_puyos=6, min_extra_puyos=0, target_chain=18, threads=2
+seed=104, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=3, max_extra_pieces=6, min_extra_pieces=0, target_chain=18, threads=2
 再試行 1/100000 | 段階 0/18 | 生成 0/3
 seed=104
 chains=18
-puyos=73, extra_puyos=1
+pieces=73, extra_pieces=1
 field (top row first; columns left to right):
 R . . . . B 
 R G . Y R G 
@@ -190,7 +190,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 1/3
 seed=104
 chains=18
-puyos=73, extra_puyos=1
+pieces=73, extra_pieces=1
 field (top row first; columns left to right):
 . Y . . Y B 
 R B R . R Y 
@@ -212,7 +212,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 2/3
 seed=104
 chains=18
-puyos=73, extra_puyos=1
+pieces=73, extra_pieces=1
 field (top row first; columns left to right):
 B B . . . . 
 B R Y R . R 
@@ -234,11 +234,11 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 3/3
 目標数 3 件のユニークな18連鎖盤面を生成しました。
 試行数: 6, 重複スキップ数: 0
-seed=105, colors=5, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_puyos=38, min_extra_puyos=0, target_chain=10, threads=2
+seed=105, colors=5, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_pieces=38, min_extra_pieces=0, target_chain=10, threads=2
 再試行 1/100000 | 段階 0/10 | 生成 0/2
 seed=105
 chains=10
-puyos=64, extra_puyos=24
+pieces=64, extra_pieces=24
 field (top row first; columns left to right):
 . R . . . . 
 . P . . Y R 
@@ -260,7 +260,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 1/2
 seed=105
 chains=10
-puyos=67, extra_puyos=27
+pieces=67, extra_pieces=27
 field (top row first; columns left to right):
 . . . R G . 
 . P . Y P P 
@@ -282,11 +282,11 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 2/2
 目標数 2 件のユニークな10連鎖盤面を生成しました。
 試行数: 2, 重複スキップ数: 0
-seed=106, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=3, max_extra_puyos=74, min_extra_puyos=0, target_chain=1, threads=2
+seed=106, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=3, max_extra_pieces=74, min_extra_pieces=0, target_chain=1, threads=2
 再試行 1/100000 | 段階 0/1 | 生成 0/3
 seed=106
 chains=1
-puyos=7, extra_puyos=3
+pieces=7, extra_pieces=3
 field (top row first; columns left to right):
 . . . . . . 
 . . . . . . 
@@ -308,7 +308,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 1/3
 seed=106
 chains=1
-puyos=71, extra_puyos=67
+pieces=71, extra_pieces=67
 field (top row first; columns left to right):
 . . Y . . B 
 . . Y Y . G 
@@ -330,7 +330,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 2/3
 seed=106
 chains=1
-puyos=48, extra_puyos=44
+pieces=48, extra_pieces=44
 field (top row first; columns left to right):
 . . . . . . 
 . . . . . . 
@@ -352,11 +352,11 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 3/3
 目標数 3 件のユニークな1連鎖盤面を生成しました。
 試行数: 4, 重複スキップ数: 0
-seed=107, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_puyos=3, min_extra_puyos=3, target_chain=5, threads=2
+seed=107, colors=4, beam_width=48, restarts=100000, candidates_per_parent=2, target_success_count=2, max_extra_pieces=3, min_extra_pieces=3, target_chain=5, threads=2
 再試行 1/100000 | 段階 0/5 | 生成 0/2
 seed=107
 chains=5
-puyos=23, extra_puyos=3
+pieces=23, extra_pieces=3
 field (top row first; columns left to right):
 . . . . . . 
 . . . . . . 
@@ -378,7 +378,7 @@ URLを19chain_urls.txtに追記しました。
 今回のユニークな生成数: 1/2
 seed=107
 chains=5
-puyos=23, extra_puyos=3
+pieces=23, extra_pieces=3
 field (top row first; columns left to right):
 . . . . . . 
 . . B . . . 

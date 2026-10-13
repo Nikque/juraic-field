@@ -5,10 +5,10 @@
 // A step takes a board `post` and inserts a group of four cells of one colour
 // into its columns (the cells above the insertion move up), giving `pre`.
 // The step is accepted only if, on `pre`,
-//   (i)  no group of four or more exists among the old puyos, and
-//   (ii) no old puyo next to the inserted cells has their colour.
+//   (i)  no group of four or more exists among the old pieces, and
+//   (ii) no old piece next to the inserted cells has their colour.
 // Then the inserted group is the only thing that clears on `pre`, it is
-// exactly four puyos, and after gravity the board is exactly `post` again.
+// exactly four pieces, and after gravity the board is exactly `post` again.
 // By induction a board made by n steps from a stable board R clears in exactly
 // n waves of one group of four each, starts with the group inserted last, and
 // ends as R. These facts hold for every chain length, extra count and colour
@@ -20,7 +20,7 @@
 #include <set>
 #include <unordered_set>
 
-namespace puyo {
+namespace juraic {
 namespace {
 
 // One way to insert a group of four: the same for every board.
@@ -112,9 +112,9 @@ const std::vector<Placement>& placements() {
 // Which placements can be valid at all, found with a few word operations
 // instead of a scan of the whole table.
 //  - belowCell[x][y]: placements that insert into column x at row y or lower,
-//    i.e. that move the puyo at (x, y).
+//    i.e. that move the piece at (x, y).
 //  - fits[x][h]: placements that are possible in column x when it holds h
-//    puyos (the insertion starts at or below the top and the column does not
+//    pieces (the insertion starts at or below the top and the column does not
 //    grow past the 13th row), or that do not use column x.
 struct PlacementIndex {
     static constexpr int WORDS = 16; // 64 * 16 = 1024 placements at most
@@ -182,7 +182,7 @@ inline size_t candidatePlacements(const Node& post, uint16_t* out, const int* gu
     post.field.occupied().columns(columns);
     post.trigger.columns(triggerColumns);
     // The group that clears first on `post` must not survive on `pre`: at
-    // least one of its puyos has to move, so the insertion must be below one.
+    // least one of its pieces has to move, so the insertion must be below one.
     PlacementIndex::Set candidates{};
     bool hasTrigger = false;
     for (int x = 0; x < W; ++x)
@@ -202,7 +202,7 @@ inline size_t candidatePlacements(const Node& post, uint16_t* out, const int* gu
         for (uint64_t rest = candidates[w]; rest; rest &= rest - 1) {
             const size_t i = size_t(w) * 64 + size_t(std::countr_zero(rest));
             if (guideHeights) {
-                // At most one old puyo above the new group in one of its columns.
+                // At most one old piece above the new group in one of its columns.
                 const Placement& p = table[i];
                 bool nearTop = false;
                 for (int x = 0; x < W; ++x) nearTop |= p.slot[x] >= 0 && guideHeights[x] - p.slot[x] <= 1;
@@ -281,7 +281,7 @@ inline Node makeChild(const Node& post, Choice c) {
     return {fillGap(openGap(post.field, p), p, c.color), p.ins};
 }
 
-// The board the chain ends with: `extra` puyos, nothing clears, and the cell
+// The board the chain ends with: `extra` pieces, nothing clears, and the cell
 // where pairs appear (third column, twelfth row) is free.
 bool makeResidual(BitField& field, int extra, int colorCount, Rng& rng) {
     int h[W]{};
@@ -304,23 +304,23 @@ bool makeResidual(BitField& field, int extra, int colorCount, Rng& rng) {
 // Guidance near the end of the search.
 //
 // On a nearly full board the last pair has very little room: the trigger must
-// have a puyo among the two topmost of a column the pair can still reach, and
-// the last insertion must also move a puyo of the previous trigger. That only
+// have a piece among the two topmost of a column the pair can still reach, and
+// the last insertion must also move a piece of the previous trigger. That only
 // works when the previous triggers were themselves close to the surface. So
 // during the last GUIDED_STEPS steps before the final one, an insertion is
-// used only if at most one old puyo ends up above the new group in one of its
+// used only if at most one old piece ends up above the new group in one of its
 // columns. Every board found is still checked by the full definition; the
 // guidance changes which boards are found, not what counts as valid.
-// Measured for 19 chains / 76 puyos: 24% -> 52% of the attempts succeed.
+// Measured for 19 chains / 76 pieces: 24% -> 52% of the attempts succeed.
 //
 // The guidance narrows the variety of boards, so it is used only where the
-// rules leave no choice anyway. With 72 or more puyos a trigger puyo of a valid
+// rules leave no choice anyway. With 72 or more pieces a trigger piece of a valid
 // last pair must sit at row 6 or higher in the third column and higher still
-// elsewhere (76 puyos: row 10 in the third column, row 12 in the second and
-// fourth, nowhere else). With 68 puyos (17 chains without extras) it may be
+// elsewhere (76 pieces: row 10 in the third column, row 12 in the second and
+// fourth, nowhere else). With 68 pieces (17 chains without extras) it may be
 // almost anywhere, so smaller boards are searched without guidance.
 constexpr int GUIDED_STEPS = 6;
-constexpr int GUIDE_MIN_PUYOS = 72;
+constexpr int GUIDE_MIN_PIECES = 72;
 
 bool stopped(const std::atomic_bool* stop) { return stop && stop->load(std::memory_order_relaxed); }
 
@@ -347,8 +347,8 @@ FieldBits pairCells(const BitField& field, int id) {
 
 unsigned firePairs(const BitField& field, FieldBits trigger) {
     // On a generated board the only group of four or more is the trigger, and
-    // taking the topmost puyos away moves nothing. So "nothing clears without
-    // the pair" is the same as "the pair holds a trigger puyo".
+    // taking the topmost pieces away moves nothing. So "nothing clears without
+    // the pair" is the same as "the pair holds a trigger piece".
     int h[W];
     field.heights(h);
     uint16_t t[W];
@@ -369,34 +369,19 @@ unsigned firePairs(const BitField& field, FieldBits trigger) {
     return result;
 }
 
-unsigned firePairsByDefinition(const BitField& field) {
-    unsigned result = 0;
-    for (int id = 0; id < PAIR_POSITIONS; ++id) {
-        const FieldBits pair = pairCells(field, id);
-        if (pair.count() != 2) continue;
-        BitField before = field;
-        before.erase(pair);
-        if (before.hasClear() || before.get(SPAWN_X, CLEAR_H - 1)) continue;
-        int h[W];
-        before.heights(h);
-        if (reachablePairs(h) >> id & 1) result |= 1u << id;
-    }
-    return result;
-}
-
 std::string verifySolution(const Solution& s) {
     const FieldBits occupied = s.field.occupied();
     uint16_t c[W];
     occupied.columns(c);
     for (int x = 0; x < W; ++x)
-        if (c[x] & (c[x] + 1) || c[x] > COLUMN_13) return "column with a hole or a 14th-row puyo";
+        if (c[x] & (c[x] + 1) || c[x] > COLUMN_13) return "column with a hole or a 14th-row piece";
     if (!(s.field.normal() == occupied)) return "not a normal colour";
     if (s.trigger.count() != 4) return "trigger is not four cells";
     if (!s.firePairs || s.firePairs >> PAIR_POSITIONS) return "no last pair";
     for (int id = 0; id < PAIR_POSITIONS; ++id) {
         if (!(s.firePairs >> id & 1)) continue;
         const FieldBits pair = pairCells(s.field, id);
-        if (pair.count() != 2) return "last pair is not two puyos";
+        if (pair.count() != 2) return "last pair is not two pieces";
         BitField before = s.field;
         before.erase(pair);
         if (before.hasClear()) return "the board clears before the last pair";
@@ -408,7 +393,7 @@ std::string verifySolution(const Solution& s) {
     BitField f = s.field;
     int waves = 0;
     for (Wave w; stepWave(f, w); ++waves) {
-        if (w.groups != 1 || w.puyos != 4 || w.garbage.any()) return "a wave is not a single group of four";
+        if (w.groups != 1 || w.pieces != 4 || w.garbage.any()) return "a wave is not a single group of four";
         if (waves == 0 && !(w.cleared == s.trigger)) return "the first wave is not the trigger";
     }
     if (waves != s.targetChain) return "wrong number of waves";
@@ -421,12 +406,12 @@ std::optional<Solution> generateOne(const GeneratorConfig& config, Rng& rng, con
     const int colors = config.colorCount, target = config.targetChain;
     const size_t perParent = size_t(config.candidatesPerParent), beamWidth = size_t(config.beamWidth);
     std::vector<Node> beam(1), next;
-    const int extra = config.maxExtraPuyos
-        ? config.minExtraPuyos + int(rng.below(uint64_t(config.maxExtraPuyos - config.minExtraPuyos + 1)))
+    const int extra = config.maxExtraPieces
+        ? config.minExtraPieces + int(rng.below(uint64_t(config.maxExtraPieces - config.minExtraPieces + 1)))
         : 0;
     if (!makeResidual(beam[0].field, extra, colors, rng)) return std::nullopt;
 
-    const bool guided = extra + 4 * target >= GUIDE_MIN_PUYOS;
+    const bool guided = extra + 4 * target >= GUIDE_MIN_PIECES;
     std::vector<Choice> choices;
     std::unordered_set<BitField::Key, KeyHash> seen;
     for (int depth = 1; depth <= target; ++depth) {
@@ -477,4 +462,4 @@ std::optional<Solution> generateOne(const GeneratorConfig& config, Rng& rng, con
     return std::nullopt;
 }
 
-} // namespace puyo
+} // namespace juraic

@@ -6,8 +6,8 @@
     "candidates_per_parent": 2,
     "restarts": 1000,
     "target_success_count": 100,
-    "max_extra_puyos": 0,
-    "min_extra_puyos": 0,
+    "max_extra_pieces": 0,
+    "min_extra_pieces": 0,
     "target_chain": 19
   },
   "seconds": 36.28882750001503,

@@ -1,6 +1,7 @@
 #pragma once
 // The v0.3.0 engine (cells in std::vector columns, flood fill, route BFS),
-// kept unchanged as a reference for the tests. Not part of the product.
+// kept as a reference for the tests. Not part of the product. Unchanged but for
+// names: the word for the pieces in its identifiers and comments.
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -51,7 +52,7 @@ constexpr int MIN_TARGET_CHAIN = 1;
 constexpr int MAX_TARGET_CHAIN = 19;
 constexpr int DEFAULT_TARGET_CHAIN = MAX_TARGET_CHAIN;
 
-// 色: 0=空, 1..4/5=通常色。おじゃまぷよは使わない。
+// 色: 0=空, 1..4/5=通常色。おじゃまは使わない。
 using Cell = uint8_t;
 using Point = std::pair<int, int>; // x=左から0..5, y=下から0..12
 using Shape = std::vector<Point>;
@@ -271,7 +272,7 @@ static std::vector<Candidate> predecessors(const Field &post, const std::vector<
         }
         const int shapeW = maxX + 1;
 
-        // 各相対列に入るテトロミノぷよの相対y座標。
+        // 各相対列に入るテトロミノの相対y座標。
         std::array<std::vector<int>, W> groupYs{};
         for (const Point p : shape)
             groupYs[p.first].push_back(p.second);
@@ -409,13 +410,13 @@ static bool legalTrigger(
     const Field& field,
     const std::array<Point, 4>& trigger)
 {
-    // 少なくとも1個の発火ぷよについて、上にあるぷよが1個以下であること。
-    bool hasReachableTriggerPuyo = false;
+    // 少なくとも1個の発火点のピースについて、上にあるピースが1個以下であること。
+    bool hasReachableTriggerPiece = false;
     for (const Point p : trigger) {
         const int above = static_cast<int>(field.col[p.first].size()) - p.second - 1;
-        if (above <= 1) hasReachableTriggerPuyo = true;
+        if (above <= 1) hasReachableTriggerPiece = true;
     }
-    if (!hasReachableTriggerPuyo) return false;
+    if (!hasReachableTriggerPiece) return false;
 
 
     return true;
@@ -431,7 +432,7 @@ static bool dominoTouchesTrigger(
 // A deliberately conservative, discrete Tsu movement model. Axis starts at
 // (column 3,row 12), child above; the axis never enters row 14. Normal turns,
 // side/floor kicks and quick turns are searched, without teleporting over walls.
-// We never store a row-14 puyo: solutions need no persistent row-14 obstruction.
+// We never store a row-14 piece: solutions need no persistent row-14 obstruction.
 struct FallingPair {
     int x, y, r;
 };
@@ -538,7 +539,7 @@ static bool findPlacementRoute(const Field &lower, Domino &d) {
 }
 
 // An odd target board cannot be built by pairs without a prior odd clear.
-// Six incoming puyos (AA, AA, AB) bridge two separated vertical AA groups,
+// Six incoming pieces (AA, AA, AB) bridge two separated vertical AA groups,
 // clearing exactly five A's and leaving B at the required bottom cell.
 // Every placement and the resulting residual field are verified.
 static bool makeOddPreamble(const Field &residual, std::vector<Domino> &sequence) {
@@ -592,10 +593,10 @@ static bool peelToBuildSequence(const Field &field, const std::array<Point, 4> &
         sequence.clear();
         return true;
     }
-    int puyos = 0;
+    int pieces = 0;
     for (const auto &c : field.col)
-        puyos += int(c.size());
-    if (puyos == 1)
+        pieces += int(c.size());
+    if (pieces == 1)
         return makeOddPreamble(field, sequence);
     if (--nodeBudget < 0)
         return false;
@@ -785,15 +786,15 @@ static std::optional<Solution> generateOne(
     const std::vector<Shape>& shapes,
     int attempt,
     int totalAttempts,
-    int maxExtraPuyos = 0,
+    int maxExtraPieces = 0,
     int targetChain = DEFAULT_TARGET_CHAIN,
-    int minExtraPuyos = 0)
+    int minExtraPieces = 0)
 {
     std::vector<Field> beam(1);
-    const int extraPuyos=maxExtraPuyos ? minExtraPuyos+int(rng()%(maxExtraPuyos-minExtraPuyos+1)) : 0;
+    const int extraPieces=maxExtraPieces ? minExtraPieces+int(rng()%(maxExtraPieces-minExtraPieces+1)) : 0;
     // Seed the inverse search with a stable, non-dead residual board. This
     // preserves the exact target number of waves for any permitted extra count.
-    for (int i=0;i<extraPuyos;++i) {
+    for (int i=0;i<extraPieces;++i) {
         int x;
         do {x=int(rng()%W);} while (int(beam[0].col[x].size()) >= (x==2?11:H));
         int startColor=int(rng()%colorCount);
@@ -951,8 +952,8 @@ static void appendSuccessfulUrl(const std::string& url,
 static void printSolution(const Solution& solution, uint64_t seed) {
     std::cout << "seed=" << seed << "\n";
     std::cout << "chains=" << chainCount(solution.field) << "\n";
-    int puyos=0;for (const auto& c:solution.field.col) puyos+=int(c.size());
-    std::cout << "puyos=" << puyos << ", extra_puyos=" << puyos-4*solution.targetChain << "\n";
+    int pieces=0;for (const auto& c:solution.field.col) pieces+=int(c.size());
+    std::cout << "pieces=" << pieces << ", extra_pieces=" << pieces-4*solution.targetChain << "\n";
     std::cout << "field (top row first; columns left to right):\n";
 
     for (int y = H - 1; y >= 0; --y) {
@@ -992,8 +993,8 @@ struct GeneratorConfig {
     int restarts = 0;
     int candidatesPerParent = 0;
     int targetSuccessCount = 0;
-    int maxExtraPuyos = 0;
-    int minExtraPuyos = 0;
+    int maxExtraPieces = 0;
+    int minExtraPieces = 0;
     int targetChain = DEFAULT_TARGET_CHAIN;
 };
 
@@ -1105,14 +1106,14 @@ static GeneratorConfig loadConfig(const std::filesystem::path& path) {
             config.restarts = parsePositiveInt(value, key);
         } else if (key == "candidates_per_parent") {
             config.candidatesPerParent = parsePositiveInt(value, key);
-        } else if (key == "max_extra_puyos") {
-            if (value=="0") config.maxExtraPuyos=0;
-            else config.maxExtraPuyos=parsePositiveInt(value,key);
+        } else if (key == "max_extra_pieces") {
+            if (value=="0") config.maxExtraPieces=0;
+            else config.maxExtraPieces=parsePositiveInt(value,key);
         } else if (key == "target_chain") {
             config.targetChain=parsePositiveInt(value,key);
-        } else if (key == "min_extra_puyos") {
-            if (value=="0") config.minExtraPuyos=0;
-            else config.minExtraPuyos=parsePositiveInt(value,key);
+        } else if (key == "min_extra_pieces") {
+            if (value=="0") config.minExtraPieces=0;
+            else config.minExtraPieces=parsePositiveInt(value,key);
         } else if (key == "target_success_count") {
             config.targetSuccessCount = parsePositiveInt(value, key);
         } else {
@@ -1137,10 +1138,10 @@ static GeneratorConfig loadConfig(const std::filesystem::path& path) {
     }
     if (config.targetChain<MIN_TARGET_CHAIN || config.targetChain>MAX_TARGET_CHAIN)
         throw std::runtime_error("target_chain must be between 1 and 19");
-    if (config.maxExtraPuyos>W*H-4*config.targetChain)
-        throw std::runtime_error("max_extra_puyos exceeds 78 - 4 * target_chain");
-    if (config.minExtraPuyos>config.maxExtraPuyos)
-        throw std::runtime_error("min_extra_puyos must not exceed max_extra_puyos");
+    if (config.maxExtraPieces>W*H-4*config.targetChain)
+        throw std::runtime_error("max_extra_pieces exceeds 78 - 4 * target_chain");
+    if (config.minExtraPieces>config.maxExtraPieces)
+        throw std::runtime_error("min_extra_pieces must not exceed max_extra_pieces");
     return config;
 }
 
@@ -1164,8 +1165,8 @@ static int runGenerator(const std::filesystem::path& configPath, const Generator
                   << config.candidatesPerParent
                   << ", target_success_count="
                   << config.targetSuccessCount
-                  << ", max_extra_puyos=" << config.maxExtraPuyos
-                  << ", min_extra_puyos=" << config.minExtraPuyos
+                  << ", max_extra_pieces=" << config.maxExtraPieces
+                  << ", min_extra_pieces=" << config.minExtraPieces
                   << ", target_chain=" << targetChain << "\n";
 
         std::mt19937_64 rng(config.initialSeed);
@@ -1190,9 +1191,9 @@ static int runGenerator(const std::filesystem::path& configPath, const Generator
                 shapes,
                 attemptNumber,
                 config.restarts,
-                config.maxExtraPuyos,
+                config.maxExtraPieces,
                 targetChain,
-                config.minExtraPuyos);
+                config.minExtraPieces);
 
             std::cout << '\n';
 
@@ -1260,7 +1261,7 @@ static std::vector<Candidate> referencePredecessors(
         }
         const int shapeW = maxX + 1;
 
-        // 各相対列に入るテトロミノぷよの相対y座標。
+        // 各相対列に入るテトロミノの相対y座標。
         std::array<std::vector<int>, W> groupYs{};
         for (const Point p : shape) groupYs[p.first].push_back(p.second);
 

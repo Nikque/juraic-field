@@ -1,7 +1,7 @@
 #include "../gui/gui_urls.h"
 #include <iostream>
 #include <thread>
-using namespace puyo_gui;
+using namespace juraic_gui;
 static void require(bool v, const char* message) {
     if (!v) throw std::runtime_error(message);
 }
@@ -30,7 +30,7 @@ int wmain(int argc, wchar_t** argv) {
         require(configText(c) == configText(loaded), "config defaults roundtrip");
         BitField colors;
         for (int x = 0; x < 6; ++x) colors.set(x, 0, Cell(x % 5 + 1));
-        require(simulatorUrl(colors, UrlFormat::PuyoPark) == "https://www.puyop.com/s/asF", "puyop five-color golden URL");
+        require(simulatorUrl(colors, UrlFormat::Park) == "https://www.puyop.com/s/asF", "park five-color golden URL");
         require(simulatorUrl(colors, UrlFormat::Mattulwan) == "https://www.pndsng.com/puyo/index.html?a72becdfb", "mattulwan five-color golden URL");
         require(simulatorUrl(BitField{}, UrlFormat::Mattulwan) == "https://www.pndsng.com/puyo/index.html?a78", "empty field run length");
         require(simulatorUrl(colors, UrlFormat::Ishikawa) == fieldToUrl(colors), "legacy format unchanged");
@@ -38,7 +38,7 @@ int wmain(int argc, wchar_t** argv) {
         std::array<std::string, INPUT_COUNT> values{"19", "100", "18446744073709551615", "4", "0", "0", "48", "2", "1000", "0"};
         require(parseInputs(values).initialSeed == UINT64_MAX && parseInputs(values).threads == 0, "uint64 precision");
         for (auto [index, value] : std::initializer_list<std::pair<int, std::string>>{
-                 {0, "0"}, {0, "20"}, {1, "0"}, {2, "18446744073709551616"}, {2, "1.5"}, {2, "-1"}, {3, "3"},
+                 {0, "0"}, {0, "20"}, {1, "0"}, {2, "18446744073709551616"}, {2, "1.5"}, {2, "-1"}, {3, "2"}, {3, "6"},
                  {4, "3"}, {5, "3"}, {6, "2147483648"}, {7, "abc"}, {8, "0"}, {9, "257"}, {9, "-1"}}) {
             auto t = values;
             t[index] = value;
@@ -55,7 +55,7 @@ int wmain(int argc, wchar_t** argv) {
         } restore{old, err};
         int cases = 0;
         for (int chain : {1, 19})
-            for (int colorCount : {4, 5})
+            for (int colorCount : {3, 4, 5})
                 for (int extra : {0, 1, 2}) {
                     auto dir = root / std::to_wstring(++cases);
                     std::filesystem::create_directory(dir);
@@ -63,7 +63,7 @@ int wmain(int argc, wchar_t** argv) {
                     config.targetChain = chain;
                     config.colorCount = colorCount;
                     config.targetSuccessCount = 1;
-                    config.minExtraPuyos = config.maxExtraPuyos = extra;
+                    config.minExtraPieces = config.maxExtraPieces = extra;
                     config.threads = 1 + cases % 3; // the result must not depend on the thread count
                     writeConfig(dir / L"config.ini", config);
                     int count = 0;
@@ -87,13 +87,19 @@ int wmain(int argc, wchar_t** argv) {
                         require(waves == 2 * chain, "post-clear and post-drop frames per chain");
                         require(frames.back().score > 0 && (chain > 1 || frames.back().score == 40), "score of the chain");
                         saveTimeline(dir / L"timeline.txt", frames, ignition);
-                        saveRecord(dir / L"盤面.puyo", sol, UINT64_MAX);
-                        auto r = loadRecord(dir / L"盤面.puyo");
+                        saveRecord(dir / L"盤面.jfchain", sol, UINT64_MAX);
+                        auto r = loadRecord(dir / L"盤面.jfchain");
                         require(r.seed == UINT64_MAX && r.solution.field == sol.field && r.solution.trigger == sol.trigger &&
                                 r.solution.firePairs == sol.firePairs && r.solution.targetChain == sol.targetChain, "archive roundtrip");
+                        {
+                            std::ifstream in(dir / L"盤面.jfchain", std::ios::binary);
+                            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                            const std::string word = "JURAIC_FIELD_CHAIN";
+                            require(text.compare(0, word.size(), word) == 0, "the first word of an archive");
+                        }
                     };
                     require(runGenerator(dir / L"config.ini", &hooks, dir) == 0 && count == 1, "generate and play boundary cases");
-                    std::vector<Record> records{loadRecord(dir / L"盤面.puyo")};
+                    std::vector<Record> records{loadRecord(dir / L"盤面.jfchain")};
                     for (int format = 0; format < 3; ++format)
                         writeSimulatorUrls(dir / (std::string("urls-") + urlFormatIds[format] + ".txt"), records, UrlFormat(format));
                 }
@@ -119,20 +125,20 @@ int wmain(int argc, wchar_t** argv) {
         require(runGenerator(dir / L"config.ini", &hooks, dir) == 3, "cooperative cancellation");
         require(std::chrono::steady_clock::now() - cancelTime < std::chrono::seconds(1), "slow cancel");
         require(saved >= 5, "results before cancellation are kept");
-        // Archives: a corrupt file, and a version 1 file made by v0.3.0.
-        std::ofstream broken(root / L"bad.puyo");
-        broken << "PUYO_GUI 2\n0 19\n9999999";
+        // Archives: a corrupt file, and a file of another version (version 1, of v0.3.0, is not read any more).
+        std::ofstream broken(root / L"bad.jfchain");
+        broken << "JURAIC_FIELD_CHAIN 2\n0 19\n9999999";
         broken.close();
         bool rejected = false;
-        try { loadRecord(root / L"bad.puyo"); } catch (...) { rejected = true; }
+        try { loadRecord(root / L"bad.jfchain"); } catch (...) { rejected = true; }
         require(rejected, "corrupt archive accepted");
-        std::ofstream v1(root / L"v1.puyo", std::ios::binary);
-        v1 << "PUYO_GUI 1\n7 1\n1 1\n1 1\n1 1\n1 1\n0\n0\n0 0\n1 0\n2 0\n3 0\n2\n"
+        std::ofstream v1(root / L"v1.jfchain", std::ios::binary);
+        v1 << "JURAIC_FIELD_CHAIN 1\n7 1\n1 1\n1 1\n1 1\n1 1\n0\n0\n0 0\n1 0\n2 0\n3 0\n2\n"
               "0 0 1 0 1 1 H 0 \"LL\"\n2 0 3 0 1 1 H 0 \"\"\n";
         v1.close();
-        auto oldRecord = loadRecord(root / L"v1.puyo");
-        require(oldRecord.seed == 7 && oldRecord.solution.field.count() == 4 && oldRecord.solution.firePairs != 0,
-                "version 1 archive loads without its build sequence");
+        rejected = false;
+        try { loadRecord(root / L"v1.jfchain"); } catch (...) { rejected = true; }
+        require(rejected, "an archive of version 1 accepted");
         log.flush();
         return 0;
     } catch (const std::exception& e) {

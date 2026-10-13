@@ -13,24 +13,24 @@
 #include <cstdint>
 #include <bit>
 
-// PUYO_FORCE_PORTABLE selects the plain 64-bit implementation (used by the tests).
-#if !defined(PUYO_FORCE_PORTABLE) && (defined(_M_X64) || defined(__SSE4_1__))
-#define PUYO_SSE 1
+// JURAIC_FORCE_PORTABLE selects the plain 64-bit implementation (used by the tests).
+#if !defined(JURAIC_FORCE_PORTABLE) && (defined(_M_X64) || defined(__SSE4_1__))
+#define JURAIC_SSE 1
 #include <immintrin.h>
 #else
-#define PUYO_SSE 0
+#define JURAIC_SSE 0
 #endif
 
-namespace puyo {
+namespace juraic {
 
 constexpr int W = 6;        // columns
-constexpr int H = 13;       // rows a puyo can rest in
+constexpr int H = 13;       // rows a piece can rest in
 constexpr int CLEAR_H = 12; // rows that connect and clear
 
 constexpr uint16_t COLUMN_12 = 0x0FFF; // visible rows of one column
-constexpr uint16_t COLUMN_13 = 0x1FFF; // rows a puyo can rest in
+constexpr uint16_t COLUMN_13 = 0x1FFF; // rows a piece can rest in
 
-#if PUYO_SSE
+#if JURAIC_SSE
 
 struct FieldBits {
     __m128i v;
@@ -47,21 +47,30 @@ struct FieldBits {
         return FieldBits(_mm_setr_epi16(s, s, s, s, s, s, 0, 0));
     }
     static FieldBits cell(int x, int y) {
-        uint16_t c[W]{};
-        c[x] = uint16_t(1u << y);
-        return fromColumns(c);
+        // (one bit, straight into its half of the register: no way through memory)
+        const uint64_t bit = uint64_t(1) << ((x & 3) * 16 + y);
+        return FieldBits(_mm_set_epi64x(int64_t(x < 4 ? 0 : bit), int64_t(x < 4 ? bit : 0)));
+    }
+    // The cells of column x in the rows that are the bits of `rows` (bit y = row y).
+    static FieldBits columnCells(int x, uint16_t rows) {
+        const uint64_t bits = uint64_t(rows) << ((x & 3) * 16);
+        return FieldBits(_mm_set_epi64x(int64_t(x < 4 ? 0 : bits), int64_t(x < 4 ? bits : 0)));
     }
     void columns(uint16_t c[W]) const {
         alignas(16) uint16_t lanes[8];
         _mm_store_si128(reinterpret_cast<__m128i*>(lanes), v);
         for (int x = 0; x < W; ++x) c[x] = lanes[x];
     }
-    uint16_t column(int x) const {
-        alignas(16) uint16_t lanes[8];
-        _mm_store_si128(reinterpret_cast<__m128i*>(lanes), v);
-        return lanes[x];
-    }
+    uint16_t column(int x) const { return uint16_t(x < 4 ? low() >> (16 * x) : high() >> (16 * (x - 4))); }
     bool get(int x, int y) const { return (column(x) >> y) & 1; }
+    // Bit x is set when column x holds a cell of the set.
+    unsigned columnsUsed() const {
+        // (two bits a lane say that it is empty; the even ones of the others are pushed together)
+        unsigned used = ~unsigned(_mm_movemask_epi8(_mm_cmpeq_epi16(v, _mm_setzero_si128()))) & 0x555;
+        used = (used | used >> 1) & 0x333;
+        used = (used | used >> 2) & 0x0F0F;
+        return (used | used >> 4) & 0x3F;
+    }
 
     uint64_t low() const { return uint64_t(_mm_cvtsi128_si64(v)); }                      // columns 0..3
     uint64_t high() const { return uint64_t(_mm_cvtsi128_si64(_mm_srli_si128(v, 8))); }  // columns 4..5
@@ -97,6 +106,29 @@ struct FieldBits {
 
     // Per column: multiply by a power of two, i.e. shift that column up.
     FieldBits scaled(FieldBits factor) const { return FieldBits(_mm_mullo_epi16(v, factor.v)); }
+
+    // For every column: as many cells from the floor up as the column holds (where its cells rest after
+    // gravity). All columns at once, in the register.
+    FieldBits settled() const {
+#if (defined(__AVX512BITALG__) || defined(JURAIC_BITALG)) && defined(__AVX512BW__) && defined(__AVX512VL__)
+        // (the bits of each lane counted, and 1 shifted up by that count, less 1)
+        const __m128i one = _mm_set1_epi16(1);
+        return FieldBits(_mm_sub_epi16(_mm_sllv_epi16(one, _mm_popcnt_epi16(v)), one));
+#else
+        // The bits of each byte from a table of half bytes; the two bytes of a lane added, the sum n (0..14)
+        // in both bytes of the lane; then (1 << n) - 1, its low and its high byte from two tables.
+        const __m128i nibble = _mm_set1_epi8(0x0F);
+        const __m128i bits = _mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+        const __m128i perByte = _mm_add_epi8(_mm_shuffle_epi8(bits, _mm_and_si128(v, nibble)),
+                                             _mm_shuffle_epi8(bits, _mm_and_si128(_mm_srli_epi16(v, 4), nibble)));
+        const __m128i n = _mm_add_epi8(perByte, _mm_or_si128(_mm_srli_epi16(perByte, 8), _mm_slli_epi16(perByte, 8)));
+        const __m128i lowTable = _mm_setr_epi8(0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F, 0x7F, -1, -1, -1, -1, -1, -1, -1, -1);
+        const __m128i highTable = _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F, 0x7F);
+        const __m128i lowByte = _mm_set1_epi16(0x00FF);
+        return FieldBits(_mm_or_si128(_mm_and_si128(_mm_shuffle_epi8(lowTable, n), lowByte),
+                                      _mm_andnot_si128(lowByte, _mm_shuffle_epi8(highTable, n))));
+#endif
+    }
 };
 
 #else // portable fallback: two 64-bit halves (columns 0..3 and 4..5)
@@ -118,9 +150,18 @@ struct FieldBits {
         c[x] = uint16_t(1u << y);
         return fromColumns(c);
     }
+    static FieldBits columnCells(int x, uint16_t rows) {
+        const uint64_t bits = uint64_t(rows) << ((x & 3) * 16);
+        return x < 4 ? FieldBits{bits, 0} : FieldBits{0, bits};
+    }
     uint16_t column(int x) const { return uint16_t(x < 4 ? lo >> (16 * x) : hi >> (16 * (x - 4))); }
     void columns(uint16_t c[W]) const { for (int x = 0; x < W; ++x) c[x] = column(x); }
     bool get(int x, int y) const { return (column(x) >> y) & 1; }
+    unsigned columnsUsed() const {
+        unsigned used = 0;
+        for (int x = 0; x < W; ++x) used |= unsigned(column(x) != 0) << x;
+        return used;
+    }
 
     uint64_t low() const { return lo; }
     uint64_t high() const { return hi; }
@@ -141,6 +182,17 @@ struct FieldBits {
     FieldBits& operator|=(FieldBits o) { lo |= o.lo; hi |= o.hi; return *this; }
     FieldBits& operator^=(FieldBits o) { lo ^= o.lo; hi ^= o.hi; return *this; }
 
+    // (as in the SSE version: for every column, as many cells from the floor up as it holds)
+    FieldBits settled() const {
+        FieldBits r = fromHalves(0, 0);
+        for (int x = 0; x < W; ++x) {
+            const int shift = (x & 3) * 16;
+            const uint64_t mask = ((uint64_t(1) << std::popcount(uint16_t((x < 4 ? lo : hi) >> shift))) - 1) << shift;
+            r = r | (x < 4 ? fromHalves(mask, 0) : fromHalves(0, mask));
+        }
+        return r;
+    }
+
     FieldBits up() const { return {(lo << 1) & ~LO_BIT0, (hi << 1) & ~HI_BIT0}; }
     FieldBits down() const { return {(lo >> 1) & ~(LO_BIT0 << 15), (hi >> 1) & ~(HI_BIT0 << 15)}; }
     // Unlike the SSE version nothing is pushed into lanes 6 and 7.
@@ -159,7 +211,6 @@ struct FieldBits {
 #endif
 
 inline const FieldBits MASK_12 = FieldBits::fill(COLUMN_12);
-inline const FieldBits MASK_13 = FieldBits::fill(COLUMN_13);
 
 // Calls f(x, y) for every cell of the set, columns left to right, rows bottom up.
 template <class F> inline void forEachCell(FieldBits bits, F&& f) {
@@ -169,4 +220,4 @@ template <class F> inline void forEachCell(FieldBits bits, F&& f) {
         for (unsigned m = c[x]; m; m &= m - 1) f(x, std::countr_zero(m));
 }
 
-} // namespace puyo
+} // namespace juraic

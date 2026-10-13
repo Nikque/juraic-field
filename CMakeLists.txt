@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(puyo_19_chain_generator VERSION 0.4.0 LANGUAGES CXX)
+project(juraic_field VERSION 0.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
@@ -14,58 +14,108 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
 endif()
 
 # The engine: bitboard core (header only) and the generator.
-add_library(puyo_engine STATIC
+add_library(juraic_engine STATIC
     generator/generator.cpp
     generator/runner.cpp
     generator/generator.h
     core/field_bits.h core/bit_field.h core/reach.h core/rng.h
     app/console_output.h)
 find_package(Threads REQUIRED)
-target_link_libraries(puyo_engine PUBLIC Threads::Threads)
+target_link_libraries(juraic_engine PUBLIC Threads::Threads)
 
 add_executable(random_19_chain app/main.cpp)
-target_link_libraries(random_19_chain PRIVATE puyo_engine)
+target_link_libraries(random_19_chain PRIVATE juraic_engine)
 if(MINGW)
     target_link_options(random_19_chain PRIVATE -municode)
 endif()
 
 if(WIN32)
     enable_language(RC)
-    add_executable(puyo_gui WIN32 gui/puyo_gui.cpp gui/puyo_gui.rc)
-    set_target_properties(puyo_gui PROPERTIES OUTPUT_NAME PuyoChainGenerator)
-    target_link_libraries(puyo_gui PRIVATE puyo_engine comctl32 comdlg32 shell32 ole32 gdi32 user32)
+    add_executable(juraic_generator_gui WIN32 gui/generator_gui.cpp gui/generator_gui.rc)
+    set_target_properties(juraic_generator_gui PROPERTIES OUTPUT_NAME JuraicFieldGenerator)
+    target_link_libraries(juraic_generator_gui PRIVATE juraic_engine comctl32 comdlg32 shell32 ole32 gdi32 user32)
     if(MSVC)
-        target_link_options(puyo_gui PRIVATE "/MANIFEST:EMBED" "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/gui/puyo_gui.manifest")
+        target_link_options(juraic_generator_gui PRIVATE "/MANIFEST:EMBED" "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/gui/generator_gui.manifest")
     endif()
     if(MINGW)
-        target_link_options(puyo_gui PRIVATE -municode -static -static-libgcc -static-libstdc++)
+        target_link_options(juraic_generator_gui PRIVATE -municode -static -static-libgcc -static-libstdc++)
     endif()
 endif()
+
+if(MSVC)
+    # The playable game (Direct2D, XAudio2). One self-contained executable.
+    add_executable(juraic_field_game WIN32 play/main.cpp play/view.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h game/link.h)
+    set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
+    target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32)
+    # The pictures and the music of the package (media/): next to the game, in the folders it looks into.
+    add_custom_command(TARGET juraic_field_game POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/background" "$<TARGET_FILE_DIR:juraic_field_game>/background"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/bgm" "$<TARGET_FILE_DIR:juraic_field_game>/bgm"
+        VERBATIM)
+endif()
+
+# Matches between AIs without a screen (ai/, play/replay.h).
+add_executable(ai_match tools/ai_match.cpp ai/agents.h ai/level.h ai/tactics.h ai/pace.h ai/exchange.h ai/gaze.h ai/value.h ai/agent.h ai/build.h ai/duel.h ai/observe.h ai/input.h play/replay.h play/settings.h)
+target_link_libraries(ai_match PRIVATE Threads::Threads)
+# One player by the beam search: how large a chain, how fast.
+add_executable(ai_toko tools/ai_toko.cpp tools/toko_game.h ai/build.h ai/detect.h ai/params.h)
+target_link_libraries(ai_toko PRIVATE Threads::Threads)
+# Tuning of the weights with one player.
+add_executable(ai_tune tools/ai_tune.cpp tools/toko_game.h ai/build.h ai/detect.h ai/params.h)
+target_link_libraries(ai_tune PRIVATE Threads::Threads)
 
 include(CTest)
 if(BUILD_TESTING)
     # Bitboard core and generator against cell-by-cell references, once with
     # the SSE implementation and once with the portable 64-bit one.
     add_executable(core_tests tests/core_tests.cpp)
-    target_link_libraries(core_tests PRIVATE puyo_engine)
+    target_link_libraries(core_tests PRIVATE juraic_engine)
     add_test(NAME core_and_generator COMMAND core_tests)
     add_executable(core_tests_portable tests/core_tests.cpp generator/generator.cpp generator/runner.cpp)
-    target_compile_definitions(core_tests_portable PRIVATE PUYO_FORCE_PORTABLE)
+    target_compile_definitions(core_tests_portable PRIVATE JURAIC_FORCE_PORTABLE)
     target_link_libraries(core_tests_portable PRIVATE Threads::Threads)
     add_test(NAME core_and_generator_portable COMMAND core_tests_portable)
+
+    # Move-level game rules (game/): cell-by-cell checks, and a log that the
+    # independent Python simulator replays.
+    add_executable(game_tests tests/game_tests.cpp)
+    add_test(NAME game_rules COMMAND game_tests "${CMAKE_CURRENT_BINARY_DIR}/game-test.log")
+    # Frame-by-frame game: measured frame tables, agreement with the move level,
+    # and what the controller can reach.
+    add_executable(frame_tests tests/frame_tests.cpp)
+    add_test(NAME game_frames COMMAND frame_tests)
+    add_executable(link_tests tests/link_tests.cpp game/link.h)
+    add_test(NAME game_linked_rounds COMMAND link_tests)
+    add_executable(net_tests tests/net_tests.cpp play/net.h game/link.h)
+    add_test(NAME net_match_over_a_line COMMAND net_tests)
+    add_executable(replay_tests tests/replay_tests.cpp play/replay.h play/settings.h)
+    add_test(NAME replay_files COMMAND replay_tests)
+    if(WIN32)
+        # The UDP line with sockets of this machine alone (the host listens at ::1).
+        add_executable(udp_tests tests/udp_tests.cpp play/udp.h play/net.h game/link.h)
+        target_link_libraries(udp_tests PRIVATE ws2_32)
+        add_test(NAME net_udp_on_this_machine COMMAND udp_tests)
+    endif()
+    # Versus AI (ai/).
+    add_executable(ai_tests tests/ai_tests.cpp ai/observe.h ai/duel.h ai/input.h ai/detect.h ai/params.h ai/build.h ai/gaze.h ai/value.h ai/exchange.h ai/pace.h ai/tactics.h ai/level.h)
+target_link_libraries(ai_tests PRIVATE Threads::Threads)
+    add_test(NAME ai COMMAND ai_tests)
+    add_test(NAME ai_match_same_result COMMAND ai_match --self-test)
+    add_test(NAME ai_toko_same_result COMMAND ai_toko --self-test)
+    add_test(NAME ai_tune_same_result COMMAND ai_tune --self-test)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(WIN32)
         foreach(name gui_model_tests editor_tests console_tests)
             add_executable(${name} tests/${name}.cpp)
-            target_link_libraries(${name} PRIVATE puyo_engine)
+            target_link_libraries(${name} PRIVATE juraic_engine)
             if(MINGW)
                 target_link_options(${name} PRIVATE -municode)
             endif()
         endforeach()
         add_test(NAME gui_model_and_archives COMMAND gui_model_tests "${CMAKE_CURRENT_BINARY_DIR}/gui-model-test")
         add_test(NAME editor_model_and_specials COMMAND editor_tests "${CMAKE_CURRENT_BINARY_DIR}/editor-test")
-        add_test(NAME gui_native_integration COMMAND puyo_gui --self-test "${CMAKE_CURRENT_BINARY_DIR}/gui-native-test")
+        add_test(NAME gui_native_integration COMMAND juraic_generator_gui --self-test "${CMAKE_CURRENT_BINARY_DIR}/gui-native-test")
         set_tests_properties(gui_native_integration PROPERTIES TIMEOUT 240)
     endif()
     if(Python3_Interpreter_FOUND)
@@ -81,6 +131,9 @@ if(BUILD_TESTING)
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_console.py"
                     "$<TARGET_FILE:console_tests>" "$<TARGET_FILE:random_19_chain>")
         endif()
+        add_test(NAME game_independent_simulation
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_game.py" "${CMAKE_CURRENT_BINARY_DIR}/game-test.log")
+        set_tests_properties(game_independent_simulation PROPERTIES DEPENDS game_rules)
         add_test(NAME independent_output_verification
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_output.py"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/solutions.log" --allow-extra)

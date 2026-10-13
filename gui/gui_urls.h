@@ -1,20 +1,20 @@
 #pragma once
 #include "gui_editor.h"
 
-namespace puyo_gui {
-enum class UrlFormat { Ishikawa, PuyoPark, Mattulwan };
+namespace juraic_gui {
+enum class UrlFormat { Ishikawa, Park, Mattulwan };
 inline constexpr std::array<const char*, 3> urlFormatNames{
-    "石川ぷよ", "対戦ぷよパーク", "mattulwan系（pndsngミラー）"};
-inline constexpr std::array<const char*, 3> urlFormatIds{"ishikawa", "puyop", "mattulwan"};
+    "石川", "対戦パーク", "mattulwan系（pndsngミラー）"};
+inline constexpr std::array<const char*, 3> urlFormatIds{"ishikawa", "park", "mattulwan"};
 
 // Export only the 6 x 13 board. Engine identity and CLI history keep using
 // fieldToUrl; changing a destination cannot change the search or dedupe.
 inline std::string urlUnavailableReason(const Board& board, UrlFormat format) {
     for (const auto& col : board.cells)
         for (Cell v : col) {
-            if (v > Wall) return "未対応のぷよ種別です。";
-            if (v == PointPuyo && format != UrlFormat::Mattulwan)
-                return "得点ぷよに対応していないため、このサイトへは出力できません。";
+            if (v > Wall) return "未対応の種別です。";
+            if (v == PointPiece && format != UrlFormat::Mattulwan)
+                return "「得点」に対応していないため、このサイトへは出力できません。";
         }
     return {};
 }
@@ -23,7 +23,7 @@ inline std::string simulatorUrl(const Board& board, UrlFormat format) {
     if (!reason.empty()) throw std::runtime_error(reason);
     bool special = false;
     for (const auto& col : board.cells)
-        for (Cell v : col) special |= v >= PointPuyo;
+        for (Cell v : col) special |= v >= PointPiece;
     const auto longCode = [&](const std::array<int, 11>& mapping) {
         std::string code;
         for (int y = 12; y >= 0; --y)
@@ -39,7 +39,7 @@ inline std::string simulatorUrl(const Board& board, UrlFormat format) {
     case UrlFormat::Ishikawa:
         if (special) return "https://ishikawapuyo.net/simu/pe.html?~" + longCode({0, 1, 2, 3, 4, 5, 6, -1, 9, 8, 7});
         return "https://ishikawapuyo.net/simu/pe.html?" + shortCode();
-    case UrlFormat::PuyoPark:
+    case UrlFormat::Park:
         // Both formats pack two cells into six bits, top row first.
         if (special) return "https://www.puyop.com/s/=" + longCode({0, 1, 2, 3, 4, 5, 6, -1, 7, 8, 9});
         return "https://www.puyop.com/s/" + shortCode();
@@ -80,4 +80,4 @@ inline void writeSimulatorUrls(const std::filesystem::path& path, const std::vec
     out.flush();
     if (!out) throw std::runtime_error("URL一覧の書き込みに失敗しました。");
 }
-} // namespace puyo_gui
+} // namespace juraic_gui

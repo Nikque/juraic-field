@@ -14,7 +14,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("executable", type=Path)
 parser.add_argument("--seed", type=int, default=20260925)
-parser.add_argument("--colors", type=int, choices=[4, 5], default=4)
+parser.add_argument("--colors", type=int, choices=[3, 4, 5], default=4)
 parser.add_argument("--beam", type=int, default=48)
 parser.add_argument("--per-parent", type=int, default=2)
 parser.add_argument("--extra", type=int, default=0)
@@ -32,11 +32,11 @@ settings = dict(initial_seed=args.seed, color_count=args.colors, beam_width=args
                 candidates_per_parent=args.per_parent, restarts=args.restarts,
                 target_success_count=args.target if args.target is not None else args.restarts)
 if not args.legacy:
-    settings["max_extra_puyos"] = args.extra
-    settings["min_extra_puyos"] = args.min_extra
+    settings["max_extra_pieces"] = args.extra
+    settings["min_extra_pieces"] = args.min_extra
     settings["target_chain"] = args.chain
     settings["threads"] = args.threads
-with tempfile.TemporaryDirectory(prefix="puyo-benchmark-") as directory:
+with tempfile.TemporaryDirectory(prefix="juraic-benchmark-") as directory:
     work = Path(directory)
     config = work / "config.ini"
     config.write_text("".join(f"{key}={value}\n" for key, value in settings.items()))

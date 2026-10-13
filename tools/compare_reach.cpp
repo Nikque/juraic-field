@@ -13,7 +13,7 @@
 #include <mutex>
 #include <thread>
 
-using namespace puyo;
+using namespace juraic;
 
 static std::string pattern(const int h[W], int id) {
     const PairPosition p = pairPosition(id);

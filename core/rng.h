@@ -1,13 +1,14 @@
 #pragma once
 // Small, fast, portable random numbers. Unlike std::shuffle and the standard
 // distributions, the results are identical on every compiler and library.
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
 
-namespace puyo {
+namespace juraic {
 
 constexpr uint64_t splitmix64(uint64_t& state) {
     uint64_t z = (state += 0x9E3779B97F4A7C15ull);
@@ -76,4 +77,4 @@ private:
     }
 };
 
-} // namespace puyo
+} // namespace juraic

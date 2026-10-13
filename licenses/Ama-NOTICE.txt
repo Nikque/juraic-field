@@ -1,0 +1,14 @@
+Parts of the versus AI (the folder ai/) follow Ama (https://github.com/citrus610/ama, MIT License,
+Copyright (c) 2023 citrus610; its licence is Ama-LICENSE.txt in this folder):
+
+- ai/build.h, Builder::queuePair: the table of the six fixed sequences of pairs (CHOICE) is Ama's. The levels
+  below the strongest search with it; the strongest level searches with sequences of this program's own.
+- ai/build.h, buildValue: the points of a trial drop (the waves of the chain, less the pieces that must be
+  added, plus the height of the place where it starts) and the terms for valleys and hills are put together
+  as in Ama's evaluation. Of the numbers, 1000 a wave and 289 a row of height are Ama's; the others were
+  measured for this program.
+- ai/detect.h: trial drops are the "quiet" search of takapt and Ama, written anew for this engine.
+- ai/build.h: the beam search over several made-up sequences of pairs, adding up the largest chain found
+  below each first placement, is the method of Ama's beam search (which names takapt for it). Of its sizes,
+  250 wide and 16 deep are Ama's, and so are the six sequences of the levels below the strongest (the strongest
+  searches eight). The code is written anew.

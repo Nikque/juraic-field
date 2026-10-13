@@ -28,7 +28,8 @@ total = 0
 formats = set()
 for log in root.rglob("generator.log"):
     text = log.read_text(encoding="utf-8")
-    archives = list(log.parent.glob("board-*.puyo"))
+    # (results are board-N.jfchain; a run retained from an older version has them under another ending)
+    archives = list(log.parent.glob("board-*.*"))
     if not archives:
         assert "field (top row first" not in text, log
         continue
@@ -41,20 +42,23 @@ for log in root.rglob("generator.log"):
         exported = (log.parent / "simulator_urls.txt").read_text(encoding="utf-8").splitlines()
         assert len(exported) == n
         format_id = (log.parent / "url-format.txt").read_text().strip()
+        if format_id not in ("ishikawa", "mattulwan"):
+            format_id = "park"  # (this site had another id in runs retained from an older version)
         formats.add(format_id)
-        prefixes = {"ishikawa":"https://ishikawapuyo.net/simu/pe.html?", "puyop":"https://www.puyop.com/s/", "mattulwan":"https://www.pndsng.com/puyo/index.html?"}
+        prefixes = {"ishikawa":"https://ishikawapuyo.net/simu/pe.html?", "park":"https://www.puyop.com/s/", "mattulwan":"https://www.pndsng.com/puyo/index.html?"}
         for i, url in enumerate(exported, 1):
             assert url.startswith(prefixes[format_id])
-            assert decode_url(url) == archive_cells(log.parent / f"board-{i}.puyo"), (log, i)
+            assert decode_url(url) == archive_cells(next(log.parent.glob(f"board-{i}.*"))), (log, i)
             assert decode_url(urls[i-1]) == decode_url(url)
     total += n
 assert total >= 100, total
-assert formats == {"ishikawa", "puyop", "mattulwan"}, formats
+assert formats == {"ishikawa", "park", "mattulwan"}, formats
 model_count = 0
-for exported in pathlib.Path(sys.argv[2]).rglob("urls-*.txt"):
-    assert decode_url(exported.read_text().strip()) == archive_cells(exported.parent / "盤面.puyo")
-    model_count += 1
-assert model_count == 36, model_count
+for format_id in ("ishikawa", "park", "mattulwan"):  # (not the files an earlier build left under another id)
+    for exported in pathlib.Path(sys.argv[2]).rglob(f"urls-{format_id}.txt"):
+        assert decode_url(exported.read_text().strip()) == archive_cells(exported.parent / "盤面.jfchain")
+        model_count += 1
+assert model_count == 54, model_count  # (1 and 19 chains, three to five colours, 0 to 2 extra cells: 18 settings, 3 sites)
 
 # Verify displayed pre-gravity holes with the independent grid matcher, rather
 # than C++ helper results. Retained original heights must survive the clear.
@@ -89,7 +93,7 @@ for path in pathlib.Path(sys.argv[2]).glob("*/timeline.txt"):
             assert frames[i][1] == frames[i+1][1] == 0
             assert transition(frames[i-1][2], frames[i][2], frames[i+1][2]) == 5
     timeline_count += 1
-assert timeline_count == 12, timeline_count
+assert timeline_count == 18, timeline_count
 print(f"Independently verified {total} GUI results (completed and cancelled runs)")
-print(f"Also verified all {model_count} URL exports for 1/19 chains, 4/5 colors and 0/1/2 extra cells")
+print(f"Also verified all {model_count} URL exports for 1/19 chains, 3/4/5 colors and 0/1/2 extra cells")
 print(f"Verified post-clear holes and following gravity in all {timeline_count} displayed timelines, including preparation clears")

@@ -15,14 +15,15 @@
 #include <iomanip>
 #include <windowsx.h>
 
-using namespace puyo_gui;
+using namespace juraic_gui;
 namespace {
 constexpr UINT PUMP=WM_APP+1;
 enum Id { START=100, CANCEL, LOAD_CONFIG, SAVE_CONFIG, DEFAULTS, RESULTS=120,
     LOAD_RESULT, COPY_URL, OPEN_URL, PREV, NEXT, PLAY, IGNITE, LAST,
     SLIDER, SPEED, FOLDER, OPEN_FOLDER, DETAIL, STATE, COUNT, PROGRESS, FRAME_LABEL,
     OUTPUT_BASE, OUTPUT_RUN, CAPACITY, URL_FORMAT, EXPORT_URLS, EDIT_MODE,
-    NEW_BOARD, LOAD_BOARD, SAVE_BOARD, CLONE_BOARD, UNDO, REDO, EDIT_HELP, PIECE_FIRST=400 };
+    NEW_BOARD, LOAD_BOARD, SAVE_BOARD, CLONE_BOARD, UNDO, REDO, EDIT_HELP };
+constexpr int PIECE_FIRST=400; // the buttons of the palette: PIECE_FIRST + the kind (gui_editor.h, Piece)
 constexpr const wchar_t* paletteLabels[]={L"消す",L"赤",L"緑",L"青",L"黄",L"紫",L"おじゃま",L"得点",L"かた",L"鉄",L"壁"};
 struct Event { enum Kind { Saved, Done } kind; Record record; int code=0; std::string error; };
 std::wstring wide(const std::string& s) {
@@ -51,7 +52,7 @@ public:
     Editor editor;Board savedBoard{},strokeBefore{},resultViewBoard{};Cell strokePiece=Empty,selectedPiece=Red;
     std::atomic_bool cancel{false}; std::thread worker;
     std::mutex mutex; std::deque<Event> events;
-    GeneratorProgress progress{}; bool progressChanged=false;
+    GeneratorProgress progress{};
     std::filesystem::path exeDirectory, runDirectory;
     std::chrono::steady_clock::time_point started;
     double firstSeconds=-1, fifthSeconds=-1;
@@ -73,7 +74,7 @@ public:
     void error(const std::exception& e){++errors;state=wide(e.what());put(STATE,state);if(!testing)MessageBoxW(window,state.c_str(),L"入力・保存エラー",MB_OK|MB_ICONERROR);}
     GeneratorConfig settings(){std::array<std::string,INPUT_COUNT> t;for(int i=0;i<INPUT_COUNT;++i)t[i]=utf8(text(inputs[i]));return parseInputs(t);}
     void setSettings(const GeneratorConfig& c){
-        const std::array<std::string,INPUT_COUNT> t{std::to_string(c.targetChain),std::to_string(c.targetSuccessCount),std::to_string(c.initialSeed),std::to_string(c.colorCount),std::to_string(c.minExtraPuyos),std::to_string(c.maxExtraPuyos),std::to_string(c.beamWidth),std::to_string(c.candidatesPerParent),std::to_string(c.restarts),std::to_string(c.threads)};
+        const std::array<std::string,INPUT_COUNT> t{std::to_string(c.targetChain),std::to_string(c.targetSuccessCount),std::to_string(c.initialSeed),std::to_string(c.colorCount),std::to_string(c.minExtraPieces),std::to_string(c.maxExtraPieces),std::to_string(c.beamWidth),std::to_string(c.candidatesPerParent),std::to_string(c.restarts),std::to_string(c.threads)};
         for(int i=0;i<INPUT_COUNT;++i)SetWindowTextW(inputs[i],wide(t[i]).c_str()); capacity();
     }
     void capacity(){
@@ -86,7 +87,7 @@ public:
         for(int i=0;i<=Wall;++i){put(PIECE_FIRST+i,std::wstring(paletteLabels[i])+(i==value?L"（選択中）":L""));InvalidateRect(get(PIECE_FIRST+i),nullptr,TRUE);}
     }
     void paintPiece(HDC dc,RECT box,Cell value){
-        int state=SaveDC(dc);SetBkMode(dc,TRANSPARENT);
+        int dcState=SaveDC(dc);SetBkMode(dc,TRANSPARENT);
         int d=std::min(box.right-box.left,box.bottom-box.top)-s(6);
         int x=(box.left+box.right-d)/2,y=(box.top+box.bottom-d)/2;
         COLORREF colors[]={RGB(205,215,225),RGB(221,55,55),RGB(0,140,105),RGB(0,86,156),RGB(226,197,0),RGB(137,44,113),RGB(150,155,165),RGB(180,140,10),RGB(100,110,120),RGB(45,55,65),RGB(111,73,40)};
@@ -99,16 +100,16 @@ public:
             for(int eye=0;eye<2;++eye){int ex=x+d*(eye?52:25)/100;Ellipse(dc,ex,y+d/4,ex+d/4,y+d*3/5);SelectObject(dc,GetStockObject(BLACK_BRUSH));Ellipse(dc,ex+d/9,y+d/3,ex+d/5,y+d/2);SelectObject(dc,GetStockObject(WHITE_BRUSH));}
         }
         if(value){SelectObject(dc,pieceFont);SetTextColor(dc,value==Yellow?RGB(40,40,25):RGB(255,255,255));RECT label{x,y+(value<=Garbage?d*3/5:0),x+d,y+d};wchar_t letter=pieceLetters[value];DrawTextW(dc,&letter,1,&label,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
-        RestoreDC(dc,state);DeleteObject(brush);DeleteObject(pen);
+        RestoreDC(dc,dcState);DeleteObject(brush);DeleteObject(pen);
     }
     void paintPalette(const DRAWITEMSTRUCT& item){
-        int value=int(item.CtlID)-PIECE_FIRST;HDC dc=item.hDC;int state=SaveDC(dc);RECT box=item.rcItem;
+        int value=int(item.CtlID)-PIECE_FIRST;HDC dc=item.hDC;int dcState=SaveDC(dc);RECT box=item.rcItem;
         bool chosen=value==selectedPiece;auto b=CreateSolidBrush(chosen?RGB(215,236,255):RGB(255,255,255));FillRect(dc,&box,b);DeleteObject(b);
         auto p=CreatePen(PS_SOLID,s(chosen?2:1),chosen?RGB(0,101,176):RGB(181,192,204));SelectObject(dc,p);SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,box.left,box.top,box.right,box.bottom);
         RECT icon{(box.left+box.right)/2-s(19),box.top+s(2),(box.left+box.right)/2+s(19),box.top+s(40)};paintPiece(dc,icon,Cell(value));
         SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(25,40,59));RECT label{box.left,box.top+s(40),box.right,box.bottom-s(2)};DrawTextW(dc,paletteLabels[value],-1,&label,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
         if(item.itemState&ODS_FOCUS){InflateRect(&box,-s(4),-s(4));DrawFocusRect(dc,&box);}
-        RestoreDC(dc,state);DeleteObject(p);
+        RestoreDC(dc,dcState);DeleteObject(p);
     }
     void create(){
         dpi=int(GetDpiForWindow(window));
@@ -117,7 +118,7 @@ public:
         pieceFont=CreateFontW(-s(10),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Yu Gothic UI");
         wchar_t path[32768];GetModuleFileNameW(nullptr,path,32768);exeDirectory=std::filesystem::path(path).parent_path();
         add(1,L"STATIC",L"盤面ジェネレーター",SS_LEFT);SendMessageW(get(1),WM_SETFONT,reinterpret_cast<WPARAM>(titleFont),TRUE);
-        const wchar_t* names[]={L"連鎖数（1〜19）",L"生成目標（件）",L"探索seed（uint64）",L"色数（4 / 5）",L"余剰 下限",L"余剰 上限",L"beam_width",L"親ごとの候補数",L"試行上限",L"スレッド数（0=自動）"};
+        const wchar_t* names[]={L"連鎖数（1〜19）",L"生成目標（件）",L"探索seed（uint64）",L"色数（3〜5）",L"余剰 下限",L"余剰 上限",L"beam_width",L"親ごとの候補数",L"試行上限",L"スレッド数（0=自動）"};
         for(int i=0;i<INPUT_COUNT;++i){labels[i]=add(200+i,L"STATIC",names[i]);inputs[i]=add(300+i,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,WS_EX_CLIENTEDGE);SendMessageW(inputs[i],EM_SETLIMITTEXT,20,0);}
         add(CAPACITY,L"STATIC",L"");
         for(auto [id,caption]:std::initializer_list<std::pair<int,const wchar_t*>>{{LOAD_CONFIG,L"設定を読込"},{SAVE_CONFIG,L"名前を付けて保存"},{DEFAULTS,L"初期値"},{START,L"生成開始"},{CANCEL,L"中断"},{FOLDER,L"保存先を選択"},{OPEN_FOLDER,L"今回の保存先を開く"},{LOAD_RESULT,L"保存結果を読込"},{COPY_URL,L"URLコピー"},{OPEN_URL,L"URLを開く"},{EXPORT_URLS,L"一覧のURLを保存"},{PREV,L"◀ 前へ"},{NEXT,L"次へ ▶"},{PLAY,L"再生"},{IGNITE,L"発火へ"},{LAST,L"終了へ"}}) add(id,L"BUTTON",caption,WS_TABSTOP);
@@ -138,7 +139,7 @@ public:
         for(int i=0;i<=Wall;++i)add(PIECE_FIRST+i,L"BUTTON",paletteLabels[i],WS_TABSTOP|BS_OWNERDRAW);
         selectPiece(Red);
         add(EDIT_HELP,L"STATIC",L"左クリック/ドラッグ: 配置  /  右クリック: 消す");
-        board=add(3,L"PuyoBoard",L"6×13盤面",0);
+        board=add(3,L"JuraicFieldBoard",L"6×13盤面",0);
         add(4,L"STATIC",L"13段目は消去対象外・落下対象。白い輪: 最初に消える4個 / 黄色の輪: 最後に置く1組。");
         add(5,L"STATIC",L"黄色の輪の1組を最後に置くと発火します。盤面と連鎖はエンジンで検証済みです。");
         add(6,L"STATIC",L"保存先（毎回、新規フォルダー）");add(7,L"STATIC",L"結果一覧 / 選択して再生");
@@ -183,20 +184,25 @@ public:
         put(EDIT_MODE,editing?L"結果表示へ戻る":L"盤面編集");put(EXPORT_URLS,editing?L"編集盤面URLを保存":L"一覧のURLを保存");put(7,editing?L"盤面編集 / パレットで種類を選択":L"結果一覧 / 選択して再生");
         put(IGNITE,editing?L"編集盤面へ":L"発火へ");
         put(4,editing?L"13段目は消去対象外。壁は固定、その他は落下。":L"13段目は消去対象外・落下対象。白い輪: 最初に消える4個 / 黄色の輪: 最後に置く1組。");
-        put(5,editing?L"ぷよを選んで盤面へ配置。「再生」「次へ」で連鎖を確認できます。":L"黄色の輪の1組を最後に置くと発火します。盤面と連鎖はエンジンで検証済みです。");
+        put(5,editing?L"種類を選んで盤面へ配置。「再生」「次へ」で連鎖を確認できます。":L"黄色の輪の1組を最後に置くと発火します。盤面と連鎖はエンジンで検証済みです。");
         if(editing){auto reason=urlUnavailableReason(editor.board,urlFormat());for(int id:{COPY_URL,OPEN_URL,EXPORT_URLS})EnableWindow(get(id),reason.empty()&&(id!=EXPORT_URLS||!running));}
     }
     std::filesystem::path chooseFile(bool save,bool config){
         wchar_t path[32768]{};OPENFILENAMEW o{sizeof(o)};o.hwndOwner=window;o.lpstrFile=path;o.nMaxFile=32768;
-        o.lpstrFilter=config?L"設定ファイル (*.ini)\0*.ini\0すべて\0*.*\0":L"検証済み盤面 (*.puyo)\0*.puyo\0\0";
-        o.lpstrDefExt=config?L"ini":L"puyo";o.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);
+        o.lpstrFilter=config?L"設定ファイル (*.ini)\0*.ini\0すべて\0*.*\0":L"検証済み盤面\0*.jfchain\0\0";
+        o.lpstrDefExt=config?L"ini":L"jfchain";o.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);
         if(save?GetSaveFileNameW(&o):GetOpenFileNameW(&o))return path;return {};
     }
     void chooseFolder(){
         BROWSEINFOW b{};b.hwndOwner=window;b.lpszTitle=L"生成結果の保存先（中に実行ごとのフォルダーを作成）";b.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE;
         if(auto id=SHBrowseForFolderW(&b)){wchar_t path[MAX_PATH];if(SHGetPathFromIDListW(id,path))put(OUTPUT_BASE,path);CoTaskMemFree(id);}
     }
-    void post(Event e){ {std::lock_guard lock(mutex);events.push_back(std::move(e));}PostMessageW(window,PUMP,0,0); }
+    // wake: the window is told at once (a PUMP message); otherwise the event waits for the timer of 100 ms,
+    // which takes all that are there (drain). A message for every board found filled the message queue when
+    // a search found boards faster than the window showed them (seen on a PC under load, about
+    // 660 boards a second): posted messages go before clicks and timers, so neither the cancel button nor
+    // the self-test's pump got through, and the window did not respond until the search was over.
+    void post(Event e,bool wake=true){ {std::lock_guard lock(mutex);events.push_back(std::move(e));}if(wake)PostMessageW(window,PUMP,0,0); }
     void start(){
         if(running)return;
         const auto format=urlFormat();
@@ -217,11 +223,11 @@ public:
                 // Only the worker uses the engine's human-readable log. UI data uses hooks.
                 struct Redirect {std::streambuf* out,*err;Redirect(std::ostream& l):out(std::cout.rdbuf(l.rdbuf())),err(std::cerr.rdbuf(l.rdbuf())){}~Redirect(){std::cout.flush();std::cerr.flush();std::cout.rdbuf(out);std::cerr.rdbuf(err);}} redirect(log);
                 GeneratorHooks hooks;hooks.cancel=&cancel;
-                hooks.progress=[this](const GeneratorProgress& p){std::lock_guard lock(mutex);progress=p;progressChanged=true;};
+                hooks.progress=[this](const GeneratorProgress& p){std::lock_guard lock(mutex);progress=p;};
                 hooks.saved=[this,dir,format,&urls](const Solution& solution,uint64_t seed,int count){
-                    auto path=dir/(L"board-"+std::to_wstring(count)+L".puyo");saveRecord(path,solution,seed);
+                    auto path=dir/(L"board-"+std::to_wstring(count)+L".jfchain");saveRecord(path,solution,seed);
                     urls<<simulatorUrl(solution.field,format)<<'\n';urls.flush();if(!urls)throw std::runtime_error("選択形式のURL一覧の書き込みに失敗しました。");
-                    post({Event::Saved,{solution,seed,path}});
+                    post({Event::Saved,{solution,seed,path}},count<=8); // (the first boards are shown at once, the rest by the timer)
                 };
                 int code=runGenerator(dir/L"config.ini",&hooks,dir);post({Event::Done,{},code});
             }catch(const std::exception& e){post({Event::Done,{},2,e.what()});}
@@ -231,18 +237,22 @@ public:
         if(n<0 || n>=int(records.size()))return;stopPlay();editing=false;selected=n;frames=timeline(records[n].solution);frame=0;
         SendMessageW(get(RESULTS),LB_SETCURSEL,n,0);SendMessageW(get(SLIDER),TBM_SETRANGE,TRUE,MAKELPARAM(0,int(frames.size()-1)));showFrame();updateEnabled();
     }
-    void append(Record r){
+    void append(Record r,bool update=true){ // update=false: the caller brings the controls up to date itself (a row of results)
         int cells=r.solution.field.count();
         std::wstring label=std::to_wstring(records.size()+1)+L".  "+std::to_wstring(r.solution.targetChain)+L"連鎖 / "+std::to_wstring(cells)+L"個 / 余剰"+std::to_wstring(cells-4*r.solution.targetChain);
-        records.push_back(std::move(r));SendMessageW(get(RESULTS),LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));if(selected<0&&!editing)select(int(records.size()-1));else updateEnabled();
+        records.push_back(std::move(r));SendMessageW(get(RESULTS),LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));if(selected<0&&!editing)select(int(records.size()-1));else if(update)updateEnabled();
     }
     void drain(){
         std::deque<Event> pending;{std::lock_guard lock(mutex);pending.swap(events);}
         if(pending.empty()&&!running)return;
+        const bool many=pending.size()>16;bool added=false;
+        if(many)SendMessageW(get(RESULTS),WM_SETREDRAW,FALSE,0);
         for(auto& e:pending){
-            if(e.kind==Event::Saved){++saved;double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();if(saved==1)firstSeconds=elapsed;if(saved==5)fifthSeconds=elapsed;append(std::move(e.record));}
+            if(e.kind==Event::Saved){++saved;double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();if(saved==1)firstSeconds=elapsed;if(saved==5)fifthSeconds=elapsed;append(std::move(e.record),false);added=true;}
             else{running=false;completedSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();resultCode=e.code;if(worker.joinable())worker.join();state=e.code==0?L"目標達成":e.code==1?L"試行上限: 部分成果を保存しました。":e.code==3?L"中断: 部分成果を保存しました。":L"エラー: 今回の保存先のgenerator.logを確認してください。";if(!e.error.empty())state+=L" "+wide(e.error);updateEnabled();if(closing){DestroyWindow(window);return;}}
         }
+        if(many){SendMessageW(get(RESULTS),WM_SETREDRAW,TRUE,0);InvalidateRect(get(RESULTS),nullptr,TRUE);}
+        if(added)updateEnabled();
         metrics();
     }
     void metrics(){
@@ -269,7 +279,7 @@ public:
         o<<L"\r\n\r\n最後に置く1組の候補（どれか1つで発火）:\r\n";
         bool firstOption=true;
         for(int id=0;id<PAIR_POSITIONS;++id)if(sol.firePairs>>id&1){o<<(firstOption?L"> ":L"  ")<<(id<W?L"縦":L"横");for(Point q:pointsOf(pairCells(sol.field,id)))o<<L" ("<<q.first+1<<L","<<q.second+1<<L")";o<<(firstOption?L"  ← 黄色の輪\r\n":L"\r\n");firstOption=false;}
-        o<<L"\r\nこの1組を除いた盤面は何も消えず、3列目12段目が空いていて、組ぷよがその場所へ届きます。\r\n";
+        o<<L"\r\nこの1組を除いた盤面は何も消えず、3列目12段目が空いていて、その1組がその場所へ届きます。\r\n";
         put(DETAIL,o.str());InvalidateRect(board,nullptr,FALSE);
     }
     void stopPlay(){playing=false;KillTimer(window,2);put(PLAY,L"再生");}
@@ -277,7 +287,7 @@ public:
     void moveFrame(int n){if((selected<0&&!editing)||frames.empty())return;stopPlay();if(editing&&frames.size()==1&&n>0)frames=editorTimeline(editor.board);frame=std::clamp(n,0,int(frames.size()-1));showFrame();}
     void editorView(){stopPlay();editing=hasEditor=true;frames={{editor.board,{},{},"編集中"}};frame=0;showFrame();}
     void toggleEditor(){if(editing){stopPlay();editing=false;if(selected>=0)select(selected);else{frames.clear();put(DETAIL,L"生成結果を選択してください。");InvalidateRect(board,nullptr,FALSE);updateEnabled();}}else{if(!hasEditor&&!frames.empty())editor.replace(frames[frame].board);editorView();}}
-    std::filesystem::path boardFile(bool save){wchar_t path[32768]=L"";OPENFILENAMEW o{sizeof(o)};o.hwndOwner=window;o.lpstrFile=path;o.nMaxFile=32768;o.lpstrFilter=L"編集盤面 (*.puyoboard)\0*.puyoboard\0\0";o.lpstrDefExt=L"puyoboard";o.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);if(save?GetSaveFileNameW(&o):GetOpenFileNameW(&o))return path;return {};}
+    std::filesystem::path boardFile(bool save){wchar_t path[32768]=L"";OPENFILENAMEW o{sizeof(o)};o.hwndOwner=window;o.lpstrFile=path;o.nMaxFile=32768;o.lpstrFilter=L"編集盤面\0*.jfboard\0\0";o.lpstrDefExt=L"jfboard";o.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);if(save?GetSaveFileNameW(&o):GetOpenFileNameW(&o))return path;return {};}
     bool saveEditor(){auto path=boardFile(true);if(path.empty())return false;saveBoard(path,editor.board);savedBoard=editor.board;showFrame();return true;}
     bool confirmClose(){if(!hasEditor||editor.board==savedBoard)return true;int choice=MessageBoxW(window,L"編集盤面に未保存の変更があります。保存して終了しますか？",L"編集盤面の保存",MB_YESNOCANCEL|MB_ICONQUESTION);return choice==IDNO||(choice==IDYES&&saveEditor());}
     void drawCell(int px,int py,Cell piece){if(!editing)return;RECT r;GetClientRect(board,&r);int cell=std::min((r.right-s(35))/6,(r.bottom-s(24))/13),left=(r.right-6*cell)/2+s(9),top=s(5);if(px<left||px>=left+6*cell||py<top||py>=top+13*cell)return;int x=(px-left)/cell,y=12-(py-top)/cell;editor.board.cells[x][y]=piece;frames={{editor.board,{},{},"編集中"}};frame=0;showFrame();}
@@ -391,29 +401,29 @@ int selfTest(App& a,const std::filesystem::path& root) {
         a.select(0);check(a.frame==0&&a.frames[0].board==boardFromBits(a.records[0].solution.field)&&a.frames[0].marked.size()==4&&a.frames[0].pair.size()==2,"selected board is before ignition, with trigger and last pair marked");a.snapshot(root/L"gui-19chain.bmp");
         click(NEXT);auto before=boardFromBits(a.records[0].solution.field);int removed=0;bool floating=false;for(int x=0;x<6;++x)for(int y=0;y<13;++y){if(!before.cells[x][y])continue;Cell cell=a.frames[a.frame].board.cells[x][y];if(!cell)++removed;else{check(cell==before.cells[x][y],"post-clear survivor keeps original cell");if(y&&!a.frames[a.frame].board.cells[x][y-1])floating=true;}}
         check(removed==4&&floating&&a.frames[a.frame].chain==1&&a.frames[a.frame].marked.empty()&&a.frames[a.frame].pair.empty(),"next shows erased holes before gravity without highlight");a.snapshot(root/L"gui-after-clear.bmp");click(NEXT);BitField dropped=a.records[0].solution.field;Wave firstWave;stepWave(dropped,firstWave);check(a.frames[a.frame].board==boardFromBits(dropped),"following next applies gravity");a.snapshot(root/L"gui-after-drop.bmp");click(IGNITE);check(a.frame==0,"ignition button returns to the board before firing");
-        check(a.selectedUrl()==simulatorUrl(a.records[0].solution.field,UrlFormat::PuyoPark),"selected URL uses format selector");
+        check(a.selectedUrl()==simulatorUrl(a.records[0].solution.field,UrlFormat::Park),"selected URL uses format selector");
         for(int format=0;format<3;++format){SendMessageW(a.get(URL_FORMAT),CB_SETCURSEL,format,0);SendMessageW(a.window,WM_COMMAND,MAKEWPARAM(URL_FORMAT,CBN_SELCHANGE),reinterpret_cast<LPARAM>(a.get(URL_FORMAT)));check(a.selectedUrl()==simulatorUrl(a.records[0].solution.field,UrlFormat(format)),"switch destination after generation");writeSimulatorUrls(root/(std::wstring(L"一覧-")+std::to_wstring(format)+L".txt"),a.records,UrlFormat(format));}
         check(SendMessageW(a.get(SPEED),CB_GETCOUNT,0,0)==3 && SendMessageW(a.get(SPEED),CB_GETCURSEL,0,0)==1,"playback speed selector initialized");
         click(NEXT);check(a.frame==1,"forward navigation");click(PREV);check(a.frame==0,"backward navigation");click(LAST);check(a.frame==int(a.frames.size())-1&&a.frames.size()==39,"19 chains are 1 + 2 x 19 frames");click(IGNITE);check(size_t(a.frame)==ignitionFrame(a.records[0].solution),"ignition navigation");check(text(a.get(IGNITE))==L"発火へ","one button returns to the firing board");
         SendMessageW(a.get(SPEED),CB_SETCURSEL,2,0);click(PLAY);check(a.playing,"playback starts");auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);while(a.playing && std::chrono::steady_clock::now()<deadline){pump();std::this_thread::sleep_for(std::chrono::milliseconds(5));}check(!a.playing && a.frames[a.frame].chain==19,"timer plays all 19 waves");
-        for(int extra:{1,2}){SendMessageW(a.get(URL_FORMAT),CB_SETCURSEL,extra==1?2:0,0);c.targetSuccessCount=1;c.minExtraPuyos=c.maxExtraPuyos=extra;a.setSettings(c);click(START);awaitDone(30);check(a.resultCode==0 && a.saved==1,"77/78-cell GUI generation");a.select(int(a.records.size()-1));click(LAST);check(bitsFromBoard(a.frames[a.frame].board).count()==extra,"77/78-cell playback residual");}
+        for(int extra:{1,2}){SendMessageW(a.get(URL_FORMAT),CB_SETCURSEL,extra==1?2:0,0);c.targetSuccessCount=1;c.minExtraPieces=c.maxExtraPieces=extra;a.setSettings(c);click(START);awaitDone(30);check(a.resultCode==0 && a.saved==1,"77/78-cell GUI generation");a.select(int(a.records.size()-1));click(LAST);check(bitsFromBoard(a.frames[a.frame].board).count()==extra,"77/78-cell playback residual");}
         SendMessageW(a.get(URL_FORMAT),CB_SETCURSEL,2,0);
         c=defaults();c.targetSuccessCount=10000000;c.restarts=2000000000;c.threads=1;a.setSettings(c);int ticksBefore=a.uiTicks;click(START);auto limit=std::chrono::steady_clock::now()+std::chrono::milliseconds(1500);while(a.running && std::chrono::steady_clock::now()<limit){pump();std::this_thread::sleep_for(std::chrono::milliseconds(5));}check(a.running&&a.saved>=3,"partial results visible during search");check(a.uiTicks-ticksBefore>=10,"UI timers remain responsive during search");auto cancelTime=std::chrono::steady_clock::now();click(CANCEL);awaitDone(3);check(a.resultCode==3 && a.saved>=3,"cancel retains partial results");report<<"cancel_seconds="<<std::chrono::duration<double>(std::chrono::steady_clock::now()-cancelTime).count()<<'\n';
         c=defaults();c.targetChain=1;c.targetSuccessCount=2;c.initialSeed=UINT64_MAX;a.setSettings(c);click(START);awaitDone(5);check(a.resultCode==0 && a.saved==2,"restart after cancellation with uint64 maximum seed");a.select(int(a.records.size()-1));check(a.records.back().seed==UINT64_MAX,"display preserves seed precision");
         auto record=loadRecord(a.records.back().path);check(record.seed==UINT64_MAX,"saved result reopens and validates");
         c.targetSuccessCount=100;c.restarts=1;a.setSettings(c);click(START);awaitDone(5);check(a.resultCode==1 && a.saved==1,"exit code 1 keeps saved result");
-        check(std::filesystem::exists(firstRun/L"board-100.puyo"),"earlier run is not overwritten");
+        check(std::filesystem::exists(firstRun/L"board-100.jfchain"),"earlier run is not overwritten");
         for(const auto& r:a.records){auto loaded=loadRecord(r.path);check(loaded.solution.field==r.solution.field,"all displayed archives revalidate");}
         a.select(0);auto original=a.records[0].solution.field;click(EDIT_MODE);check(a.editing&&a.editor.board==boardFromBits(original),"edit generated board without changing verified record");check(text(a.get(IGNITE))==L"編集盤面へ","editor button caption");click(NEW_BOARD);
         RECT br;GetClientRect(a.board,&br);int cell=std::min((br.right-a.s(35))/6,(br.bottom-a.s(24))/13),left=(br.right-6*cell)/2+a.s(9),top=a.s(5);
         auto mouse=[&](UINT msg,int x,int y){SendMessageW(a.board,msg,0,MAKELPARAM(left+x*cell+cell/2,top+(12-y)*cell+cell/2));};
         for(int i=0;i<=Wall;++i){SendMessageW(a.get(PIECE_FIRST+i),BM_CLICK,0,0);check(a.selectedPiece==i,"image palette button selects its piece");}
         click(PIECE_FIRST+Wall);mouse(WM_LBUTTONDOWN,0,12);mouse(WM_LBUTTONUP,0,12);check(a.editor.board.cells[0][12]==Wall,"mouse editing includes row 13");click(UNDO);check(a.editor.board==Board{},"undo mouse stroke");click(REDO);check(a.editor.board.cells[0][12]==Wall,"redo mouse stroke");
-        click(PIECE_FIRST+PointPuyo);mouse(WM_LBUTTONDOWN,1,0);mouse(WM_MOUSEMOVE,2,0);mouse(WM_LBUTTONUP,2,0);check(a.editor.board.cells[1][0]==PointPuyo&&a.editor.board.cells[2][0]==PointPuyo,"drag paints multiple cells as one undo stroke");
-        for(int format=0;format<3;++format){SendMessageW(a.get(URL_FORMAT),CB_SETCURSEL,format,0);SendMessageW(a.window,WM_COMMAND,MAKEWPARAM(URL_FORMAT,CBN_SELCHANGE),reinterpret_cast<LPARAM>(a.get(URL_FORMAT)));check(bool(IsWindowEnabled(a.get(COPY_URL)))==(format==2)&&bool(IsWindowEnabled(a.get(OPEN_URL)))==(format==2)&&bool(IsWindowEnabled(a.get(EXPORT_URLS)))==(format==2),"point puyo blocks unsupported destination copy/open/save");}
+        click(PIECE_FIRST+PointPiece);mouse(WM_LBUTTONDOWN,1,0);mouse(WM_MOUSEMOVE,2,0);mouse(WM_LBUTTONUP,2,0);check(a.editor.board.cells[1][0]==PointPiece&&a.editor.board.cells[2][0]==PointPiece,"drag paints multiple cells as one undo stroke");
+        for(int format=0;format<3;++format){SendMessageW(a.get(URL_FORMAT),CB_SETCURSEL,format,0);SendMessageW(a.window,WM_COMMAND,MAKEWPARAM(URL_FORMAT,CBN_SELCHANGE),reinterpret_cast<LPARAM>(a.get(URL_FORMAT)));check(bool(IsWindowEnabled(a.get(COPY_URL)))==(format==2)&&bool(IsWindowEnabled(a.get(OPEN_URL)))==(format==2)&&bool(IsWindowEnabled(a.get(EXPORT_URLS)))==(format==2),"point piece blocks unsupported destination copy/open/save");}
         auto draft=a.editor.board;click(EDIT_MODE);check(!a.editing&&a.records[0].solution.field==original,"leaving editor preserves generated result");click(EDIT_MODE);check(a.editor.board==draft,"returning to editor preserves draft");
         mouse(WM_RBUTTONDOWN,1,0);mouse(WM_RBUTTONUP,1,0);check(a.editor.board.cells[1][0]==Empty,"right click erases");
-        saveBoard(root/L"編集盤面😀.puyoboard",a.editor.board);check(loadBoard(root/L"編集盤面😀.puyoboard")==a.editor.board,"edited board saves and reopens with Unicode path");
+        saveBoard(root/L"編集盤面😀.jfboard",a.editor.board);check(loadBoard(root/L"編集盤面😀.jfboard")==a.editor.board,"edited board saves and reopens with Unicode path");
         click(NEW_BOARD);click(PIECE_FIRST+Red);for(int x=0;x<4;++x){mouse(WM_LBUTTONDOWN,x,0);mouse(WM_LBUTTONUP,x,0);}click(PIECE_FIRST+Hard);mouse(WM_LBUTTONDOWN,0,1);mouse(WM_LBUTTONUP,0,1);click(NEXT);check(a.editing&&a.frames.back().chain==1&&a.frames[a.frame].board.cells[0][0]==Empty&&a.frames[a.frame].board.cells[0][1]==Garbage,"next automatically computes and displays post-clear board");for(auto& f:a.frames)check(f.marked.empty(),"editor playback has no pre-clear highlight frames");click(LAST);check(a.frames.back().board.cells[0][0]==Garbage&&a.frames.back().board.cells[0][1]==Empty,"editor playback shows hard converted then dropped");a.editorView();click(PLAY);check(a.playing&&a.frames.back().chain==1,"play automatically computes editor timeline");a.stopPlay();click(IGNITE);check(a.frame==0,"editor button returns to the edited board");
         click(PIECE_FIRST+Empty);mouse(WM_LBUTTONDOWN,3,0);mouse(WM_LBUTTONUP,3,0);check(a.editor.board.cells[3][0]==Empty,"eraser image selects left-click erase");click(UNDO);
         // Exercise real window resizing and compare its displayed pixels with a
@@ -432,7 +442,7 @@ int selfTest(App& a,const std::filesystem::path& root) {
             RECT animation;GetWindowRect(a.get(PROGRESS),&animation);MapWindowPoints(nullptr,a.window,reinterpret_cast<POINT*>(&animation),2);
             // The native progress bar animates independently between captures;
             // exclude only its pixels, while comparing all text and controls.
-            auto stablePixels=[&](const std::filesystem::path& path){std::ifstream in(path,std::ios::binary);std::string bytes(std::istreambuf_iterator<char>(in),{});size_t offset=sizeof(BITMAPFILEHEADER)+sizeof(BITMAPINFOHEADER);for(int y=animation.top;y<animation.bottom;++y){size_t first=offset+size_t(y*client.right+animation.left)*4,last=offset+size_t(y*client.right+animation.right)*4;std::fill(bytes.begin()+first,bytes.begin()+last,0);}return bytes;};if(_wgetenv(L"PUYO_SELFTEST_SKIP_PIXELS")&&stablePixels(actual)!=stablePixels(clean)){report<<"SKIP resized live text and controls equal clean repaint without trails (screen capture not available)\n";}else check(stablePixels(actual)==stablePixels(clean),"resized live text and controls equal clean repaint without trails");
+            auto stablePixels=[&](const std::filesystem::path& path){std::ifstream in(path,std::ios::binary);std::string bytes(std::istreambuf_iterator<char>(in),{});size_t offset=sizeof(BITMAPFILEHEADER)+sizeof(BITMAPINFOHEADER);for(int y=animation.top;y<animation.bottom;++y){size_t first=offset+size_t(y*client.right+animation.left)*4,last=offset+size_t(y*client.right+animation.right)*4;std::fill(bytes.begin()+first,bytes.begin()+last,0);}return bytes;};if(_wgetenv(L"JURAIC_SELFTEST_SKIP_PIXELS")&&stablePixels(actual)!=stablePixels(clean)){report<<"SKIP resized live text and controls equal clean repaint without trails (screen capture not available)\n";}else check(stablePixels(actual)==stablePixels(clean),"resized live text and controls equal clean repaint without trails");
         }
         a.snapshot(root/L"gui-editor.bmp");a.savedBoard=a.editor.board;click(EDIT_MODE);
         c=defaults();c.targetSuccessCount=10000000;c.restarts=2000000000;a.setSettings(c);click(START);SendMessageW(a.window,WM_CLOSE,0,0);awaitDone(3);check(!IsWindow(a.window),"window close cancels and joins worker");
@@ -466,17 +476,17 @@ LRESULT CALLBACK windowProc(HWND h,UINT m,WPARAM w,LPARAM l){
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX ic{sizeof(ic),ICC_BAR_CLASSES|ICC_PROGRESS_CLASS};InitCommonControlsEx(&ic);
-    App a;app=&a;WNDCLASSEXW wc{sizeof(wc)};wc.hInstance=instance;wc.lpfnWndProc=windowProc;wc.lpszClassName=L"PuyoGeneratorGui";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=a.background;wc.hIcon=LoadIconW(nullptr,IDI_APPLICATION);RegisterClassExW(&wc);
-    wc.lpfnWndProc=boardProc;wc.lpszClassName=L"PuyoBoard";wc.hbrBackground=nullptr;RegisterClassExW(&wc);
-    HWND h=CreateWindowExW(0,L"PuyoGeneratorGui",L"盤面ジェネレーター",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1160,987,nullptr,nullptr,instance,nullptr);
+    App a;app=&a;WNDCLASSEXW wc{sizeof(wc)};wc.hInstance=instance;wc.lpfnWndProc=windowProc;wc.lpszClassName=L"JuraicFieldGeneratorGui";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=a.background;wc.hIcon=LoadIconW(nullptr,IDI_APPLICATION);RegisterClassExW(&wc);
+    wc.lpfnWndProc=boardProc;wc.lpszClassName=L"JuraicFieldBoard";wc.hbrBackground=nullptr;RegisterClassExW(&wc);
+    HWND h=CreateWindowExW(0,L"JuraicFieldGeneratorGui",L"Juraic Field 盤面ジェネレーター",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1160,987,nullptr,nullptr,instance,nullptr);
     if(!h){CoUninitialize();return 2;}
     int argc;auto args=CommandLineToArgvW(GetCommandLineW(),&argc);
     if(args && argc==3 && std::wstring(args[1])==L"--self-test") {int code=selfTest(a,args[2]);LocalFree(args);if(IsWindow(h))DestroyWindow(h);CoUninitialize();return code;}
-    if(args && argc==4 && std::wstring(args[1])==L"--preview") {try{a.append(loadRecord(args[3]));ShowWindow(h,SW_SHOWNOACTIVATE);UpdateWindow(h);a.snapshot(args[2]);}catch(const std::exception& e){LocalFree(args);CoUninitialize();return 2;}LocalFree(args);DestroyWindow(h);CoUninitialize();return 0;}
+    if(args && argc==4 && std::wstring(args[1])==L"--preview") {try{a.append(loadRecord(args[3]));ShowWindow(h,SW_SHOWNOACTIVATE);UpdateWindow(h);a.snapshot(args[2]);}catch(const std::exception&){LocalFree(args);CoUninitialize();return 2;}LocalFree(args);DestroyWindow(h);CoUninitialize();return 0;}
     if(args && argc==4 && std::wstring(args[1])==L"--preview-board") {try{a.editor.replace(loadBoard(args[3]));a.savedBoard=a.editor.board;a.editorView();ShowWindow(h,SW_SHOWNOACTIVATE);UpdateWindow(h);a.snapshot(args[2]);}catch(const std::exception&){LocalFree(args);DestroyWindow(h);CoUninitialize();return 2;}LocalFree(args);DestroyWindow(h);CoUninitialize();return 0;}
     ShowWindow(h,show);UpdateWindow(h);
-    // Opening a .puyo from the command line is read-only and fully revalidated.
-    if(args && argc==2)try{std::filesystem::path p=args[1];if(p.extension()==L".puyoboard"){a.editor.replace(loadBoard(p));a.savedBoard=a.editor.board;a.editorView();}else a.append(loadRecord(p));}catch(const std::exception& e){a.error(e);}if(args)LocalFree(args);
+    // Opening a .jfchain from the command line is read-only and fully revalidated.
+    if(args && argc==2)try{std::filesystem::path p=args[1];if(p.extension()==L".jfboard"){a.editor.replace(loadBoard(p));a.savedBoard=a.editor.board;a.editorView();}else a.append(loadRecord(p));}catch(const std::exception& e){a.error(e);}if(args)LocalFree(args);
     MSG msg;
     while(GetMessageW(&msg,nullptr,0,0)>0){
         if(msg.message==WM_KEYDOWN && (msg.hwnd==h || IsChild(h,msg.hwnd))){

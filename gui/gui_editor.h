@@ -2,13 +2,11 @@
 #include "gui_model.h"
 #include <algorithm>
 
-namespace puyo_gui {
+namespace juraic_gui {
 // The editor allows empty cells, floating cells and kinds the generator never
 // produces. Kinds 1..6 are the engine's codes; 7..10 exist only here.
 enum Piece : Cell { Empty = 0, Red = 1, Green = 2, Blue = 3, Yellow = 4, Purple = 5,
-                    Garbage = 6, PointPuyo = 7, Hard = 8, Iron = 9, Wall = 10 };
-inline constexpr std::array<const char*, 11> pieceNames{
-    "消す（空）", "赤 R", "緑 G", "青 B", "黄 Y", "紫 P", "おじゃま ○", "得点 $", "かた H", "鉄 I", "壁 #"};
+                    Garbage = 6, PointPiece = 7, Hard = 8, Iron = 9, Wall = 10 };
 inline constexpr wchar_t pieceLetters[] = L" RGBYP○$HI#";
 
 // Gravity with fixed walls: each stretch between walls is compacted on its own.
@@ -32,10 +30,9 @@ inline bool settle(Board& b) {
 }
 
 struct EditorWave {
-    std::vector<Point> erased, cracked;
     int score = 0, colored = 0;
 };
-// One clearing wave without gravity. Which coloured puyos clear (and the
+// One clearing wave without gravity. Which coloured pieces clear (and the
 // 13th-row rule, groups and colours for the score) comes from the engine; the
 // effect on the special kinds next to them is applied here.
 inline EditorWave editorClear(Board& b, int chain) {
@@ -46,8 +43,8 @@ inline EditorWave editorClear(Board& b, int chain) {
     EditorWave wave;
     Wave w;
     if (!findWave(colors, w)) return wave;
-    wave.colored = w.puyos;
-    // Cells touched by cleared puyos from one direction or more, and from two or more.
+    wave.colored = w.pieces;
+    // Cells touched by cleared pieces from one direction or more, and from two or more.
     const FieldBits a = w.cleared.up(), c = w.cleared.down(), d = w.cleared.left(), e = w.cleared.right();
     uint16_t once[6], twice[6], cleared[6];
     ((a | c | d | e) & MASK_12).columns(once);
@@ -59,24 +56,20 @@ inline EditorWave editorClear(Board& b, int chain) {
             Cell& cell = b.cells[x][y];
             bool erase = cleared[x] >> y & 1;
             if (once[x] >> y & 1) {
-                if (cell == Garbage || cell == PointPuyo) {
+                if (cell == Garbage || cell == PointPiece) {
                     erase = true;
-                    if (cell == PointPuyo) points += 50;
+                    if (cell == PointPiece) points += 50;
                 } else if (cell == Hard) {
                     if (twice[x] >> y & 1) {
                         erase = true;
                         base += 60;
                     } else {
                         cell = Garbage;
-                        wave.cracked.push_back({x, y});
                         base += 10;
                     }
                 }
             }
-            if (erase) {
-                wave.erased.push_back({x, y});
-                cell = Empty;
-            }
+            if (erase) cell = Empty;
         }
     wave.score = base * std::max(1, CHAIN_BONUS[std::clamp(chain, 1, 19)] + COLOR_BONUS[w.colors] + w.groupBonus) + points;
     return wave;
@@ -122,7 +115,7 @@ struct Editor {
 };
 inline void saveBoard(const std::filesystem::path& path, const Board& b) {
     std::ofstream out(path, std::ios::binary);
-    out << "PUYO_BOARD 1\n";
+    out << "JURAIC_FIELD_BOARD 1\n";
     for (int y = 12; y >= 0; --y)
         for (int x = 0; x < 6; ++x) out << int(b.cells[x][y]) << (x == 5 ? '\n' : ' ');
     out.flush();
@@ -133,17 +126,17 @@ inline Board loadBoard(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     std::string magic;
     int version;
-    if (!(in >> magic >> version) || magic != "PUYO_BOARD" || version != 1)
+    if (!(in >> magic >> version) || magic != "JURAIC_FIELD_BOARD" || version != 1)
         throw std::runtime_error("対応する編集盤面形式ではありません。");
     Board b;
     for (int y = 12; y >= 0; --y)
         for (int x = 0; x < 6; ++x) {
             int v;
-            if (!(in >> v) || v < 0 || v > 10) throw std::runtime_error("不正なぷよ種別です。");
+            if (!(in >> v) || v < 0 || v > 10) throw std::runtime_error("不正な種別です。");
             b.cells[x][y] = Cell(v);
         }
     std::string extra;
     if (in >> extra) throw std::runtime_error("盤面ファイルに余分なデータがあります。");
     return b;
 }
-} // namespace puyo_gui
+} // namespace juraic_gui
