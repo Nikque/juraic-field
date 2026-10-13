@@ -112,7 +112,7 @@ inline PlaceResult place(GameField& g, Placement p, Pair pair) {
 // ---- waves with any clear count -----------------------------------------------
 
 // Group bonus when the clear count is not four: below four the table starts at
-// the clear count, above four it is unchanged (the wiki of puyonexus.com, Scoring).
+// the clear count, above four it is unchanged (the wiki of [A] in game/timing.h, Scoring).
 constexpr int groupBonusFor(int size, int clearCount) {
     return groupBonus(clearCount < 4 ? size + 4 - clearCount : size);
 }

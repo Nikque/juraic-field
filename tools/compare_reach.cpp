@@ -1,4 +1,4 @@
-// Compares the reach rule used by the generator (core/reach.h, after puyoai)
+// Compares the reach rule used by the generator (core/reach.h)
 // with the movement model of v0.3.0 (kicks and quick turns searched by BFS,
 // without gravity) for every combination of column heights.
 //

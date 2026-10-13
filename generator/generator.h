@@ -83,7 +83,7 @@ int runGenerator(const std::filesystem::path& configPath, const GeneratorHooks* 
 
 // ---- text output -----------------------------------------------------------
 char colorChar(Cell color);
-std::string fieldToUrl(const BitField& field); // ishikawapuyo.net board code
+std::string fieldToUrl(const BitField& field); // the address of the board at the simulator site (runner.cpp)
 std::string pathToUtf8(const std::filesystem::path& path);
 uint64_t parseSeed(const std::string& text);
 int parsePositiveInt(const std::string& text, const std::string& key);

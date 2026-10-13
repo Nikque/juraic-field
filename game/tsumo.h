@@ -6,7 +6,7 @@
 // round get the same sequence.
 //
 // The sequences of the real game come from a fixed table of 65536 entries whose
-// generator is not public (https://puyo-camp.jp/posts/86154), so this is a plain
+// generator is not public, so this is a plain
 // shuffle with the same published properties, not the same sequences.
 #include "../core/rng.h"
 #include "rules.h"

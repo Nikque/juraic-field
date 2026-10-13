@@ -2,7 +2,7 @@
 // The falling pair, one frame at a time: movement, rotation, wall kick, floor
 // kick, quick turn, falling, landing and locking.
 //
-// Position model (as in arcade Tsu and puyoai's KumipuyoMovingState): the axis
+// Position model (as in arcade Tsu and in [P] of game/timing.h): the axis
 // piece is in a cell (x, y); `upper` says it is drawn half a cell above that
 // cell. Collisions use the cell only. One step down goes from the upper half
 // to the lower half of the same cell, or from the lower half to the upper half

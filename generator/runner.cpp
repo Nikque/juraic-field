@@ -20,7 +20,7 @@ namespace juraic {
 char colorChar(Cell color) { return ".RGBYP"[color]; }
 
 std::string fieldToUrl(const BitField& field) {
-    // ishikawapuyo.net board code: two cells (left * 8 + right) per character,
+    // The board code of the site below: two cells (left * 8 + right) per character,
     // from the 13th row down, three characters per row; leading zeros dropped.
     static constexpr char DIGITS[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-";
     std::string encoded;

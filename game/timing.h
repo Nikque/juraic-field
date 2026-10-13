@@ -12,6 +12,7 @@
 //  [A] arcade Tsu, https://puyonexus.com/wiki/Puyo_Puyo_Tsu/Frame_Data_Tables
 //      -- not confirmed for eSports, kept until someone measures it
 //  [K] https://puyo-camp.jp/posts/135700
+//  [P] the AI framework puyoai, https://github.com/puyoai/puyoai (its model of the arcade version)
 //  [M] the real game on this machine, the picture taken frame by frame and the
 //      inputs written down with their clock
 #include "../core/field_bits.h"
@@ -94,7 +95,7 @@ struct Timing {
     // kicked before it has finished its last half step stays in the upper cell
     // for about 19 frames (7 + 13), which is what makes hops over three and
     // four columns possible; kicked from rest it has 7 frames (three columns
-    // with the first move in the frame of the kick). Same as puyoai (half a step).
+    // with the first move in the frame of the kick). Same as [P] (half a step).
     int liftGain = 64;
     // Gain right after a quick turn: the next half step comes a full 12.8 frames
     // later. Measured (30 fps recordings, six quick turns): turning
@@ -103,12 +104,12 @@ struct Timing {
     // down half a cell. Quick turns repeated faster than that keep the pair up.
     int quickTurnGain = 0;
     // A second rotation press within this many frames makes a quick turn.
-    int quickTurnWindow = 20; // puyoai (arcade)
+    int quickTurnWindow = 20; // [P] (arcade)
     // No rotation is accepted for this many frames after a quick turn starts.
     int quickTurnLock = 3; // [K] accepted again from the 4th frame
     // After the lock: the landing animation, then (split, waves, garbage) and
     // the time for the next pair to appear. Their sum, 28, is measured [V][R];
-    // the division is the arcade one (16-frame bounce [A], 12 frames in puyoai).
+    // the division is the arcade one (16-frame bounce [A], 12 frames in [P]).
     int landFrames = 16;
     int nextFrames = 12;
     // The window of the next pairs moves on before the pair appears. [M], six

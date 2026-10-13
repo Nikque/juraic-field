@@ -888,7 +888,7 @@ static char colorChar(Cell color) {
 }
 
 static std::string fieldToUrl(const Field& field) {
-    // ishikawapuyo.net の盤面コード。2列分の色を8進相当の組み合わせ
+    // 下の URL の盤面コード。2列分の色を8進相当の組み合わせ
     // (left * 8 + right) として、元コードと同じ64文字表で符号化する。
     static constexpr char URL_DIGITS[] =
         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-";

@@ -23,8 +23,8 @@
 //    lands on the 12-high column. The floor kick may also be made on the other
 //    side of the spawn column; the columns crossed on the way back, including
 //    the spawn column, count as hopped.
-// Cases a, b, c and a hop over one column from c are puyoai's
-// PuyoController::isReachable. Hops from a floor kick and over two to four
+// Cases a, b, c and a hop over one column from c are the rule of the AI framework
+// that game/timing.h names as [P]. Hops from a floor kick and over two to four
 // columns were added because they are wall crossings of the real game. Every placement this rule allows is also allowed
 // by the v0.3.0 movement model (tools/compare_reach.cpp).
 #include "field_bits.h"
