@@ -336,16 +336,6 @@ python tests/verify_output.py generator.log --allow-extra
 | `examples/`・`benchmarks/` | 盤面ジェネレーターの例と、その速度の測定の記録 |
 | `licenses/` | Ama のライセンスと、AI のうち Ama に倣っている所の一覧 |
 
-## 確認したルール資料
-
-- [ぷよぷよ用語辞典: 壁越え](https://w.atwiki.jp/puyowords/pages/195.html)、[13段目](https://w.atwiki.jp/puyowords/pages/338.html)、[14段目](https://w.atwiki.jp/puyowords/pages/339.html)、[窒息](https://w.atwiki.jp/puyowords/pages/211.html)
-- [APES作者によるまわしの実装解説](https://w.atwiki.jp/apes_puyo2/pages/15.html) — 13段目の落下・消去対象外、14段目のピースが残ること、軸を浮かせる方法（床蹴りとクイックターン）。
-- [Fish1201: ぷよぷよ通 まわし、画面外操作完全攻略](https://puyo-camp.jp/posts/65520) — 軸の14段目への移動禁止と、14段目の子が障害物として残る仕様。
-- [puyoai](https://github.com/puyoai/puyoai) `src/core/puyo_controller.cc` — 到達規則。
-- [セガ公式: ぷよぷよ通のご紹介](https://vc.sega.jp/3ds/puyo2/) — 左3列目の上端によるゲームオーバーとクイックターン。
-
-窒息の判定時期（連鎖が終わって次の組が出る時）を明記した資料は見つからず、作者の確認に基づいています。
-
 ## ライセンス
 
 [MIT License](LICENSE) © 2026 Nikque
