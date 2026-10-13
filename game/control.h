@@ -2,7 +2,7 @@
 // The falling pair, one frame at a time: movement, rotation, wall kick, floor
 // kick, quick turn, falling, landing and locking.
 //
-// Position model (as in arcade Tsu and in [P] of game/timing.h): the axis
+// Position model (as in the arcade version and in [P] of game/timing.h): the axis
 // piece is in a cell (x, y); `upper` says it is drawn half a cell above that
 // cell. Collisions use the cell only. One step down goes from the upper half
 // to the lower half of the same cell, or from the lower half to the upper half
@@ -252,7 +252,7 @@ inline ControlEvents stepPair(PairControl& p, const GameField& field, uint8_t bu
 }
 
 // A lever of four ways, for whoever reads the buttons of a person and wants no two directions at
-// once (arcade Tsu was played with such a lever; a pad or a keyboard gives down and a direction
+// once (the arcade version was played with such a lever; a pad or a keyboard gives down and a direction
 // together). Of the directions held together only the one pushed last comes out; when it is let
 // go, one that is still held takes over. Of two pushed in the same frame the sideways one counts.
 struct Lever {

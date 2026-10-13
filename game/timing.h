@@ -2,17 +2,17 @@
 // Every frame count of the game in one place (1 frame = 1/60 second).
 //
 // The game and the AI read time only from a Timing object, never from literal
-// numbers, so another specification (arcade Tsu, another simulator, a change
+// numbers, so another specification (the arcade version, another simulator, a change
 // after a new measurement) is one more Timing value.
 //
-// Sources of the default values (the eSports version of the real game, Tsu rule):
-//  [R] measured tables by Ratty, https://puyo-camp.jp/posts/71019 (2018-12)
+// Sources of the default values (the present version of the real game):
+//  [R] measured tables published by Ratty (2018-12)
 //  [V] frame-by-frame measurement of 60 fps videos
 //      (https://www.youtube.com/watch?v=aInHUow40q8 and ...?v=-yAgqHYTyD0)
-//  [A] arcade Tsu, https://puyonexus.com/wiki/Puyo_Puyo_Tsu/Frame_Data_Tables
-//      -- not confirmed for eSports, kept until someone measures it
-//  [K] https://puyo-camp.jp/posts/135700
-//  [P] the AI framework puyoai, https://github.com/puyoai/puyoai (its model of the arcade version)
+//  [A] the frame data tables of the arcade version (a players' wiki)
+//      -- not confirmed for the present version, kept until someone measures it
+//  [K] a published article on the quick turn
+//  [P] a published AI framework for the real game (its model of the arcade version)
 //  [M] the real game on this machine, the picture taken frame by frame and the
 //      inputs written down with their clock
 #include "../core/field_bits.h"
@@ -69,7 +69,7 @@ struct Timing {
     int dropLandPoints = 1;
     // Horizontal auto-repeat: frames before the first repeat, then the interval.
     // [M]: the second move came 10 frames after the first and the next ones 2
-    // frames apart, in all eight holds looked at. (Arcade Tsu: 8 and 2 [A].)
+    // frames apart, in all eight holds looked at. (The arcade version: 8 and 2 [A].)
     int repeatDelay = 10;
     int repeatInterval = 2;
     // Pre-input (Rules::preInput): what is asked for in the last so many frames
@@ -212,7 +212,7 @@ struct Timing {
     }
 };
 
-// The eSports version of the real game, Tsu rule.
+// The present version of the real game.
 inline constexpr Timing DEFAULT_TIMING{};
 
 } // namespace juraic

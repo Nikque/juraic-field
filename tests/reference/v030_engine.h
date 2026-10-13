@@ -429,7 +429,7 @@ static bool dominoTouchesTrigger(
     return containsPoint(trigger, domino.a) || containsPoint(trigger, domino.b);
 }
 
-// A deliberately conservative, discrete Tsu movement model. Axis starts at
+// A deliberately conservative, discrete movement model of the real game. Axis starts at
 // (column 3,row 12), child above; the axis never enters row 14. Normal turns,
 // side/floor kicks and quick turns are searched, without teleporting over walls.
 // We never store a row-14 piece: solutions need no persistent row-14 obstruction.

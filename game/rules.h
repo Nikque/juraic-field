@@ -3,7 +3,7 @@
 // screen. A replay stores this struct, so a replay made with other settings
 // still plays back correctly.
 //
-// The defaults are the Tsu rule of the eSports version of the real game.
+// The defaults are the rules of the present version of the real game.
 // ("The real game" in these sources is the commercial game whose rules this program
 // follows; README.md names it.)
 // Frame counts are not here: they are in timing.h.
@@ -23,8 +23,8 @@ struct Pair {
 // Restriction on the first pairs of the tsumo sequence.
 enum class TsumoCorrection : uint8_t {
     None,       // plain shuffle
-    TwoPairs,   // the first two pairs use at most three colours (the eSports version, the 20th anniversary version, the crossover with Tetris)
-    ThreePairs, // the first three pairs use at most three colours (arcade Tsu)
+    TwoPairs,   // the first two pairs use at most three colours (the present version and the other newer ones)
+    ThreePairs, // the first three pairs use at most three colours (the arcade version)
 };
 
 constexpr int MAX_MARGIN_STEPS = 16;
@@ -41,7 +41,7 @@ struct Rules {
     int targetPoints = 70;
     // Margin time: from marginSeconds on, the rate becomes marginRates[0], and
     // every marginStepSeconds it moves to the next entry; the last entry stays.
-    // The default table is the one of the Tsu rules for 70 points.
+    // The default table is the one of the real game for 70 points.
     int marginSeconds = 96;
     int marginStepSeconds = 16;
     int marginSteps = 11;

@@ -6,7 +6,7 @@
 // Holes inside a column are representable, so the same type serves the
 // generator (compact columns) and the editor / game (floating cells).
 //
-// Rules implemented here (the Tsu rules of the real game, the game this program follows; the README names it):
+// Rules implemented here (those of the real game, the game this program follows; the README names it):
 //  - only the twelve visible rows connect and clear; the 13th row never does,
 //    but it falls when the cells below it disappear;
 //  - a wave clears every group of four or more same-coloured normal pieces,
@@ -240,7 +240,7 @@ struct Wave {
     int groupBonus = 0;
 };
 
-// Tsu scoring tables.
+// The scoring tables of the real game.
 constexpr int CHAIN_BONUS[20] = {0, 0, 8, 16, 32, 64, 96, 128, 160, 192, 224,
                                  256, 288, 320, 352, 384, 416, 448, 480, 512};
 constexpr int COLOR_BONUS[6] = {0, 0, 3, 6, 12, 24};

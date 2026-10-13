@@ -1,7 +1,7 @@
 #pragma once
 // The tsumo sequence (the pairs dealt to the players).
 //
-// Tsu rule: 128 pairs (256 pieces) that repeat, every colour the same number of
+// The rule of the real game: 128 pairs (256 pieces) that repeat, every colour the same number of
 // times, and the first pairs restricted to three colours. Both players of a
 // round get the same sequence.
 //

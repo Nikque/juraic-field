@@ -7,7 +7,7 @@
 //   id 0..5  : vertical in column id
 //   id 6..10 : horizontal in columns (id-6, id-5)
 //
-// The rule (the Tsu rules of the real game):
+// The rule (that of the real game):
 //  - the pair appears in the third column; the game is over if that column
 //    already holds twelve pieces;
 //  - a column of height 11 or less can always be passed;
@@ -42,8 +42,8 @@ constexpr PairPosition pairPosition(int id) {
 }
 
 // How many lower columns the lifted axis piece can cross before it must land.
-// Four: a hop over four columns is possible in the eSports version of the real game (tried
-// on it), which on a six-wide field means any number. The frame-by-frame controller of the
+// Four: a hop over four columns is possible in the real game (tried on it), which on a
+// six-wide field means any number. The frame-by-frame controller of the
 // game reaches exactly these placements (game/control.h, Timing::liftGain;
 // tests/frame_tests.cpp). The generator and the game use the same value.
 constexpr int MAX_HOP = 4;
