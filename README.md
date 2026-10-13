@@ -17,8 +17,6 @@ Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 �
 
 やめる時は、展開したフォルダーごと消せば元に戻ります（レジストリなどには何も書きません）。設定とキーの割り当ては、exe と同じフォルダーの `JuraicField.ini` に保存されます。最初の状態に戻したい時は、このファイルを消してください。
 
-v0.4.0 までの版（名前を変える前の、盤面ジェネレーターだけの版）が保存した盤面ファイルと設定ファイルは、この版では読めません。
-
 ## 遊び方
 
 ### メニュー
@@ -229,7 +227,7 @@ v0.3.0までの移動モデル（壁蹴り・床蹴り・クイックターン�
 
 `config.ini` はUTF-8（BOMあり／なし）で保存できます。`key = value` 形式で、空行と `;` / `#` 以降のコメントを無視します。`[Generator]` などのセクション見出しは読み飛ばします。未知のキー、重複、必須項目の欠落、不正な数値はエラーです。
 
-- 必須は `initial_seed`, `color_count`, `beam_width`, `restarts`, `candidates_per_parent`, `target_success_count` の6項目です。省略時は `target_chain=19`, `min_extra_pieces=0`, `max_extra_pieces=0`, `threads=0` です。v0.4.0 までの設定ファイルは、余剰の 2 つのキーを今の名前（`min_extra_pieces`・`max_extra_pieces`）に書き換えると使えます（前の名前のままだと、未知のキーとして止まります）。
+- 必須は `initial_seed`, `color_count`, `beam_width`, `restarts`, `candidates_per_parent`, `target_success_count` の6項目です。省略時は `target_chain=19`, `min_extra_pieces=0`, `max_extra_pieces=0`, `threads=0` です。
 - `initial_seed` は0〜18446744073709551615の10進整数です。ゲーム内のツモを再現する乱数シードではありません。
 - `beam_width` を大きくすると1回の探索の成功率が上がり、その分1回の時間が増えます。毎秒の生成数はほぼ変わりません。
 - `candidates_per_parent` を1にすると候補が広がらず、ほとんど成功しません。

@@ -23,9 +23,6 @@ not affiliated with SEGA CORPORATION. "Puyo Puyo" is a registered trademark of S
 To remove it, delete the folder (nothing is written to the registry). Settings and bindings are kept in
 `JuraicField.ini` next to the executable; delete that file to start from the defaults again.
 
-Board files and settings files saved by v0.4.0 or before (the board generator alone, before the program had its
-name) are not read by this version.
-
 ## Playing
 
 ### The menu
@@ -281,8 +278,7 @@ order, so **the same settings give the same boards in the same order for any thr
 | `min_extra_pieces` / `max_extra_pieces` | range of extra pieces, at most `78 - 4 * target_chain` | 0 / 0 |
 | `threads` | search threads, 0 = automatic (half of the logical processors) | 0 |
 
-The first six keys are required. A configuration file of v0.4.0 or before works once its two keys for the extra
-pieces carry the names of today (`min_extra_pieces`, `max_extra_pieces`).
+The first six keys are required.
 Exit codes: 0 target reached, 1 attempt limit reached (URLs found so far are kept), 2 configuration or I/O error.
 
 ### Speed
