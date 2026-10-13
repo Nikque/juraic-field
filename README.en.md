@@ -206,12 +206,11 @@ is decided from the column heights alone:
   kick may be made on the other side of the spawn column; the columns crossed on the way back count;
 - a vertical pair needs a column of height 11 or less (nothing is left in the 14th row).
 
-The quick turn, the floor kick and a one-column hop from a 12-high column are puyoai's
-`PuyoController::isReachable`; hops after a floor kick and over two columns were added as ordinary wall
-crossings of the real game (`MAX_HOP` in `core/reach.h`). Every placement this rule allows is also allowed
-by the movement model of v0.3.0 (kicks and quick turns searched without gravity); this was checked for all
-6.45 million height combinations with `tools/compare_reach.cpp`. The remaining difference is hops over
-three or more columns.
+Beside the quick turn, the floor kick and a one-column hop from a 12-high column, hops after a floor kick
+and over two to four columns are allowed: they are ordinary wall crossings of the real game (`MAX_HOP` in
+`core/reach.h`). Every placement this rule allows is also allowed by the movement model of v0.3.0 (kicks
+and quick turns searched without gravity); this was checked for all 6.45 million height combinations with
+`tools/compare_reach.cpp`.
 
 #### Not guaranteed
 

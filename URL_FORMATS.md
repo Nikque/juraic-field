@@ -4,8 +4,8 @@
 
 | GUIの選択肢 | 出力先 | 盤面の表現 |
 |---|---|---|
-| 石川（ishikawapuyo.net） | https://ishikawapuyo.net/simu/pe.html | `?` に続く6bit符号。2セルで1文字、上から行順。 |
-| 対戦パーク（puyop.com） | https://www.puyop.com/s/ | パス末尾に盤面符号。生成対象の通常色は石川と同じ符号で表せます。 |
+| 石川 | https://ishikawapuyo.net/simu/pe.html | `?` に続く6bit符号。2セルで1文字、上から行順。 |
+| 対戦パーク | https://www.puyop.com/s/ | パス末尾に盤面符号。生成対象の通常色は石川と同じ符号で表せます。 |
 | mattulwan系（pndsngミラー） | https://www.pndsng.com/puyo/index.html | `?` に続く文字＋連続数。空=a、赤=b、青=c、黄=d、緑=e、紫=f。 |
 
 各形式は完成盤面78セルを基準に、左上から右下の順で記録します。石川・対戦パークは先頭の空セルを短縮し、mattulwan系は全78セルを連続長で表現します。13段目を削りません。発火箇所の注釈、構築順、seed、準備消去はURLに含まれないため、これらは `.jfchain` を使用してください。外部サイトの設定・得点・連鎖ルールは外部サイト側に従います。
@@ -24,15 +24,8 @@
 
 URLの全セル一致と、外部サイトのシミュレーションルールの一致は別です。mattulwan系の公開実装は走査中に「かた」のピースをおじゃまへ変化させる方式で、接触順序による挙動差があり、「得点」のピースも隣接数によって加点される場合があります。本アプリは同じ波の接触数を先に数え、「得点」のピース1個は1回だけ加算します。これはURL互換の障害ではありませんが、得点の比較時には注意してください。
 
-対戦パークは公式ページにフィールドコード読込・URL出力が明記されています。mattulwan系は元のGeocitiesではなく、運営者が復元・公開しているpndsngのURLを採用しました。puyonexus.com のシミュレーターとrensimも調査しましたが、今回の配布版では静的な盤面URLの互換検証を完了した上記3形式に絞りました。対応先の追加に探索エンジンの変更は不要です。
+対戦パークは公式ページにフィールドコード読込・URL出力が明記されています。mattulwan系は元のGeocitiesではなく、運営者が復元・公開しているpndsngのURLを採用しました。ほかのシミュレーター 2 つも調査しましたが、今回の配布版では静的な盤面URLの互換検証を完了した上記3形式に絞りました。対応先の追加に探索エンジンの変更は不要です。
 
-参照:
-
-- [石川（ishikawapuyo.net）の公開エディタ](https://ishikawapuyo.net/simu/pe.html)、同サイトの `data.js` の `fdsdsf`。
-- [対戦パーク（puyop.com）の公式シミュレーター](https://www.puyop.com/s/)、同ページの `simUrl.decodeShortFcode` / `fcodeToField`。
-- [pndsngのミラー運用説明](https://www.pndsng.com/)、[エディタ](https://www.pndsng.com/puyo/index.html)、`src/Encode.js` と `src/Field.js`。
-- [puyonexus の公開ソース](https://github.com/puyonexus/puyosim)、[rensimの公式ページ](https://rens.im/)。
-
-公開コードは仕様の確認と開発時の復元検証に利用しました。第三者のJavaScriptや素材は製品・ソース配布物へ同梱していません。出力処理は自前のC++実装です。
+参照したのは、上の表の 3 つの出力先の公開ページと、そこで配信されている JavaScript のうち盤面の符号化と復元の部分です。公開コードは仕様の確認と開発時の復元検証に利用しました。第三者のJavaScriptや素材は製品・ソース配布物へ同梱していません。出力処理は自前のC++実装です。
 
 生成時の選択形式は `simulator_urls.txt` に保存します。CLIの出力、探索条件、重複除外、独立検証で使用する `19chain_urls.txt` は従来形式のままです。URL形式は探索に影響しません。
