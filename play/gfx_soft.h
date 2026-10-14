@@ -63,7 +63,9 @@ struct Face {
 
 struct GfxBase {
     Raster raster;
-    Face face[2];           // the normal and the bold weight (without a bold file, the normal one is drawn)
+    // The normal and the bold weight. Text is drawn bold at every size, the nearest to the weights of Windows (semi-bold
+    // for the two smaller sizes, bold for the larger); without a bold file, normal.
+    Face face[2];
     bool shadow = false;    // text is drawn with a dark edge (a picture is behind it)
     static constexpr float SIZES[4] = {18, 24, 36, 60}; // 0 small, 1 normal, 2 large, 3 huge
 
@@ -107,7 +109,7 @@ struct GfxBase {
 
 private:
     void line(const std::wstring& s, float x, float y, float w, float, int size, ColorF c, int align) {
-        Face& f = face[size >= 2 && face[1].ready ? 1 : 0];
+        Face& f = face[face[1].ready ? 1 : 0];
         if (!f.ready) return;
         const float px = SIZES[size] * raster.scale; // (the size in pixels of the window)
         const std::u32string text = toChars(s);
@@ -118,7 +120,9 @@ private:
         }
         const float left = x * raster.scale + raster.dx, boxW = w * raster.scale;
         float pen = align < 0 ? left : align == 0 ? left + (boxW - width) / 2 : left + boxW - width;
-        const float baseline = y * raster.scale + raster.dy + f.ascent(px);
+        // (the line lower by 0.22 of the size: the middle of the letters then stands where DirectWrite puts that of the
+        //  font of Windows, measured on the self-test pictures of both at sizes 18, 24 and 36)
+        const float baseline = y * raster.scale + raster.dy + f.ascent(px) + 0.22f * px;
         for (size_t i = 0; i < text.size(); ++i) {
             const Face::Glyph& g = f.glyph(px, text[i]);
             if (!g.mask.empty()) raster.mask(g.mask.data(), g.w, g.h, int(std::lround(pen)) + g.x, int(std::lround(baseline)) + g.y, c);

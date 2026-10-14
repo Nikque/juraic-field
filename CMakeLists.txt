@@ -65,6 +65,7 @@ else()
         add_custom_command(TARGET juraic_field_game POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/background" "$<TARGET_FILE_DIR:juraic_field_game>/background"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/bgm" "$<TARGET_FILE_DIR:juraic_field_game>/bgm"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/fonts" "$<TARGET_FILE_DIR:juraic_field_game>/fonts"
             VERBATIM)
     else()
         message(STATUS "SDL3 was not found: the game is not built (the engine, the tools and the tests are)")
