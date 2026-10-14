@@ -4,6 +4,8 @@
 // DirectWrite lays it out on Windows closely enough: one line, in a box, from its top, left, centred or right.
 #include "raster.h"
 #include "../third_party/stb/stb_truetype.h"
+#include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>

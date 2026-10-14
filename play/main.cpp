@@ -77,6 +77,10 @@ struct App {
     InputConfig input;
     Pads pads;
     std::filesystem::path exeDirectory;
+    // The files that come with the game (the pictures, the music, the fonts) are read from dataDirectory; the settings,
+    // the replays and one's own pictures and music are in userDirectory. Both are the folder of the program, except in
+    // an application bundle of macOS (play/platform_sdl.h, programFolders).
+    std::filesystem::path dataDirectory, userDirectory;
     Screen screen = Screen::Menu;
     int menuIndex = 0, settingIndex = 0, bindIndex = 0, bindLayout = 0;
     int settingSection = 0;     // the part of the settings screen that is shown (SettingSection)
@@ -137,7 +141,22 @@ struct App {
     std::vector<uint64_t> padWas;
 
     void say(const std::wstring& text) { message = text, messageTimer = 240; }
-    std::filesystem::path iniPath() const { return exeDirectory / L"JuraicField.ini"; }
+    std::filesystem::path iniPath() const { return userDirectory / L"JuraicField.ini"; }
+    // A picture or a piece of music by its place below "background" or "bgm": one's own if there is one, else the game's.
+    std::filesystem::path mediaFile(const wchar_t* kind, const std::filesystem::path& name) const {
+        const std::filesystem::path own = userDirectory / kind / name;
+        std::error_code ignored;
+        return userDirectory == dataDirectory || std::filesystem::exists(own, ignored) ? own : dataDirectory / kind / name;
+    }
+    // The files of a folder below "background" or "bgm", of both places, each name once, in the order of the names.
+    template <size_t N> std::vector<std::wstring> mediaFiles(const wchar_t* kind, const wchar_t* folder, const wchar_t* const (&endings)[N]) const {
+        std::vector<std::wstring> names = filesOf(userDirectory / kind / folder, endings);
+        if (dataDirectory == userDirectory) return names;
+        for (const std::wstring& name : filesOf(dataDirectory / kind / folder, endings))
+            if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+        std::sort(names.begin(), names.end());
+        return names;
+    }
 
     // The buttons of a person for the game, from the actions held: with the quick drop on, up
     // drops the pair; with the diagonal off, the directions go through a lever of four ways.
@@ -223,8 +242,8 @@ struct App {
     // opened (a file put there while the game runs can be chosen without starting it again). The
     // choices stay with their files by name; a file that is gone means none.
     void scanMedia() {
-        for (int k = 0; k < PICTURE_PLACES; ++k) settings.backgroundFiles[k] = filesOf(exeDirectory / L"background" / PICTURE_FOLDERS[k], PICTURE_ENDINGS);
-        for (int k = 0; k < MUSIC_SCENES; ++k) settings.bgmFiles[k] = filesOf(exeDirectory / L"bgm" / MUSIC_FOLDERS[k], MUSIC_ENDINGS);
+        for (int k = 0; k < PICTURE_PLACES; ++k) settings.backgroundFiles[k] = mediaFiles(L"background", PICTURE_FOLDERS[k], PICTURE_ENDINGS);
+        for (int k = 0; k < MUSIC_SCENES; ++k) settings.bgmFiles[k] = mediaFiles(L"bgm", MUSIC_FOLDERS[k], MUSIC_ENDINGS);
         for (int k = 0; k < PICTURE_PLACES; ++k) {
             // (the name follows the file found: it may have another ending than the name asked for, settings.h placeOf)
             settings.background[k] = placeOf(settings.backgroundFiles[k], settings.backgroundName[k]);
@@ -336,7 +355,7 @@ struct App {
         for (int k = 0; k < MUSIC_SCENES && next.empty(); ++k)
             if (const std::wstring file = settings.musicFile(k); !file.empty() && !musicKept.count(file) && !musicFailed.count(file)) next = file;
         if (next.empty()) return;
-        const std::filesystem::path file = exeDirectory / L"bgm" / next;
+        const std::filesystem::path file = mediaFile(L"bgm", next);
         musicJob = std::async(std::launch::async, [file, name = next] {
 #ifdef _WIN32
             const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
@@ -438,7 +457,7 @@ struct App {
         localtime_r(&now, &t);
         std::swprintf(name, 64, L"%ls-%04d%02d%02d-%02d%02d%02d.jfreplay", kind, t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
 #endif
-        return exeDirectory / L"replays" / name;
+        return userDirectory / L"replays" / name;
     }
     void saveTokoReplay() {
         Replay r{settings, 1, TIMING_VERSION, {toko.game.log}};
@@ -580,7 +599,7 @@ struct App {
         case 4: screen = Screen::NetLobby, lobbyEditing = false; break;
         case 5: {
             std::filesystem::path path;
-            if (openDialog(L"リプレイ\0*.jfreplay\0すべてのファイル\0*.*\0", exeDirectory / L"replays", path)) openReplay(path);
+            if (openDialog(L"リプレイ\0*.jfreplay\0すべてのファイル\0*.*\0", userDirectory / L"replays", path)) openReplay(path);
             break;
         }
         case 6:
@@ -1367,7 +1386,7 @@ struct App {
     bool showPicture(int place, const RectF& area) {
         const std::wstring& name = settings.backgroundName[place];
         if (!settings.background[place] || name.empty()) return false;
-        backdropShown[place] = backdrop[place].draw(gfx, exeDirectory / L"background" / PICTURE_FOLDERS[place] / name, area, settings.backgroundDim);
+        backdropShown[place] = backdrop[place].draw(gfx, mediaFile(L"background", std::filesystem::path(PICTURE_FOLDERS[place]) / name), area, settings.backgroundDim);
         if (!backdropShown[place] && backdropFailed[place] != name) {
             backdropFailed[place] = name;
             say(L"背景を読めませんでした: " + name);
@@ -1962,8 +1981,9 @@ int main(int argc, char** argv) {
     static App a; // large (move history): not on the stack
     app = &a;
     a.exeDirectory = programFolder();
+    programFolders(a.dataDirectory, a.userDirectory);
     a.loadAll();
-    a.gfx.loadFonts(a.exeDirectory / "fonts");
+    a.gfx.loadFonts(a.dataDirectory / "fonts");
     std::filesystem::path board, replay;
     for (int i = 1; i + 1 < argc; ++i) {
         const std::string arg = argv[i];
@@ -2020,6 +2040,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     a.exeDirectory = std::filesystem::path(path).parent_path();
+    a.dataDirectory = a.userDirectory = a.exeDirectory;
     a.loadAll();
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &a.factory);
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&a.dwrite));

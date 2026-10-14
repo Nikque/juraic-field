@@ -33,9 +33,31 @@ struct Window {
 
 // The folder the program is in.
 inline std::filesystem::path programFolder() {
+#ifdef __APPLE__
+    if (const char* base = SDL_GetBasePath()) return std::filesystem::path(base);
+    return std::filesystem::current_path();
+#else
     std::error_code failed;
     const std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", failed);
     return failed ? std::filesystem::current_path() : self.parent_path();
+#endif
+}
+// The folder of the files that come with the game, and that of the files the game writes and of one's own pictures
+// and music: both the folder of the program, except in an application bundle of macOS, whose Resources cannot be
+// written to (nor be next to the folders a person puts files in): there ~/Library/Application Support/JuraicField,
+// with the folders for one's own pictures and music made when they are not there.
+inline void programFolders(std::filesystem::path& data, std::filesystem::path& user) {
+    data = user = programFolder();
+#ifdef __APPLE__
+    if (data.filename().empty() ? data.parent_path().filename() != "Resources" : data.filename() != "Resources") return;
+    char* pref = SDL_GetPrefPath("", "JuraicField");
+    if (!pref) return;
+    user = std::filesystem::path(pref);
+    SDL_free(pref);
+    std::error_code ignored;
+    for (const char* folder : {"background/1p", "background/2p", "background/other", "bgm/versus", "bgm/toko", "bgm/menu", "replays"})
+        std::filesystem::create_directories(user / folder, ignored);
+#endif
 }
 
 inline bool openWindow(Window& w, const char* title, int width, int height) {
@@ -147,6 +169,10 @@ inline int virtualKey(SDL_Scancode s) {
     case SDL_SCANCODE_RSHIFT: return VK_RSHIFT;
     case SDL_SCANCODE_LALT: return VK_LMENU;
     case SDL_SCANCODE_RALT: return VK_RMENU;
+#ifdef __APPLE__
+    case SDL_SCANCODE_LGUI: return VK_LCONTROL; // (Command does there what Ctrl does elsewhere: Command+V pastes)
+    case SDL_SCANCODE_RGUI: return VK_RCONTROL;
+#endif
     default: return 0;
     }
 }

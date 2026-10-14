@@ -21,6 +21,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #endif
 
@@ -142,20 +143,24 @@ struct UdpLine : Line {
                 continue;
             }
 #else
-            // (MSG_TRUNC: the length of the whole datagram is returned, so one longer than the buffer - none of
-            //  this game - is passed over as on Windows rather than read cut off)
-            const ssize_t whole = recvfrom(s, buffer, sizeof buffer, MSG_TRUNC, reinterpret_cast<sockaddr*>(&from), &length);
-            if (whole < 0) {
+            iovec part{buffer, sizeof buffer};
+            msghdr message{};
+            message.msg_name = &from, message.msg_namelen = length, message.msg_iov = &part, message.msg_iovlen = 1;
+            const ssize_t got = recvmsg(s, &message, 0);
+            if (got < 0) {
                 // (a refusal that came back from the way there is passed over, the next datagram is read)
                 if (errno != ECONNREFUSED && errno != EINTR) return false; // (nothing is waiting)
                 ++taken;
                 continue;
             }
-            if (whole > ssize_t(sizeof buffer)) {
+            length = message.msg_namelen;
+            // (a datagram longer than the buffer - none of this game - is passed over as on Windows rather than read cut
+            //  off: the system says it was cut, on Linux and on macOS alike)
+            if (message.msg_flags & MSG_TRUNC) {
                 ++taken;
                 continue;
             }
-            const int n = int(whole);
+            const int n = int(got);
 #endif
             ++taken;
             if (n < 4 || buffer[0] != 'J' || buffer[1] != 'F') continue;

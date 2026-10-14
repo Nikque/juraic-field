@@ -62,10 +62,20 @@ else()
                        play/media.h play/settings.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h game/link.h)
         set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
         target_link_libraries(juraic_field_game PRIVATE juraic_engine SDL3::SDL3)
+        if(APPLE)
+            # An application bundle of macOS: the files that come with the game in its Resources (play/platform_sdl.h,
+            # programFolders).
+            set_target_properties(juraic_field_game PROPERTIES MACOSX_BUNDLE TRUE MACOSX_BUNDLE_BUNDLE_NAME "Juraic Field"
+                MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.nikque.juraicfield" MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+                MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+            set(game_files "$<TARGET_BUNDLE_CONTENT_DIR:juraic_field_game>/Resources")
+        else()
+            set(game_files "$<TARGET_FILE_DIR:juraic_field_game>")
+        endif()
         add_custom_command(TARGET juraic_field_game POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/background" "$<TARGET_FILE_DIR:juraic_field_game>/background"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/bgm" "$<TARGET_FILE_DIR:juraic_field_game>/bgm"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/fonts" "$<TARGET_FILE_DIR:juraic_field_game>/fonts"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/background" "${game_files}/background"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/bgm" "${game_files}/bgm"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/fonts" "${game_files}/fonts"
             VERBATIM)
     else()
         message(STATUS "SDL3 was not found: the game is not built (the engine, the tools and the tests are)")
@@ -121,6 +131,18 @@ target_link_libraries(ai_tests PRIVATE Threads::Threads)
     add_test(NAME ai_match_same_result COMMAND ai_match --self-test)
     add_test(NAME ai_toko_same_result COMMAND ai_toko --self-test)
     add_test(NAME ai_tune_same_result COMMAND ai_tune --self-test)
+    # Replays saved by the game on Windows (tests/fixtures/replays), played by the game of this system without a window:
+    # every round must end as it ended there (<name>.expected). They are copied first: --check-replay writes
+    # <name>.result next to the replay.
+    if(TARGET juraic_field_game)
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/replays/" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/replay-fixtures")
+        file(GLOB replay_fixtures "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/replays/*.jfreplay")
+        foreach(replay ${replay_fixtures})
+            get_filename_component(name "${replay}" NAME)
+            get_filename_component(stem "${replay}" NAME_WE)
+            add_test(NAME replay_as_on_windows_${stem} COMMAND juraic_field_game --check-replay "${CMAKE_CURRENT_BINARY_DIR}/replay-fixtures/${name}")
+        endforeach()
+    endif()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(WIN32)

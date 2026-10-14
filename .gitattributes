@@ -1,0 +1,2 @@
+# Replays and the results expected of them are compared byte for byte: their line ends are never changed.
+tests/fixtures/replays/** -text
