@@ -403,13 +403,13 @@ inline int checkReplay(const std::filesystem::path& file) {
     return text.str() == result ? 0 : 8;
 }
 
-// A match over UDP without a window, a script in the own seat (--net-test): the host listens on this machine only,
-// the guest calls. Ticks come every two milliseconds instead of sixty a second. Writes how every round ended and
-// what both seats pressed to `out`; the files of the two programs must be equal. Returns 0 when the match was
-// played to its end.
+// A match over UDP without a window, a script in the own seat (--net-test): the host listens on this machine only
+// (host 1: at ::1, 2: at 127.0.0.1) or, 3, at every address of it (for a guest on another machine); the guest calls.
+// Ticks come every two milliseconds instead of sixty a second. Writes how every round ended and what both seats
+// pressed to `out`; the files of the two programs must be equal. Returns 0 when the match was played to its end.
 inline int netTest(NetPlay& n, int host, const std::string& address, int port, const std::filesystem::path& out) {
     auto line = std::make_unique<UdpLine>();
-    if (host ? !line->listen(port, host) : !line->call(address, port)) return 2;
+    if (host ? !line->listen(port, host == 3 ? 0 : host) : !line->call(address, port)) return 2;
     Settings s;
     s.rules.winsNeeded = 2;
     if (host) n.host(std::move(line), s, "host", 4242, 0);

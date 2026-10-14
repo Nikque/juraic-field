@@ -34,8 +34,10 @@ To remove it, delete the folder (nothing is written to the registry). Settings a
   is there). Settings files, replays and bindings are those of the Windows version.
 - Pictures of your own: png, jpg, bmp; music: mp3, wav, flac (fewer than on Windows).
 - The text is drawn with the font that comes with it, BIZ UDPGothic.
-- **It has been tried on the WSL of Windows only (Ubuntu 22.04, WSLg).** A Linux machine of its own, controllers
-  and network matches with the Windows version have not been tried yet.
+- **It has been tried on the WSL of Windows only (Ubuntu 22.04, WSLg).** A Linux machine of its own and controllers
+  have not been tried yet. A network match with the Windows version was played on one PC (the Linux version in
+  the WSL opened the room, the Windows version came in), scripts on both sides, the same to its end on both;
+  between two machines, and with people at the screens, not yet.
 
 ## Playing
 

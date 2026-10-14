@@ -4,7 +4,8 @@
 
 - **Linux 版（x86-64）。** ゲーム本体 `JuraicField` と CLI の `random_19_chain`、AI のツール、テストが Linux でビルドでき、動きます。窓・音・入力は SDL 3、画面は自前の描画（`play/raster.h`）、文字は同梱の BIZ UDPゴシック、絵は stb_image（png・jpg・bmp）、曲は dr_libs（mp3・wav・flac）で扱います。盤面ジェネレーターの窓は Windows 版だけです。
 - 同じリプレイを Windows と Linux で再生すると同じ結果になります（Windows で保存したリプレイ 117 本で確かめました）。AI の手も同じです（AI どうしの対戦のチェックサムが一致）。設定ファイルとキーの割り当ては、両方で同じ形です。
-- Linux 版は、Windows の WSL（Ubuntu 22.04、WSLg）の上でだけ確かめています。実機の Linux、コントローラー、Windows 版とのネット対戦は、まだ確かめていません。
+- Linux 版は、Windows の WSL（Ubuntu 22.04、WSLg）の上でだけ確かめています。実機の Linux とコントローラーでは、まだ確かめていません。Windows 版とのネット対戦は、同じ PC の中（WSL の Linux 版が部屋を立て、Windows 版が入る）で台本どうしの対戦が最後まで同じに進むことを確かめました（2 台の PC の間と、人が操作する対戦は、まだです）。
+- `--net-test hostall <ポート> <結果>`: すべてのアドレスで待つ部屋（別の PC や WSL から入る試験のため）。
 - Windows 版の動きは変わっていません（自己テストの画像がバイト単位で同じ）。
 
 ## v0.8.1 — 2026-10-14

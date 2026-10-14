@@ -15,7 +15,7 @@
 //              in 8: a match over a line inside the program that delays and loses, saved and played as a replay)
 //   JuraicField.exe --check-replay <file>   self test: play a replay without a window, write <file>.result, exit
 //   JuraicField.exe --net-test host <port> <result file>            self test: a match over UDP on this machine, without
-//                              (host4: the host listens at 127.0.0.1 instead of ::1)
+//                              (host4: the host listens at 127.0.0.1 instead of ::1; hostall: at every address of the machine)
 //   JuraicField.exe --net-test join <address> <port> <result file>  a window: two programs, their result files must be equal
 //
 // Windows: Win32, Direct2D, XAudio2 and Media Foundation. Elsewhere: SDL (play/platform_sdl.h), the drawing engine
@@ -1966,7 +1966,7 @@ int main(int argc, char** argv) {
         if (arg == "--check-replay") return checkReplay(fromUtf8(argv[i + 1]));
         if (arg == "--net-test" && i + 3 < argc) {
             const std::string kind = argv[i + 1];
-            const int host = kind == "host" ? 1 : kind == "host4" ? 2 : 0;
+            const int host = kind == "host" ? 1 : kind == "host4" ? 2 : kind == "hostall" ? 3 : 0;
             if (!host && i + 4 >= argc) return 2;
             return netTest(a.net, host, host ? std::string() : std::string(argv[i + 2]), std::atoi(argv[i + (host ? 2 : 3)]), fromUtf8(argv[i + (host ? 3 : 4)]));
         }
@@ -2027,7 +2027,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         if (std::wstring(argv[i]) == L"--replay") replay = argv[i + 1];
         if (std::wstring(argv[i]) == L"--check-replay") return checkReplay(argv[i + 1]);
         if (std::wstring(argv[i]) == L"--net-test" && i + 3 < argc) {
-            const int host = std::wstring(argv[i + 1]) == L"host" ? 1 : std::wstring(argv[i + 1]) == L"host4" ? 2 : 0;
+            const int host = std::wstring(argv[i + 1]) == L"host" ? 1 : std::wstring(argv[i + 1]) == L"host4" ? 2 : std::wstring(argv[i + 1]) == L"hostall" ? 3 : 0;
             const std::wstring address = host ? L"" : argv[i + 2];
             if (!host && i + 4 >= argc) return 2;
             return netTest(a.net, host, toUtf8(address),_wtoi(argv[i + (host ? 2 : 3)]), argv[i + (host ? 3 : 4)]);
