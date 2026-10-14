@@ -90,12 +90,12 @@ if(BUILD_TESTING)
     add_test(NAME net_match_over_a_line COMMAND net_tests)
     add_executable(replay_tests tests/replay_tests.cpp play/replay.h play/settings.h)
     add_test(NAME replay_files COMMAND replay_tests)
+    # The UDP line with sockets of this machine alone (the host listens at ::1).
+    add_executable(udp_tests tests/udp_tests.cpp play/udp.h play/net.h game/link.h)
     if(WIN32)
-        # The UDP line with sockets of this machine alone (the host listens at ::1).
-        add_executable(udp_tests tests/udp_tests.cpp play/udp.h play/net.h game/link.h)
         target_link_libraries(udp_tests PRIVATE ws2_32)
-        add_test(NAME net_udp_on_this_machine COMMAND udp_tests)
     endif()
+    add_test(NAME net_udp_on_this_machine COMMAND udp_tests)
     # Versus AI (ai/).
     add_executable(ai_tests tests/ai_tests.cpp ai/observe.h ai/duel.h ai/input.h ai/detect.h ai/params.h ai/build.h ai/gaze.h ai/value.h ai/exchange.h ai/pace.h ai/tactics.h ai/level.h)
 target_link_libraries(ai_tests PRIVATE Threads::Threads)

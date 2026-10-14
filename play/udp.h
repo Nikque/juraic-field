@@ -8,15 +8,31 @@
 // (the same network, a VPN, a forwarded port, or IPv6 with the port let through).
 // Anybody can send to an open port, and as much as he likes: what one frame takes from the socket is bounded
 // (MOST_A_FRAME), the rest waits for the next frame or is dropped by the system.
-// <winsock2.h> must come before <windows.h>.
+// Windows: Winsock; <winsock2.h> must come before <windows.h>. Elsewhere: the sockets of POSIX.
 #include "net.h"
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <ifaddrs.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace play {
 
 constexpr int NET_PORT = 50777; // the port a host listens on unless the settings name another
 
+#ifdef _WIN32
+using UdpSocket = SOCKET;
+using AddressLength = int;
+constexpr UdpSocket NO_SOCKET = INVALID_SOCKET;
+inline void closeSocket(UdpSocket s) { closesocket(s); }
 inline bool startSockets() {
     static bool tried = false, good = false;
     if (!tried) {
@@ -25,6 +41,13 @@ inline bool startSockets() {
     }
     return good;
 }
+#else
+using UdpSocket = int;
+using AddressLength = socklen_t;
+constexpr UdpSocket NO_SOCKET = -1;
+inline void closeSocket(UdpSocket s) { close(s); }
+inline bool startSockets() { return true; }
+#endif
 
 // "host", "host:port", "[v6]", "[v6]:port" or a bare IPv6 address. port stays as it is when none is named.
 inline void splitAddress(const std::string& text, std::string& host, int& port) {
@@ -47,9 +70,9 @@ inline void splitAddress(const std::string& text, std::string& host, int& port) 
 }
 
 struct UdpLine : Line {
-    SOCKET s = INVALID_SOCKET;
+    UdpSocket s = NO_SOCKET;
     sockaddr_storage peer{};
-    int peerLength = 0;   // 0: nobody yet (a host that waits)
+    AddressLength peerLength = 0;   // 0: nobody yet (a host that waits)
     bool listening = false;
     // The datagrams taken from the socket since the last tick, whoever sent them and whatever they were: a match
     // brings one or two a frame, and the game must come back to its screen however many there are.
@@ -57,7 +80,7 @@ struct UdpLine : Line {
     int taken = 0;
 
     ~UdpLine() override {
-        if (s != INVALID_SOCKET) closesocket(s);
+        if (s != NO_SOCKET) closeSocket(s);
     }
 
     // The host: any machine may call on this port (local, for tests: only programs of this machine - 1: at ::1,
@@ -65,11 +88,15 @@ struct UdpLine : Line {
     bool listen(int port, int local = 0) {
         if (!startSockets()) return false;
         s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-        if (s == INVALID_SOCKET) return false;
+        if (s == NO_SOCKET) return false;
+#ifdef _WIN32
         DWORD off = 0;
+#else
+        int off = 0;
+#endif
         setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&off), sizeof off); // (IPv4 too)
         sockaddr_in6 any{};
-        any.sin6_family = AF_INET6, any.sin6_port = htons(u_short(port));
+        any.sin6_family = AF_INET6, any.sin6_port = htons(static_cast<unsigned short>(port));
         if (local == 1) any.sin6_addr = in6addr_loopback;
         if (local == 2) {
             const unsigned char mapped[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1};
@@ -86,23 +113,24 @@ struct UdpLine : Line {
         hints.ai_family = AF_UNSPEC, hints.ai_socktype = SOCK_DGRAM, hints.ai_protocol = IPPROTO_UDP;
         if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &found) != 0 || !found) return false;
         std::memcpy(&peer, found->ai_addr, found->ai_addrlen);
-        peerLength = int(found->ai_addrlen);
+        peerLength = AddressLength(found->ai_addrlen);
         s = socket(found->ai_family, SOCK_DGRAM, IPPROTO_UDP);
         freeaddrinfo(found);
-        if (s == INVALID_SOCKET) return false;
+        if (s == NO_SOCKET) return false;
         return ready();
     }
     void send(const Datagram& d) override {
-        if (s == INVALID_SOCKET || !peerLength) return;
+        if (s == NO_SOCKET || !peerLength) return;
         sendto(s, reinterpret_cast<const char*>(d.data()), int(d.size()), 0, reinterpret_cast<const sockaddr*>(&peer), peerLength);
     }
     void tick() override { taken = 0; }
     bool receive(Datagram& d) override {
-        if (s == INVALID_SOCKET) return false;
+        if (s == NO_SOCKET) return false;
         while (taken < MOST_A_FRAME) {
             char buffer[2048];
             sockaddr_storage from{};
-            int length = sizeof from;
+            AddressLength length = sizeof from;
+#ifdef _WIN32
             const int n = recvfrom(s, buffer, sizeof buffer, 0, reinterpret_cast<sockaddr*>(&from), &length);
             if (n == SOCKET_ERROR) {
                 // (not ours to mind, the next datagram is read: a datagram that was refused on the way there comes
@@ -113,6 +141,22 @@ struct UdpLine : Line {
                 ++taken;
                 continue;
             }
+#else
+            // (MSG_TRUNC: the length of the whole datagram is returned, so one longer than the buffer - none of
+            //  this game - is passed over as on Windows rather than read cut off)
+            const ssize_t whole = recvfrom(s, buffer, sizeof buffer, MSG_TRUNC, reinterpret_cast<sockaddr*>(&from), &length);
+            if (whole < 0) {
+                // (a refusal that came back from the way there is passed over, the next datagram is read)
+                if (errno != ECONNREFUSED && errno != EINTR) return false; // (nothing is waiting)
+                ++taken;
+                continue;
+            }
+            if (whole > ssize_t(sizeof buffer)) {
+                ++taken;
+                continue;
+            }
+            const int n = int(whole);
+#endif
             ++taken;
             if (n < 4 || buffer[0] != 'J' || buffer[1] != 'F') continue;
             if (!peerLength) {
@@ -133,13 +177,23 @@ struct UdpLine : Line {
 
 private:
     bool fail() {
-        closesocket(s);
-        s = INVALID_SOCKET;
+        closeSocket(s);
+        s = NO_SOCKET;
         return false;
     }
     bool ready() {
+#ifdef _WIN32
         u_long on = 1;
         if (ioctlsocket(s, FIONBIO, &on) != 0) return fail();
+#else
+        const int flags = fcntl(s, F_GETFL, 0);
+        if (flags < 0 || fcntl(s, F_SETFL, flags | O_NONBLOCK) != 0) return fail();
+        // (Linux counts the whole cost of a datagram against the receive buffer: the default one of 212,992 bytes
+        //  keeps 278 small datagrams, and a datagram of the other end behind a flood of 400 was dropped. The size
+        //  asked for is cut to what the system allows; Linux keeps twice that, 555 small ones by default.)
+        const int most = 1 << 20;
+        setsockopt(s, SOL_SOCKET, SO_RCVBUF, &most, sizeof most);
+#endif
         return true;
     }
 };
@@ -148,6 +202,27 @@ private:
 // router gives the whole house to the outside is not among them).
 inline std::vector<std::string> ownAddresses() {
     std::vector<std::string> out;
+#ifndef _WIN32
+    // (the addresses of the network cards; the name of the machine often leads to a loopback address alone here)
+    ifaddrs* cards = nullptr;
+    if (getifaddrs(&cards) != 0) return out;
+    for (const ifaddrs* c = cards; c; c = c->ifa_next) {
+        if (!c->ifa_addr) continue;
+        char text[INET6_ADDRSTRLEN]{};
+        if (c->ifa_addr->sa_family == AF_INET) {
+            const in_addr& a = reinterpret_cast<const sockaddr_in*>(c->ifa_addr)->sin_addr;
+            if ((ntohl(a.s_addr) >> 24) == 127) continue; // (this machine alone)
+            inet_ntop(AF_INET, &a, text, sizeof text);
+        } else if (c->ifa_addr->sa_family == AF_INET6) {
+            const in6_addr& a = reinterpret_cast<const sockaddr_in6*>(c->ifa_addr)->sin6_addr;
+            if (IN6_IS_ADDR_LINKLOCAL(&a) || IN6_IS_ADDR_LOOPBACK(&a)) continue;
+            inet_ntop(AF_INET6, &a, text, sizeof text);
+        }
+        if (text[0]) out.push_back(text);
+    }
+    freeifaddrs(cards);
+    return out;
+#else
     if (!startSockets()) return out;
     char name[256];
     if (gethostname(name, sizeof name) != 0) return out;
@@ -167,6 +242,7 @@ inline std::vector<std::string> ownAddresses() {
     }
     freeaddrinfo(found);
     return out;
+#endif
 }
 
 } // namespace play
