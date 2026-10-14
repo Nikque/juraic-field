@@ -49,12 +49,13 @@ inline bool openWindow(Window& w, const char* title, int width, int height) {
     SDL_StartTextInput(w.window);      // (the characters typed: the name and the address of a match over a network)
     return true;
 }
+// (SDL itself is not shut down here: the sound and the controllers of the game are let go of when the program ends,
+//  after this, and SDL_Quit would have freed their streams before them)
 inline void closeWindow(Window& w) {
     if (w.texture) SDL_DestroyTexture(w.texture);
     if (w.renderer) SDL_DestroyRenderer(w.renderer);
     if (w.window) SDL_DestroyWindow(w.window);
     w = Window{};
-    SDL_Quit();
 }
 // The size of the inside of the window in pixels of the display.
 inline void windowPixels(const Window& w, int& width, int& height) {
