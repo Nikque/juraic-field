@@ -6,7 +6,8 @@ name: macOS
 
 on:
   push:
-    branches: [linux]
+    branches: [main, linux]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:

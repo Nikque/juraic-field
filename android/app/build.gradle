@@ -1,6 +1,6 @@
 // The APK of the game: the code of CMakeLists.txt at the top of the repository as libmain.so, SDL 3 from its sources
 // (the folder given by -PsdlSource=... or the environment JURAIC_SDL_SOURCE: an unpacked SDL3-3.4.18.tar.gz), whose
-// Java part loads it, and the pictures, the music and the font of media/ as assets (the game puts them into its own
+// Java part loads it, and the pictures, the music and the font of media/ and the licences as assets (the game puts them into its own
 // folder when it first starts: play/platform_sdl.h).
 plugins {
     id 'com.android.application'
@@ -35,9 +35,24 @@ android {
             }
         }
     }
+    // The key of the APKs that are given out (-PreleaseStore=<a PKCS12 file> -PreleasePassword=... -PreleaseAlias=...):
+    // a version installs over the one before only when both are signed with the same key. Without it a release APK is
+    // left unsigned; the debug APK is signed with the debug key of the machine.
+    signingConfigs {
+        release {
+            if (project.hasProperty('releaseStore')) {
+                storeFile file(project.property('releaseStore'))
+                storeType 'pkcs12'
+                storePassword project.property('releasePassword')
+                keyAlias project.property('releaseAlias')
+                keyPassword project.property('releasePassword')
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
+            if (project.hasProperty('releaseStore')) signingConfig signingConfigs.release
         }
     }
     sourceSets.main {
@@ -60,6 +75,7 @@ tasks.register('gameAssets') {
     inputs.dir("${repository}/media/background")
     inputs.dir("${repository}/media/bgm")
     inputs.dir("${repository}/media/fonts")
+    inputs.dir("${repository}/licenses")
     outputs.dir(assetsFolder)
     doLast {
         delete assetsFolder
@@ -69,6 +85,12 @@ tasks.register('gameAssets') {
                 from "${repository}/media/${kind}"
                 into new File(game, kind)
             }
+        }
+        // (the licences of the game and of what the APK contains, which must go with it)
+        copy {
+            from "${repository}/licenses"
+            from "${repository}/LICENSE"
+            into new File(game, 'licenses')
         }
         def names = []
         game.eachFileRecurse(groovy.io.FileType.FILES) { names << game.toPath().relativize(it.toPath()).toString().replace('\\', '/') }
