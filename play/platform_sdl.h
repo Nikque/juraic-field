@@ -84,8 +84,7 @@ inline void programFolders(std::filesystem::path& data, std::filesystem::path& u
             std::ofstream(data / "files.txt", std::ios::binary) << wanted;
         }
     }
-    Uint32 state = 0;
-    const char* outside = SDL_GetAndroidExternalStorageState(&state) && (state & SDL_ANDROID_EXTERNAL_STORAGE_WRITE) ? SDL_GetAndroidExternalStoragePath() : nullptr;
+    const char* outside = (SDL_GetAndroidExternalStorageState() & SDL_ANDROID_EXTERNAL_STORAGE_WRITE) ? SDL_GetAndroidExternalStoragePath() : nullptr;
     user = outside ? std::filesystem::path(outside) : programFolder() / "user";
     for (const char* folder : {"background/1p", "background/2p", "background/other", "bgm/versus", "bgm/toko", "bgm/menu", "replays"})
         std::filesystem::create_directories(user / folder, ignored);
