@@ -11,6 +11,7 @@
 //       n = -4: the screen before a match over a network, n = -5: the settings and the menu, a direction held down (the steps are counted),
 //       n = -6: the end of a match against an AI, the mouse button held down on its level (the steps are counted, and
 //              a window is asked whether it keeps the mouse while the button is down),
+//       n = -7: the screen of the mode that plays the real game's 2P (the Windows build; its rows are checked)
 //       n = -11 to -14: the four parts of the settings
 //              in 8: a match over a line inside the program that delays and loses, saved and played as a replay)
 //   JuraicField.exe --check-replay <file>   self test: play a replay without a window, write <file>.result, exit
@@ -44,6 +45,9 @@
 #include "settings.h"
 #include "udp.h"
 #include "view.h"
+#ifdef _WIN32
+#include "realgame_win.h"
+#endif
 #include <chrono>
 #include <map>
 #include <memory>
@@ -57,7 +61,37 @@ using namespace play;
 
 namespace {
 
-enum class Screen { Menu, Toko, Versus, Replay, Settings, Bindings, NetLobby, Net };
+enum class Screen {
+    Menu, Toko, Versus, Replay, Settings, Bindings, NetLobby, Net,
+#ifdef _WIN32
+    RealGame, // Juraic plays the second player of the real game (play/realgame_win.h)
+#endif
+};
+
+// The items of the menu, in the order they are shown (the mode of the real game is in the Windows build only).
+enum MenuItem { MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH, MENU_REAL_GAME, MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT };
+constexpr MenuItem MENU_ITEMS[] = {MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH,
+#ifdef _WIN32
+                                   MENU_REAL_GAME,
+#endif
+                                   MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT};
+constexpr int MENU_COUNT = int(sizeof MENU_ITEMS / sizeof MENU_ITEMS[0]);
+const wchar_t* menuText(MenuItem item) {
+    switch (item) {
+    case MENU_TOKO: return L"とこ（1 人プレイ）";
+    case MENU_TWO: return L"対戦（2 人）";
+    case MENU_VS_AI: return L"対戦（人 対 AI）";
+    case MENU_WATCH: return L"観戦（AI 対 AI）";
+    case MENU_REAL_GAME: return L"実機の 2P を Juraic が操作";
+    case MENU_NET: return L"ネット対戦（人 対 人）";
+    case MENU_REPLAY: return L"リプレイを見る";
+    case MENU_SETTINGS: return L"設定";
+    case MENU_BINDINGS: return L"操作の割り当て";
+    case MENU_GENERATOR: return L"盤面ジェネレーター";
+    case MENU_QUIT: break;
+    }
+    return L"終了";
+}
 
 // ---- the application --------------------------------------------------------------------
 #ifdef _WIN32
@@ -123,6 +157,9 @@ struct App {
     Toko toko;
     Versus versus;
     Viewer viewer;
+#ifdef _WIN32
+    RealGameMode realGame;
+#endif
     // A match over a network (play/netplay.h) and the screen before it: the own name, the address of the host that is
     // called, the port a host listens on. The three are kept in the settings file. An address is shown only while F1
     // has asked for it (the screen may be on a stream).
@@ -582,51 +619,75 @@ struct App {
 
     // ---- one game frame (1/60 s) ----
     void updateMenu() {
-        const int count = 10;
+        const int count = MENU_COUNT;
         if (heldStep(NAV_UP, 6, 6)) menuIndex = (menuIndex + count - 1) % count, audio.play(SND_MOVE);
         if (heldStep(NAV_DOWN, 6, 6)) menuIndex = (menuIndex + 1) % count, audio.play(SND_MOVE);
         const bool back = nav(NAV_BACK);
         if (!(nav(NAV_OK) | pressed('Z') | pressed('X')) || back) return;
         audio.play(SND_SELECT);
-        switch (menuIndex) {
-        case 0:
+        const MenuItem item = MENU_ITEMS[menuIndex];
+        switch (item) {
+        case MENU_TOKO:
             toko.seed = newSeed();
             toko.start(settings);
             beginGame();
             screen = Screen::Toko;
             break;
-        case 1:
-        case 2: // against the AI: the person is 1P
-        case 3: // two AIs to watch
+        case MENU_TWO:
+        case MENU_VS_AI: // against the AI: the person is 1P
+        case MENU_WATCH: // two AIs to watch
             // (the AI of a seat: its level - the AI settings aiLevel and aiLevel1, ai/level.h - and, at the top level,
             //  Juraic as it is or the one that does not poke, aiStyle and aiStyle1)
-            versus.seat(0, menuIndex == 3 ? aiOfLevel(settings.aiLevel1, settings.aiStyle1) : "", settings);
-            versus.seat(1, menuIndex == 1 ? "" : aiOfLevel(settings.aiLevel, settings.aiStyle), settings);
-            chooseDevices(input, pads, menuIndex == 1 ? 2 : 1, versus.device);
+            versus.seat(0, item == MENU_WATCH ? aiOfLevel(settings.aiLevel1, settings.aiStyle1) : "", settings);
+            versus.seat(1, item == MENU_TWO ? "" : aiOfLevel(settings.aiLevel, settings.aiStyle), settings);
+            chooseDevices(input, pads, item == MENU_TWO ? 2 : 1, versus.device);
             versus.startMatch(settings, newSeed());
             beginGame();
             screen = Screen::Versus;
             break;
-        case 4: screen = Screen::NetLobby, lobbyEditing = false; break;
-        case 5: {
+        case MENU_REAL_GAME:
+#ifdef _WIN32
+            realGame.open(settings.aiStyle, settings.aiLevel);
+            screen = Screen::RealGame;
+#endif
+            break;
+        case MENU_NET: screen = Screen::NetLobby, lobbyEditing = false; break;
+        case MENU_REPLAY: {
             std::filesystem::path path;
             if (openDialog(L"リプレイ\0*.jfreplay\0すべてのファイル\0*.*\0", userDirectory / L"replays", path)) openReplay(path);
             break;
         }
-        case 6:
+        case MENU_SETTINGS:
             scanMedia();
             mediaChanged();
             screen = Screen::Settings;
             break;
-        case 7: screen = Screen::Bindings, binding = false; break;
-        case 8: launchGenerator(); break;
+        case MENU_BINDINGS: screen = Screen::Bindings, binding = false; break;
+        case MENU_GENERATOR: launchGenerator(); break;
 #ifdef _WIN32
-        default: PostMessageW(window, WM_CLOSE, 0, 0);
+        case MENU_QUIT: PostMessageW(window, WM_CLOSE, 0, 0);
 #else
-        default: quit = true;
+        case MENU_QUIT: quit = true;
 #endif
         }
     }
+#ifdef _WIN32
+    // The screen of the mode that plays the real game's 2P: the AI and its level (play/realgame_win.h).
+    void updateRealGame() {
+        RealGameMode& m = realGame;
+        const int count = RealGameMode::ROWS;
+        if (heldStep(NAV_UP, 6, 6)) m.row = (m.row + count - 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
+        if (heldStep(NAV_DOWN, 6, 6)) m.row = (m.row + 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
+        bool heard = false;
+        const bool right = heldStep(NAV_RIGHT, 4, 2, &heard), left = heldStep(NAV_LEFT, 4, 2, &heard);
+        const int change = (right ? 1 : 0) - (left ? 1 : 0);
+        if (change && m.change(change) && heard) audio.play(SND_ROTATE);
+        if (nav(NAV_BACK) || (nav(NAV_OK) && m.row == RealGameMode::ROW_BACK)) {
+            audio.play(SND_SELECT);
+            screen = Screen::Menu;
+        }
+    }
+#endif
     // The settings screen: the parts on the left, the settings of the part chosen on the right. A
     // setting that has no effect as the others stand (SettingItem::enabled) is passed over.
     void updateSettings() {
@@ -1054,6 +1115,9 @@ struct App {
         case Screen::Replay: updateViewer(); break;
         case Screen::NetLobby: updateLobby(); break;
         case Screen::Net: updateNet(); break;
+#ifdef _WIN32
+        case Screen::RealGame: updateRealGame(); break;
+#endif
         }
         typed.clear();   // (what was typed is for the frame it came in)
         clicked = false; // (a click is for the frame it came in)
@@ -1064,12 +1128,12 @@ struct App {
     // ---- drawing ----
     void drawMenu() {
         gfx.text(L"Juraic Field", 0, 70, CANVAS_W, 80, 3, rgb(255, 255, 255), 0);
-        const wchar_t* items[] = {L"とこ（1 人プレイ）", L"対戦（2 人）",   L"対戦（人 対 AI）",   L"観戦（AI 対 AI）", L"ネット対戦（人 対 人）",
-                                  L"リプレイを見る",         L"設定",           L"操作の割り当て",     L"盤面ジェネレーター", L"終了"};
-        for (int i = 0; i < 10; ++i) {
-            const float y = 164 + i * 46.f;
+        // (eleven items, with the mode of the real game: a little closer together, to end above the line of the keys)
+        const float top = MENU_COUNT > 10 ? 152.f : 164.f, gap = MENU_COUNT > 10 ? 43.f : 46.f;
+        for (int i = 0; i < MENU_COUNT; ++i) {
+            const float y = top + i * gap;
             if (i == menuIndex) gfx.round(rectF(410, y - 1, 870, y + 43), 12, rgb(84, 104, 190));
-            gfx.text(items[i], 410, y, 460, 44, 2, i == menuIndex ? rgb(255, 255, 255) : rgb(170, 178, 204), 0);
+            gfx.text(menuText(MENU_ITEMS[i]), 410, y, 460, 44, 2, i == menuIndex ? rgb(255, 255, 255) : rgb(170, 178, 204), 0);
         }
         gfx.text(L"↑↓ で選ぶ　Enter で決定　（コントローラー: 方向と決定ボタン。「操作の割り当て」で変えられます）", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
         gfx.text(pads.count() ? L"コントローラー " + std::to_wstring(pads.count()) + L" 台を認識しています" : L"コントローラーは接続されていません", 0, 668,
@@ -1250,6 +1314,28 @@ struct App {
             if (picks) gfx.text(L"AI の変更: ◀ ▶ をクリック（レベルは押したままで連続。次の対戦から）", 340, 586 + float(picks) * 32, 600, 24, 0, rgb(150, 158, 186), 0);
         }
     }
+#ifdef _WIN32
+    void drawRealGame() {
+        const RealGameMode& m = realGame;
+        gfx.text(L"実機の 2P を Juraic が操作", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
+        const unsigned tint = levelColor(m.level);
+        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", L"戻る"};
+        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level), L""};
+        for (int i = 0; i < RealGameMode::ROWS; ++i) {
+            const float y = 150 + float(i) * 56;
+            const bool on = i == m.row;
+            if (on) gfx.round(rectF(260, y - 6, 1020, y + 40), 8, rgb(84, 104, 190));
+            gfx.text(rows[i], 284, y, 300, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
+            gfx.text(values[i], 600, y, 400, 34, 1, i == RealGameMode::ROW_LEVEL ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 1);
+        }
+        const wchar_t* notes[] = {L"同じ PC で動かしている実機の、オフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなたです）。",
+                                  L"オンラインの対戦では使えません。",
+                                  L"AI とレベルは、開くたびに設定の「AI（2P 側）」「AI のレベル（2P 側）」から始まります（ここで変えても設定は変わりません）。",
+                                  L"実機の画面を読む所と、実機のボタンを押す所は、まだできていません。"};
+        for (int i = 0; i < 4; ++i) gfx.text(notes[i], 0, 452 + float(i) * 30, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
+        gfx.text(L"↑↓ で選ぶ　←→ で変える　Esc で戻る", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
+    }
+#endif
     void drawLobby() {
         gfx.text(L"ネット対戦（人 対 人）", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         const std::wstring hidden(netAddress.size(), L'●');
@@ -1431,6 +1517,9 @@ struct App {
         case Screen::Replay: drawViewer(); break;
         case Screen::NetLobby: drawLobby(); break;
         case Screen::Net: drawNet(); break;
+#ifdef _WIN32
+        case Screen::RealGame: drawRealGame(); break;
+#endif
         }
         if (messageTimer) gfx.text(message, 0, 692, CANVAS_W, 26, 0, rgb(255, 236, 120, std::min(1.f, float(messageTimer) / 30.f)), 0);
     }
@@ -1468,7 +1557,11 @@ struct App {
         bind(rt);
 #endif
         const int mode = frames > 0 ? frames % 10 : 0;
-        screen = frames == -2 || frames == -3 ? Screen::Bindings : frames == -4 ? Screen::NetLobby : frames == -6 ? Screen::Versus : frames < 0 ? Screen::Settings : frames == 0 ? Screen::Menu : mode == 8 ? Screen::Net : mode >= 2 ? Screen::Versus : Screen::Toko;
+        screen = frames == -2 || frames == -3 ? Screen::Bindings : frames == -4 ? Screen::NetLobby : frames == -6 ? Screen::Versus
+#ifdef _WIN32
+                 : frames == -7 ? Screen::RealGame
+#endif
+                 : frames < 0 ? Screen::Settings : frames == 0 ? Screen::Menu : mode == 8 ? Screen::Net : mode >= 2 ? Screen::Versus : Screen::Toko;
         if (frames <= -11 && frames > -11 - SETTING_SECTIONS) {
             // (-11 to -14: the parts of the settings screen, the cursor on the first setting that can be chosen)
             settingSection = -11 - frames, settingInside = true, settingIndex = -1;
@@ -1544,6 +1637,33 @@ struct App {
             if (!good) result = 14;
             say(good ? L"a direction held down: the steps are as the rule says" : L"a direction held down: a count is not what the rule says");
         }
+#ifdef _WIN32
+        if (frames == -7) {
+            // The screen of the mode that plays the real game's 2P (updateRealGame). Result 16 when it does not do what
+            // it says: it opens with the AI of the 2P side in the settings, on the row of the AI; to the left there - the
+            // other AI; down to the row of the level and to the right LEVELS times, a press at a time - round past Lv 36
+            // and back at the level it began with; the settings stay as they were. The picture: that row chosen.
+            const int style = settings.aiStyle, level = settings.aiLevel;
+            realGame.open(style, level);
+            bool good = realGame.style == style && realGame.level == level && realGame.row == RealGameMode::ROW_STYLE;
+            const auto frame = [&](unsigned held) { selfNav = held, updateRealGame(), selfNavWas = selfNav; };
+            const unsigned right = 1u << NAV_RIGHT, left = 1u << NAV_LEFT, below = 1u << NAV_DOWN;
+            frame(left), frame(0);
+            good = good && realGame.style == 1 - style;
+            frame(below), frame(0);
+            good = good && realGame.row == RealGameMode::ROW_LEVEL;
+            bool passed = false;
+            for (int k = 0; k < ai::LEVELS; ++k) frame(right), frame(0), passed = passed || realGame.level == 1;
+            good = good && realGame.level == level && (passed || level == 1);
+            frame(left), frame(0);
+            good = good && realGame.level == (level == 1 ? ai::LEVELS : level - 1);
+            frame(right), frame(0), frame(left | right), frame(0);
+            good = good && realGame.level == level && settings.aiStyle == style && settings.aiLevel == level && screen == Screen::RealGame;
+            selfNav = selfNavWas = 0;
+            if (!good) result = 16;
+            say(good ? L"the screen of the real game's 2P: its rows change as they should" : L"the screen of the real game's 2P: a row is not what it should be");
+        }
+#endif
         if (frames == -6) {
             // The end of a match against an AI, the mouse button held down on ▶ of its level (updateVersus): from level 10,
             // 40 frames - one step at the click and four after HELD_WAIT frames, 15; on to 84 frames - 26; the pointer
