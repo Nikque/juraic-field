@@ -1,6 +1,7 @@
 # The macOS build (Apple Silicon): SDL 3 from its release, the game as an application bundle, the tests, the four
 # checksums of AI matches against those of Windows (the AI must play the same moves on ARM), the self-test pictures,
-# and the bundle, signed for this machine only (ad hoc: no developer certificate), as a zip.
+# and the bundle, signed for this machine only (ad hoc: no developer certificate), as a zip, with the command of the
+# generator.
 name: macOS
 
 on:
@@ -72,6 +73,8 @@ jobs:
           codesign --force --deep --sign - build/JuraicField.app
           codesign --verify --deep --strict build/JuraicField.app && echo "signature: ad hoc, whole"
           ditto -c -k --keepParent build/JuraicField.app JuraicField-macos-arm64.zip
+          plutil -p build/JuraicField.app/Contents/Info.plist | grep -E 'HighResolution|MinimumSystem|ShortVersion'
+          otool -l build/JuraicField.app/Contents/MacOS/JuraicField | grep -A3 LC_BUILD_VERSION | grep -E 'minos|sdk'
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -82,3 +85,4 @@ jobs:
             checksums.txt
             shots
             JuraicField-macos-arm64.zip
+            build/random_19_chain

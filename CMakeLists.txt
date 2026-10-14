@@ -67,7 +67,7 @@ else()
             # programFolders).
             set_target_properties(juraic_field_game PROPERTIES MACOSX_BUNDLE TRUE MACOSX_BUNDLE_BUNDLE_NAME "Juraic Field"
                 MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.nikque.juraicfield" MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
-                MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+                MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}" MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/play/Info.plist.in")
             set(game_files "$<TARGET_BUNDLE_CONTENT_DIR:juraic_field_game>/Resources")
         else()
             set(game_files "$<TARGET_FILE_DIR:juraic_field_game>")
