@@ -1,6 +1,6 @@
 # Changelog
 
-## 次の版（まだ公開していません）
+## v0.9.0 — 2026-10-15
 
 - **Linux 版（x86-64）。** ゲーム本体 `JuraicField` と CLI の `random_19_chain`、AI のツール、テストが Linux でビルドでき、動きます。窓・音・入力は SDL 3、画面は自前の描画（`play/raster.h`）、文字は同梱の BIZ UDPゴシック、絵は stb_image（png・jpg・bmp）、曲は dr_libs（mp3・wav・flac）で扱います。盤面ジェネレーターの窓は Windows 版だけです。
 - 同じリプレイを Windows と Linux で再生すると同じ結果になります（Windows で保存したリプレイ 117 本で確かめました）。AI の手も同じです（AI どうしの対戦のチェックサムが一致）。設定ファイルとキーの割り当ては、両方で同じ形です。

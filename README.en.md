@@ -55,6 +55,9 @@ To remove it, delete the folder (nothing is written to the registry). Settings a
 
 ### Android
 
+`juraic-field-…-android-readme.txt` next to the APK on the release page tells how to install, connect and play (in
+Japanese, with a short part in English).
+
 1. Open the APK from the release page on the device and install it (Android asks once to allow apps from that source).
    Android 8 or later, arm64.
 2. Play with a controller (USB-C or Bluetooth) or a keyboard. There is no touch control (the keyboard of the screen
