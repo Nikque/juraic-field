@@ -1,0 +1,84 @@
+# The macOS build (Apple Silicon): SDL 3 from its release, the game as an application bundle, the tests, the four
+# checksums of AI matches against those of Windows (the AI must play the same moves on ARM), the self-test pictures,
+# and the bundle, signed for this machine only (ad hoc: no developer certificate), as a zip.
+name: macOS
+
+on:
+  push:
+    branches: [linux]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      SDL_VERSION: 3.4.18
+      SDL_SHA256: 9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SDL 3
+        run: |
+          curl -sSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz"
+          echo "$SDL_SHA256  sdl.tar.gz" | shasum -a 256 -c
+          tar xzf sdl.tar.gz
+          cmake -S "SDL3-$SDL_VERSION" -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF \
+                -DSDL_EXAMPLES=OFF -DSDL_INSTALL_DOCS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/sdl3"
+          cmake --build sdl-build -j 4
+          cmake --install sdl-build
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/sdl3"
+          cmake --build build -j 4 2>&1 | tee build.log
+          echo "warnings: $(grep -c 'warning:' build.log || true)"
+
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure -j 3
+
+      - name: Checksums of AI matches (the same as on Windows)
+        run: |
+          set -e
+          common="--pairs 20 --threads 8 --seed 71 --param beamWidth=40 --param beamDepth=10 --param beamQueues=3"
+          old=""
+          for p in evFireHeight=300 x3PokeGain=75 xWildChance=0 xWildEvery=2 x3PokeNet=0 x3PokeFrom=0 x3KeepMain=85 x3Crowd=1000; do old="$old --param-b $p"; done
+          check() {
+            name=$1; want=$2; shift 2
+            got=$(build/ai_match $common "$@" | grep '^checksum' | head -1 | awk '{print $2}')
+            echo "$name : $got (Windows: $want)" | tee -a checksums.txt
+            [ "$got" = "$want" ]
+          }
+          ok=0
+          check "x3 x3" ef98990a96e40722 --a x3 --b x3 || ok=1
+          check "x3 random" f5c959723b0be6f3 --a x3 --b random || ok=1
+          check "x3 x3 old" 96c196b773816620 --a x3 --b x3 $old || ok=1
+          check "x3 x3 hold" ff2131250cdf9c0b --a x3 --b x3 --param-a x3BuildHold=1 || ok=1
+          exit $ok
+
+      - name: Self tests of the game
+        if: always()
+        run: |
+          mkdir -p shots
+          game=build/JuraicField.app/Contents/MacOS/JuraicField
+          for mode in 0 -1 -2 -3 -4 -11 -12 -13 -14 600 601 611 602 3003 3015 30004 30014 30005 30006 30008; do
+            mkdir -p shots/m$mode
+            ( cd shots/m$mode && "$OLDPWD/$game" --screenshot shot.png $mode > log.txt 2>&1 ); echo "$mode exit $?" | tee -a shots/exits.txt
+          done
+
+      - name: Bundle
+        if: always()
+        run: |
+          codesign --force --deep --sign - build/JuraicField.app
+          codesign --verify --deep --strict build/JuraicField.app && echo "signature: ad hoc, whole"
+          ditto -c -k --keepParent build/JuraicField.app JuraicField-macos-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-results
+          path: |
+            build.log
+            checksums.txt
+            shots
+            JuraicField-macos-arm64.zip
