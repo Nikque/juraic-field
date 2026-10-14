@@ -1,9 +1,14 @@
 #pragma once
 // Sound effects made in code (no sound files): short waveforms synthesised at
-// start-up and played through XAudio2. Music - a file of the folder bgm that is
-// chosen in the settings (play/media.h) - is played through one more voice.
+// start-up and played through XAudio2 (elsewhere through audio streams of SDL). Music - a file of the folder bgm
+// that is chosen in the settings (play/media.h) - is played through one more voice.
+#ifdef _WIN32
 #include <windows.h>
 #include <xaudio2.h>
+#else
+#include <SDL3/SDL.h>
+#include <algorithm>
+#endif
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -16,15 +21,43 @@ namespace play {
 inline constexpr int CHAIN_SOUNDS = 19;
 enum Sound { SND_MOVE, SND_ROTATE, SND_LAND, SND_GARBAGE, SND_ALL_CLEAR, SND_OVER, SND_SELECT, SND_CHAIN_1, SND_COUNT = SND_CHAIN_1 + CHAIN_SOUNDS };
 
+// The form of the samples of a piece of music (16 bits).
+#ifdef _WIN32
+using PcmFormat = WAVEFORMATEX;
+#else
+struct PcmFormat {
+    uint16_t wFormatTag = 0, nChannels = 0;
+    uint32_t nSamplesPerSec = 0, nAvgBytesPerSec = 0;
+    uint16_t nBlockAlign = 0, wBitsPerSample = 0;
+};
+#endif
+
 class Audio {
     static constexpr int RATE = 44100, VOICES = 12;
     static constexpr double PI = 3.14159265358979;
+#ifdef _WIN32
     IXAudio2* engine = nullptr;
     IXAudio2MasteringVoice* master = nullptr;
     IXAudio2SourceVoice* voice[VOICES]{};
+    IXAudio2SourceVoice* music = nullptr;
+#else
+    SDL_AudioDeviceID device = 0;
+    SDL_AudioStream* voice[VOICES]{};
+    SDL_AudioStream* music = nullptr;
+    size_t musicAt = 0; // (the byte of the music given to the stream next)
+    // More music for the stream, from where it stands, again from the beginning at the end (on the thread of the sound).
+    static void moreMusic(void* self, SDL_AudioStream* stream, int wanted, int) {
+        Audio& a = *static_cast<Audio*>(self);
+        const std::vector<uint8_t>& p = *a.musicPcm;
+        while (wanted > 0 && !p.empty()) {
+            const size_t n = std::min(size_t(wanted), p.size() - a.musicAt);
+            SDL_PutAudioStreamData(stream, p.data() + a.musicAt, int(n));
+            a.musicAt = (a.musicAt + n) % p.size(), wanted -= int(n);
+        }
+    }
+#endif
     int next = 0;
     std::vector<int16_t> pcm[SND_COUNT];
-    IXAudio2SourceVoice* music = nullptr;
     std::shared_ptr<const std::vector<uint8_t>> musicPcm; // (the voice plays from it: kept as long as the voice is)
 
     // Adds a tone that glides from f0 to f1 Hz. shape: 0 sine, 1 soft square, 2 noise.
@@ -86,6 +119,15 @@ class Audio {
     }
 
 public:
+#ifndef _WIN32
+    // (the streams are let go of before the samples and this object are gone: the sound runs on a thread of its own)
+    ~Audio() {
+        stopMusic();
+        for (SDL_AudioStream*& v : voice)
+            if (v) SDL_DestroyAudioStream(v), v = nullptr;
+        if (device) SDL_CloseAudioDevice(device), device = 0;
+    }
+#endif
     bool init() {
         tone(pcm[SND_MOVE], 0, 620, 500, 0.045, 0.25, 0);
         tone(pcm[SND_ROTATE], 0, 860, 1080, 0.05, 0.22, 0);
@@ -108,6 +150,16 @@ public:
             tone(pcm[SND_CHAIN_1 + n], 0, f, f, 0.12, 0.3, 1);
             tone(pcm[SND_CHAIN_1 + n], 0.07, f * 1.5, f * 1.5, 0.20, 0.3, 1);
         }
+#ifndef _WIN32
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) return false;
+        device = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
+        if (!device) return false;
+        const SDL_AudioSpec format{SDL_AUDIO_S16, 1, RATE};
+        for (auto& v : voice)
+            if (!(v = SDL_CreateAudioStream(&format, nullptr)) || !SDL_BindAudioStream(device, v)) return false;
+        SDL_ResumeAudioDevice(device);
+        return true;
+#else
         if (FAILED(XAudio2Create(&engine, 0, XAUDIO2_DEFAULT_PROCESSOR))) return false;
         if (FAILED(engine->CreateMasteringVoice(&master))) return false;
         WAVEFORMATEX format{};
@@ -120,16 +172,33 @@ public:
         for (auto& v : voice)
             if (FAILED(engine->CreateSourceVoice(&v, &format))) return false;
         return true;
+#endif
     }
     // The volume of the sound effects (the music has its own: setMusicVolume).
     void setVolume(int percent) {
+#ifdef _WIN32
         for (IXAudio2SourceVoice* v : voice)
             if (v) v->SetVolume(float(percent) / 100.0f);
+#else
+        for (SDL_AudioStream* v : voice)
+            if (v) SDL_SetAudioStreamGain(v, float(percent) / 100.0f);
+#endif
     }
     // Music: samples (play/media.h readMusic) played again and again until stopMusic or the next startMusic.
     // (the samples are shared with whoever keeps them for another start: nothing is copied)
-    bool startMusic(std::shared_ptr<const std::vector<uint8_t>> samples, const WAVEFORMATEX& format, int percent) {
+    bool startMusic(std::shared_ptr<const std::vector<uint8_t>> samples, const PcmFormat& format, int percent) {
         stopMusic();
+#ifndef _WIN32
+        if (!device || !samples || samples->empty()) return false;
+        musicPcm = std::move(samples), musicAt = 0;
+        const SDL_AudioSpec from{SDL_AUDIO_S16, int(format.nChannels), int(format.nSamplesPerSec)};
+        music = SDL_CreateAudioStream(&from, nullptr);
+        if (!music) return musicPcm.reset(), false;
+        SDL_SetAudioStreamGain(music, float(percent) / 100.0f);
+        SDL_SetAudioStreamGetCallback(music, moreMusic, this);
+        if (!SDL_BindAudioStream(device, music)) return stopMusic(), false;
+        return true;
+#else
         if (!engine || !samples || samples->empty()) return false;
         musicPcm = std::move(samples);
         if (FAILED(engine->CreateSourceVoice(&music, &format))) return music = nullptr, musicPcm.reset(), false;
@@ -140,17 +209,33 @@ public:
         buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
         music->SetVolume(float(percent) / 100.0f);
         return SUCCEEDED(music->SubmitSourceBuffer(&buffer)) && SUCCEEDED(music->Start());
+#endif
     }
     void stopMusic() {
+#ifdef _WIN32
         if (music) music->Stop(), music->FlushSourceBuffers(), music->DestroyVoice();
+#else
+        if (music) SDL_DestroyAudioStream(music); // (the stream is let go of by the device first: the samples are not read after this)
+#endif
         music = nullptr;
         musicPcm.reset();
     }
     void setMusicVolume(int percent) {
+#ifdef _WIN32
         if (music) music->SetVolume(float(percent) / 100.0f);
+#else
+        if (music) SDL_SetAudioStreamGain(music, float(percent) / 100.0f);
+#endif
     }
     bool musicOn() const { return music != nullptr; }
     void play(int sound) {
+#ifndef _WIN32
+        if (!device || sound < 0 || sound >= SND_COUNT) return;
+        SDL_AudioStream* v = voice[next];
+        next = (next + 1) % VOICES;
+        SDL_ClearAudioStream(v);
+        SDL_PutAudioStreamData(v, pcm[sound].data(), int(pcm[sound].size() * 2));
+#else
         if (!master || sound < 0 || sound >= SND_COUNT) return;
         IXAudio2SourceVoice* v = voice[next];
         next = (next + 1) % VOICES;
@@ -161,6 +246,7 @@ public:
         buffer.AudioBytes = UINT32(pcm[sound].size() * 2);
         buffer.pAudioData = reinterpret_cast<const BYTE*>(pcm[sound].data());
         if (SUCCEEDED(v->SubmitSourceBuffer(&buffer))) v->Start();
+#endif
     }
     void chain(int n) { play(SND_CHAIN_1 + (n < 1 ? 0 : n > CHAIN_SOUNDS ? CHAIN_SOUNDS - 1 : n - 1)); }
     // (for a check outside the game: the samples of a sound)

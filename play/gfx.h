@@ -1,10 +1,10 @@
 #pragma once
-// The drawing of the game: the marks of the system (Direct2D on Windows, play/gfx_d2d.h; SDL elsewhere,
-// play/gfx_sdl.h) and the pieces built of them.
+// The drawing of the game: the marks of the system (Direct2D on Windows, play/gfx_d2d.h; elsewhere a drawing
+// engine of its own, play/gfx_soft.h) and the pieces built of them.
 #ifdef _WIN32
 #include "gfx_d2d.h"
 #else
-#include "gfx_sdl.h"
+#include "gfx_soft.h"
 #endif
 
 namespace play {

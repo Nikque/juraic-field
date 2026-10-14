@@ -52,6 +52,23 @@ if(MSVC)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/background" "$<TARGET_FILE_DIR:juraic_field_game>/background"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/bgm" "$<TARGET_FILE_DIR:juraic_field_game>/bgm"
         VERBATIM)
+else()
+    # The playable game elsewhere: SDL 3 (built as a static library and found by CMAKE_PREFIX_PATH, or installed),
+    # the libraries of one file in third_party/, a drawing engine of its own (play/raster.h).
+    find_package(SDL3 CONFIG)
+    if(SDL3_FOUND)
+        add_executable(juraic_field_game play/main.cpp play/third_party_impl.cpp play/session.h play/view.h play/view_state.h play/canvas.h
+                       play/gfx.h play/gfx_soft.h play/raster.h play/platform_sdl.h play/pad_sdl.h play/keys.h play/keyboard.h play/audio.h
+                       play/media.h play/settings.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h game/link.h)
+        set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
+        target_link_libraries(juraic_field_game PRIVATE juraic_engine SDL3::SDL3)
+        add_custom_command(TARGET juraic_field_game POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/background" "$<TARGET_FILE_DIR:juraic_field_game>/background"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/bgm" "$<TARGET_FILE_DIR:juraic_field_game>/bgm"
+            VERBATIM)
+    else()
+        message(STATUS "SDL3 was not found: the game is not built (the engine, the tools and the tests are)")
+    endif()
 endif()
 
 # Matches between AIs without a screen (ai/, play/replay.h).

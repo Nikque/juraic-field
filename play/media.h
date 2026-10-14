@@ -13,12 +13,21 @@
 // a file that cannot be read is said so on the screen. Not .ogg and .opus: Media Foundation
 // does not read them in a program like this one, with the Web Media Extensions installed
 // either (MF_E_UNSUPPORTED_BYTESTREAM_TYPE).
+// Elsewhere: pictures .png .jpg .jpeg .bmp (stb_image), music .mp3 .wav .flac (dr_mp3, dr_wav, dr_flac).
+#include "audio.h"
 #include "gfx.h"
+#ifdef _WIN32
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <wincodec.h>
 #include <windows.h>
+#else
+#include "../third_party/dr_libs/dr_flac.h"
+#include "../third_party/dr_libs/dr_mp3.h"
+#include "../third_party/dr_libs/dr_wav.h"
+#include "../third_party/stb/stb_image.h"
+#endif
 #include <algorithm>
 #include <cwctype>
 #include <filesystem>
@@ -27,8 +36,13 @@
 
 namespace play {
 
+#ifdef _WIN32
 inline const wchar_t* const PICTURE_ENDINGS[] = {L".png", L".jpg", L".jpeg", L".bmp", L".webp"};
 inline const wchar_t* const MUSIC_ENDINGS[] = {L".mp3", L".wav", L".m4a", L".aac", L".wma", L".flac"};
+#else
+inline const wchar_t* const PICTURE_ENDINGS[] = {L".png", L".jpg", L".jpeg", L".bmp"};
+inline const wchar_t* const MUSIC_ENDINGS[] = {L".mp3", L".wav", L".flac"};
+#endif
 
 // The names of the files of a folder that end in one of `endings`, in the order of their names.
 template <size_t N> std::vector<std::wstring> filesOf(const std::filesystem::path& folder, const wchar_t* const (&endings)[N]) {
@@ -45,6 +59,7 @@ template <size_t N> std::vector<std::wstring> filesOf(const std::filesystem::pat
     return names;
 }
 
+#ifdef _WIN32
 // A picture behind the game: one bitmap of the render target, read when it is first drawn.
 class Backdrop {
     ID2D1Bitmap* bitmap = nullptr;
@@ -102,13 +117,94 @@ public:
         return true;
     }
 };
+#else
+// A picture behind the game: its pixels, read when it is first drawn.
+class Backdrop {
+    std::vector<uint32_t> pixels; // 0xAARRGGBB, the colours multiplied by the opacity
+    int width = 0, height = 0;
+    std::filesystem::path shown, failed; // the file the pixels were read from; a file that could not be read (not tried again)
 
+    bool load(const std::filesystem::path& file) {
+        int n = 0;
+        unsigned char* p = stbi_load(file.string().c_str(), &width, &height, &n, 4);
+        if (!p) return false;
+        pixels.resize(size_t(width) * size_t(height));
+        for (size_t i = 0; i < pixels.size(); ++i) {
+            const uint32_t a = p[4 * i + 3];
+            const auto ch = [a](uint32_t v) { return (v * a + 127) / 255; };
+            pixels[i] = a << 24 | ch(p[4 * i]) << 16 | ch(p[4 * i + 1]) << 8 | ch(p[4 * i + 2]);
+        }
+        stbi_image_free(p);
+        return true;
+    }
+
+public:
+    void release() {
+        pixels.clear(), width = height = 0;
+        shown.clear(), failed.clear();
+    }
+    // Draws the picture of `file` over `area`, darkened by `dim` percent.
+    // False: there is no such picture (nothing is drawn).
+    bool draw(Gfx& gfx, const std::filesystem::path& file, const RectF& area, int dim) {
+        if (file != shown) {
+            if (file == failed) return false;
+            release();
+            if (!load(file)) {
+                failed = file;
+                return false;
+            }
+            shown = file;
+        }
+        const float w0 = float(width), h0 = float(height), width_ = area.right - area.left, height_ = area.bottom - area.top;
+        if (w0 <= 0 || h0 <= 0 || width_ <= 0 || height_ <= 0) return false;
+        // (the part of the picture that has the shape of the area, from its middle)
+        const float scale = std::max(width_ / w0, height_ / h0), w = width_ / scale, h = height_ / scale;
+        gfx.raster.image(pixels.data(), width, height, rectF((w0 - w) / 2, (h0 - h) / 2, (w0 + w) / 2, (h0 + h) / 2), area);
+        if (dim > 0) gfx.fill(area, colorF(0, 0, 0, float(dim) / 100.f));
+        return true;
+    }
+};
+#endif
 // A piece of music as samples (16 bits), read from a file. Media Foundation must be started
 // (MFStartup) and COM initialised on the calling thread. Empty when the file cannot be read.
 struct MusicSamples {
     std::vector<uint8_t> pcm;
-    WAVEFORMATEX format{};
+    PcmFormat format{};
 };
+#ifndef _WIN32
+// (16 bits, read whole by dr_mp3, dr_wav or dr_flac by the ending of the name)
+inline MusicSamples readMusic(const std::filesystem::path& file) {
+    MusicSamples out;
+    std::wstring ending = file.extension().wstring();
+    for (wchar_t& c : ending) c = wchar_t(std::towlower(c));
+    const std::string name = file.string();
+    unsigned channels = 0, rate = 0;
+    uint64_t frames = 0;
+    int16_t* samples = nullptr;
+    if (ending == L".flac") {
+        samples = drflac_open_file_and_read_pcm_frames_s16(name.c_str(), &channels, &rate, reinterpret_cast<drflac_uint64*>(&frames), nullptr);
+    } else if (ending == L".wav") {
+        samples = drwav_open_file_and_read_pcm_frames_s16(name.c_str(), &channels, &rate, reinterpret_cast<drwav_uint64*>(&frames), nullptr);
+    } else if (ending == L".mp3") {
+        drmp3_config config{};
+        samples = drmp3_open_file_and_read_pcm_frames_s16(name.c_str(), &config, reinterpret_cast<drmp3_uint64*>(&frames), nullptr);
+        channels = config.channels, rate = config.sampleRate;
+    }
+    const size_t limit = size_t(600) << 20; // (about an hour of stereo at 44.1 kHz: more is not read)
+    if (samples && channels && rate) {
+        const size_t bytes = std::min(size_t(frames) * channels * 2, limit / (channels * 2) * (channels * 2));
+        out.pcm.assign(reinterpret_cast<const uint8_t*>(samples), reinterpret_cast<const uint8_t*>(samples) + bytes);
+    }
+    if (samples) ending == L".flac" ? drflac_free(samples, nullptr) : ending == L".wav" ? drwav_free(samples, nullptr) : drmp3_free(samples, nullptr);
+    out.format.wFormatTag = 1; // (PCM)
+    out.format.nChannels = uint16_t(channels);
+    out.format.nSamplesPerSec = rate;
+    out.format.wBitsPerSample = 16;
+    out.format.nBlockAlign = uint16_t(channels * 2);
+    out.format.nAvgBytesPerSec = rate * channels * 2;
+    return out;
+}
+#else
 inline MusicSamples readMusic(const std::filesystem::path& file) {
     MusicSamples out;
     IMFSourceReader* reader = nullptr;
@@ -161,5 +257,6 @@ inline MusicSamples readMusic(const std::filesystem::path& file) {
     out.pcm.resize(out.pcm.size() / (out.format.nBlockAlign ? out.format.nBlockAlign : 1) * (out.format.nBlockAlign ? out.format.nBlockAlign : 1));
     return out;
 }
+#endif
 
 } // namespace play

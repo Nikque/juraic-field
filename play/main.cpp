@@ -91,7 +91,7 @@ struct App {
     std::future<std::pair<std::wstring, MusicSamples>> musicJob;
     struct KeptMusic {
         std::shared_ptr<const std::vector<uint8_t>> pcm;
-        WAVEFORMATEX format{};
+        PcmFormat format{};
     };
     std::map<std::wstring, KeptMusic> musicKept;
     std::set<std::wstring> musicFailed; // files that could not be read: said once, not tried again until the folder is looked at again
@@ -1918,7 +1918,7 @@ void handleEvents(App& a) {
         switch (e.type) {
         case SDL_EVENT_QUIT: a.quit = true; break;
         case SDL_EVENT_WINDOW_FOCUS_GAINED: a.focused = true; break;
-        case SDL_EVENT_WINDOW_FOCUS_LOST: a.focused = false, a.mouseDown = false; break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST: a.focused = false, a.mouseDown = false, forgetAllKeys(); break;
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP: noteKey(e.key.scancode, e.type == SDL_EVENT_KEY_DOWN); break;
         case SDL_EVENT_TEXT_INPUT:
