@@ -1117,7 +1117,13 @@ struct App {
                 gfx.circle(cx, y + 20, s.size - 2, (s.size - 2) * 0.92f, in.confirmed ? s.color : colorF(s.color.r, s.color.g, s.color.b, 0.6f));
                 if (s.value >= 180) gfx.text(s.value == 720 ? L"王" : s.value == 360 ? L"月" : L"星", cx - 14, y + 7, 28, 24, 0, rgb(60, 40, 20), 0);
             }
+#ifdef _WIN32
         gfx.text(std::to_wstring(in.total()), x + W * CELL - 80, y + 4, 80, 30, 1, rgb(255, 255, 255), 1);
+#else
+        // (the digits of the font of this version are a third wider: the count stands 14 further right, over the edge
+        //  of the field, clear of the sixth symbol)
+        gfx.text(std::to_wstring(in.total()), x + W * CELL - 66, y + 4, 80, 30, 1, rgb(255, 255, 255), 1);
+#endif
     }
     void drawScore(const Player& p, float x, float y) {
         wchar_t score[16];
