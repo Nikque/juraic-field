@@ -2,7 +2,7 @@
 
 [English README](README.en.md)
 
-Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 人で連鎖を組む「とこ」、同じ PC での 2 人対戦、対戦 AI「Juraic」との対戦、AI どうしの観戦、ネット対戦（人 対 人）、リプレイの保存と再生、連鎖の盤面を作るジェネレーターが入っています。Windows 10 / 11（64 ビット）用と Linux（x86-64）用と macOS（Apple シリコン）用があります。
+Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 人で連鎖を組む「とこ」、同じ PC での 2 人対戦、対戦 AI「Juraic」との対戦、AI どうしの観戦、ネット対戦（人 対 人）、リプレイの保存と再生、連鎖の盤面を作るジェネレーターが入っています。Windows 10 / 11（64 ビット）用、Linux（x86-64）用、macOS（Apple シリコン）用、Android（arm64）用があります。
 
 - `JuraicField.exe`（Linux 版は `JuraicField`、Mac 版は `JuraicField.app`）: ゲーム本体
 - `JuraicFieldGenerator.exe` / `random_19_chain.exe`: 連鎖盤面ジェネレーター（GUI / CLI。GUI は Windows 版だけ）
@@ -35,6 +35,16 @@ Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 �
 
 - 設定・リプレイ・自分の絵と曲は `~/Library/Application Support/JuraicField` に置かれます（形は Windows 版と同じです）。読める絵と曲の形式は Linux 版と同じです。
 - **確かめたのは GitHub の Mac のビルド機（Apple シリコン）の上だけです**: ビルド、テスト（Windows で保存したリプレイの再生を含む）、AI どうしの対戦のチェックサムが Windows と同じこと、窓を出さない自己テストの画像（Linux 版とバイト単位で同じ）。人が Mac で窓を開いて遊ぶこと、音、コントローラーは、まだ確かめていません。
+
+### Android 版
+
+1. Releases の APK を Android の端末で開いて入れます。初めての時は「この提供元のアプリを許可」の確認が出ます。Android 8 以降、arm64 の端末用です。
+2. コントローラー（USB-C や Bluetooth でつなぐもの）かキーボードで遊びます。画面に触れての操作はありません（ネット対戦の名前とアドレスの入力の時だけ、画面のキーボードが出ます）。端末の戻るボタンは Esc と同じです。
+
+- 画面は横向きです。同梱の絵・曲・フォントは、初めて開いた時にアプリの中に取り出します（少し時間がかかります）。
+- 設定・リプレイ・自分の絵と曲は `Android/data/io.github.nikque.juraicfield/files` に置かれます（ファイル管理のアプリや、USB でつないだ PC から届きます）。読める絵と曲の形式は Linux 版と同じです。
+- スマートフォンの CPU では、AI の 1 手の時間の中で探索が狭まり、同じレベルでも弱くなることがあります（見込み。レベルの中身は同じです）。
+- **確かめたのは GitHub のビルド機の上だけです**: APK を作れること、エミュレーター（x86_64、Android 14）で開いてメニューが描かれ、45 秒動き続け、音の出口が開き、絵・曲・フォントが取り出されること。実機、コントローラー、キーボード、音を聞くこと、対局、ネット対戦は、まだ確かめていません。
 
 ## 遊び方
 
@@ -294,7 +304,7 @@ python tests/verify_output.py run.log --allow-extra
 
 ## ビルドとテスト
 
-Visual Studio 2022 などの C++20 コンパイラーと CMake 3.16 以降を使います。x64 では SSE4.1 と POPCNT を使います（PEXT/PDEP は実行時に CPU を判定して使い分けます）。それ以外の CPU 向けに 64bit 演算だけの実装も入っています（`core/field_bits.h`）。盤面ジェネレーターの GUI は Windows（MSVC）だけです。ゲーム本体は Windows では Direct2D・XAudio2 で、Linux では SDL 3 で動きます（下）。ジェネレーターの CLI、AI のツール（`ai_match` など）、盤面コア・ゲーム・AI・通信のテストは GCC と Clang でもビルドできます。macOS では、ゲーム本体はアプリ（`JuraicField.app`）になります。GitHub Actions の `.github/workflows/macos.yml` が、Apple シリコンの Mac でビルドとテストを行います。
+Visual Studio 2022 などの C++20 コンパイラーと CMake 3.16 以降を使います。x64 では SSE4.1 と POPCNT を使います（PEXT/PDEP は実行時に CPU を判定して使い分けます）。それ以外の CPU 向けに 64bit 演算だけの実装も入っています（`core/field_bits.h`）。盤面ジェネレーターの GUI は Windows（MSVC）だけです。ゲーム本体は Windows では Direct2D・XAudio2 で、Linux では SDL 3 で動きます（下）。ジェネレーターの CLI、AI のツール（`ai_match` など）、盤面コア・ゲーム・AI・通信のテストは GCC と Clang でもビルドできます。macOS では、ゲーム本体はアプリ（`JuraicField.app`）になります。GitHub Actions の `.github/workflows/macos.yml` が、Apple シリコンの Mac でビルドとテストを行います。Android 版は `android/`（Gradle）で作ります。SDL 3 の配布物を展開したフォルダーを `-PsdlSource=` で渡し、SDL の Android 用の部品（Java と Gradle のラッパー）もそこから使います。手順は `.github/workflows/android.yml` にあります。
 
 ```powershell
 cmake -S . -B build

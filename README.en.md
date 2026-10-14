@@ -4,7 +4,7 @@
 
 Juraic Field is a falling-block puzzle program for versus and solo play: building chains alone, two players on
 one PC, matches against the versus AI "Juraic", watching two AIs, matches between two people over a network,
-replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit), on Linux (x86-64) and on macOS (Apple silicon). The screens are in Japanese.
+replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit), on Linux (x86-64), on macOS (Apple silicon) and on Android (arm64). The screens are in Japanese.
 
 - `JuraicField.exe` (`JuraicField` on Linux, `JuraicField.app` on macOS): the game
 - `JuraicFieldGenerator.exe` / `random_19_chain.exe`: the chain board generator (GUI / CLI; the GUI on Windows only)
@@ -52,6 +52,22 @@ To remove it, delete the folder (nothing is written to the registry). Settings a
   saved on Windows play the same), AI matches give the checksums of Windows, and the self-test pictures, taken without
   a window, are those of the Linux version byte for byte. A person playing it in a window, the sound and controllers
   have not been tried yet.
+
+### Android
+
+1. Open the APK from the release page on the device and install it (Android asks once to allow apps from that source).
+   Android 8 or later, arm64.
+2. Play with a controller (USB-C or Bluetooth) or a keyboard. There is no touch control (the keyboard of the screen
+   appears only to type the name and the address of a network match). The back button is Esc.
+
+- Landscape. The pictures, the music and the font are copied out of the APK the first time (it takes a moment).
+- Settings, replays and your own pictures and music are in `Android/data/io.github.nikque.juraicfield/files` (a file
+  manager or a PC on USB reaches it). It reads the formats the Linux version reads.
+- On the CPU of a phone the AI's search may be narrower within its time, so a level may play weaker (expected; the
+  levels are the same).
+- **Tried on the machines of GitHub only**: the APK builds; on an emulator (x86_64, Android 14) it opens, draws the
+  menu, runs for 45 seconds, opens its sound and copies out its files. A real device, controllers, keyboards, hearing
+  the sound, playing and network matches have not been tried yet.
 
 ## Playing
 
@@ -331,7 +347,8 @@ See [BENCHMARK.md](BENCHMARK.md) (Japanese).
 A C++20 compiler (e.g. Visual Studio 2022) and CMake 3.16 or later. On x64 the code uses SSE4.1 and
 POPCNT; PEXT/PDEP is chosen at run time. A plain 64-bit implementation is included and tested as well. The GUI of the
 generator builds on Windows with MSVC only; the game runs on Direct2D and XAudio2 on Windows and on SDL 3 on
-Linux (below); the generator's CLI (with GCC and Clang), the AI tools (`ai_match`
+Linux (below); the generator's CLI (with GCC and Clang; the Android version is built from `android/` with Gradle, see
+`.github/workflows/android.yml`), the AI tools (`ai_match`
 and others) and the tests of the core, the game, the AI and the network code also build with GCC.
 
 ```powershell

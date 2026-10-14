@@ -7,6 +7,7 @@
 - Linux 版は、Windows の WSL（Ubuntu 22.04、WSLg）の上でだけ確かめています。実機の Linux とコントローラーでは、まだ確かめていません。Windows 版とのネット対戦は、同じ PC の中（WSL の Linux 版が部屋を立て、Windows 版が入る）で台本どうしの対戦が最後まで同じに進むことを確かめました（2 台の PC の間と、人が操作する対戦は、まだです）。
 - `--net-test hostall <ポート> <結果>`: すべてのアドレスで待つ部屋（別の PC や WSL から入る試験のため）。
 - **Mac 版（Apple シリコン、macOS 11 以降）。** `JuraicField.app`。設定・リプレイ・自分の絵と曲は `~/Library/Application Support/JuraicField`。Apple の署名と公証は受けていません（最初の 1 回は「システム設定」→「プライバシーとセキュリティ」→「このまま開く」）。GitHub の Mac のビルド機でだけ確かめています（ビルド、テスト、AI の手が Windows と同じこと、窓を出さない自己テスト）。
+- **Android 版（arm64、Android 8 以降）。** APK。コントローラーかキーボードで遊びます（画面に触れての操作はありません）。設定・リプレイ・自分の絵と曲は `Android/data/io.github.nikque.juraicfield/files`。GitHub のビルド機でビルドし、エミュレーター（Android 14）で起動してメニューが描かれることまで確かめています（実機・コントローラーはまだ）。
 - テストに、Windows で保存したリプレイ 9 本を各 OS のゲームで再生して結果を比べるものを足しました（`tests/fixtures/replays`）。
 - Windows 版の動きは変わっていません（自己テストの画像がバイト単位で同じ）。
 
