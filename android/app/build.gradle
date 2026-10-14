@@ -15,8 +15,12 @@ def assetsFolder = layout.buildDirectory.dir('gameAssets').get().asFile
 android {
     namespace = 'io.github.nikque.juraicfield'
     compileSdkVersion 35
+    // (the NDK of the machine, when it names one: its folder and its version, which must agree)
     def ndkFolder = System.getenv('ANDROID_NDK_LATEST_HOME')
-    if (ndkFolder != null) ndkPath = ndkFolder
+    if (ndkFolder != null) {
+        ndkPath = ndkFolder
+        ndkVersion = (new File(ndkFolder, 'source.properties').text =~ /Pkg\.Revision\s*=\s*([0-9.]+)/)[0][1]
+    }
     defaultConfig {
         applicationId 'io.github.nikque.juraicfield'
         minSdkVersion 26
