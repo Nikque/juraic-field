@@ -4,10 +4,10 @@
 
 Juraic Field is a falling-block puzzle program for versus and solo play: building chains alone, two players on
 one PC, matches against the versus AI "Juraic", watching two AIs, matches between two people over a network,
-replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit). The screens are in Japanese.
+replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit) and on Linux (x86-64). The screens are in Japanese.
 
-- `JuraicField.exe`: the game
-- `JuraicFieldGenerator.exe` / `random_19_chain.exe`: the chain board generator (GUI / CLI)
+- `JuraicField.exe` (`JuraicField` on Linux): the game
+- `JuraicFieldGenerator.exe` / `random_19_chain.exe`: the chain board generator (GUI / CLI; the GUI on Windows only)
 
 The rules follow those of Puyo Puyo Tsu. Juraic Field is an unofficial program made by an individual and is
 not affiliated with SEGA CORPORATION. "Puyo Puyo" is a registered trademark of SEGA CORPORATION.
@@ -22,6 +22,20 @@ not affiliated with SEGA CORPORATION. "Puyo Puyo" is a registered trademark of S
 
 To remove it, delete the folder (nothing is written to the registry). Settings and bindings are kept in
 `JuraicField.ini` next to the executable; delete that file to start from the defaults again.
+
+### Linux
+
+1. Unpack `juraic-field-…-linux-x86_64.tar.gz` from the release page (`tar xzf juraic-field-…-linux-x86_64.tar.gz`).
+2. Start `./JuraicField` in the unpacked folder. Nothing is installed.
+
+- It should run on Linux of the generation of Ubuntu 22.04 and later (glibc 2.35 or later), on an X11 or Wayland
+  desktop; the sound goes through PulseAudio, PipeWire or ALSA.
+- It plays what the Windows version plays (without the window of the board generator; the CLI `random_19_chain`
+  is there). Settings files, replays and bindings are those of the Windows version.
+- Pictures of your own: png, jpg, bmp; music: mp3, wav, flac (fewer than on Windows).
+- The text is drawn with the font that comes with it, BIZ UDPGothic.
+- **It has been tried on the WSL of Windows only (Ubuntu 22.04, WSLg).** A Linux machine of its own, controllers
+  and network matches with the Windows version have not been tried yet.
 
 ## Playing
 
@@ -299,8 +313,9 @@ See [BENCHMARK.md](BENCHMARK.md) (Japanese).
 ## Build and test
 
 A C++20 compiler (e.g. Visual Studio 2022) and CMake 3.16 or later. On x64 the code uses SSE4.1 and
-POPCNT; PEXT/PDEP is chosen at run time. A plain 64-bit implementation is included and tested as well. The game
-(`JuraicField.exe`) and the GUI build on Windows with MSVC only; the generator's CLI, the AI tools (`ai_match`
+POPCNT; PEXT/PDEP is chosen at run time. A plain 64-bit implementation is included and tested as well. The GUI of the
+generator builds on Windows with MSVC only; the game runs on Direct2D and XAudio2 on Windows and on SDL 3 on
+Linux (below); the generator's CLI, the AI tools (`ai_match`
 and others) and the tests of the core, the game, the AI and the network code also build with GCC.
 
 ```powershell
@@ -311,12 +326,32 @@ ctest --test-dir build -C Release --output-on-failure
 
 The build copies the pictures and the music of `media/` next to the game.
 
+On Linux the game is built when SDL 3 is found (without it, the game alone is left out). Build SDL 3 as a static
+library and name it with `CMAKE_PREFIX_PATH`. The libraries of one file that read pictures, music and fonts
+(stb_image, stb_truetype, dr_flac, dr_mp3, dr_wav) are in `third_party/`.
+
+```bash
+# SDL 3 (in the unpacked SDL3-3.4.18.tar.gz of https://github.com/libsdl-org/SDL/releases)
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_X11_XTEST=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX=$HOME/sdl3
+cmake --build build && cmake --install build
+
+# Juraic Field
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$HOME/sdl3
+cmake --build build
+ctest --test-dir build --output-on-failure
+./build/JuraicField
+```
+
+The packages SDL 3 needs to build on Ubuntu 22.04: `cmake ninja-build pkg-config libasound2-dev libpulse-dev
+libpipewire-0.3-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev
+libxkbcommon-dev libwayland-dev libdecor-0-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev
+libegl1-mesa-dev libdbus-1-dev libudev-dev`. On Linux the build also copies the font (`media/fonts`) to `fonts`.
+
 The tests compare the bitboard core with cell-by-cell references (including the unchanged v0.3.0 engine
 in `tests/reference/`); check the rules of the game move by move and frame by frame, also against an independent
 simulator in Python; play network matches over lines that delay, lose and reorder inside one program, and give
 an end datagrams that are not those of a match played by the rules (`game_linked_rounds`,
-`net_match_over_a_line`); check the UDP line with sockets of the same machine (`net_udp_on_this_machine`,
-Windows); read replay files back and refuse those that are not whole or name no delay a round can take
+`net_match_over_a_line`); check the UDP line with sockets of the same machine (`net_udp_on_this_machine`); read replay files back and refuse those that are not whole or name no delay a round can take
 (`replay_files`); cover the AI and its tools; generate and independently verify
 228 settings of the generator (chains 1-19, 3/4/5 colours, minimum, odd and maximum extras); and cover
 configuration, history files, thread independence and the GUI.
@@ -337,12 +372,13 @@ The game has self tests that need no window:
 | `core/` | the bitboard core (headers only) |
 | `game/` | the rules of the game (headers only): rules, frame counts, the pieces, the controls, one player, a round of two, and the late garbage of a network match |
 | `ai/` | the versus AI (headers only): search, evaluation, reading, tactics, the clock, the levels, the settings |
-| `play/` | the game itself (Direct2D, XAudio2): screen, sound, input, settings, replays, network |
+| `play/` | the game itself: screen, sound, input, settings, replays, network; the parts of Windows (Direct2D, XAudio2, Media Foundation, Win32) and of Linux (SDL 3, a drawing engine of its own, `raster.h`) apart by `#ifdef` |
 | `generator/`, `app/`, `gui/` | the chain board generator: the search, the CLI, the Windows GUI and editor |
-| `media/` | the pictures and the music that come with the game, and how they were made |
+| `media/` | the pictures and the music that come with the game, how they were made, and the font of the Linux version (`fonts/`) |
+| `third_party/` | the libraries of one file the Linux version uses (stb, dr_libs) and their licences |
 | `tests/`, `tools/` | the tests; matches between AIs (`ai_match`), measuring and tuning tools, benchmarks |
 | `examples/`, `benchmarks/` | examples of the generator and the record of its speed measurements |
-| `licenses/` | Ama's licence and the list of what the AI takes from Ama |
+| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic) |
 
 ## License
 
@@ -352,4 +388,6 @@ The game has self tests that need no window:
 - Parts of the versus AI follow [Ama](https://github.com/citrus610/ama) (MIT License, Copyright (c) 2023
   citrus610): see [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt) and
   [licenses/Ama-LICENSE.txt](licenses/Ama-LICENSE.txt).
+- The Linux version contains SDL 3 (zlib License), stb (MIT or public domain), dr_libs (public domain or MIT-0)
+  and BIZ UDPGothic (SIL Open Font License 1.1); their licences are in `licenses/`.
 - No warranty.
