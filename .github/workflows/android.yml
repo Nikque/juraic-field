@@ -46,6 +46,9 @@ jobs:
             echo "$RELEASE_KEY" | base64 -d > "$RUNNER_TEMP/release.p12"
             ./gradlew --no-daemon assembleRelease -PreleaseStore="$RUNNER_TEMP/release.p12" -PreleasePassword="$RELEASE_PASSWORD" -PreleaseAlias=juraicfield 2>&1 | tee -a ../gradle.log
             ls -l app/build/outputs/apk/release/
+            # (the signature checked, and whose it is)
+            apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+            "$apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk | tee ../apk-signature.txt
           fi
           echo "warnings of the game's code: $(grep -c 'puyo-19-chain-generator.*warning:\|juraic-field.*warning:' ../gradle.log || true)"
           ls -l app/build/outputs/apk/debug/
@@ -62,6 +65,7 @@ jobs:
           path: |
             gradle.log
             apk-contents.txt
+            apk-signature.txt
             android/app/build/outputs/apk/debug/app-debug.apk
             android/app/build/outputs/apk/release/*.apk
 
