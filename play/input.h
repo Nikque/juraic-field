@@ -129,6 +129,18 @@ inline bool upHeld(int device, const Pads& pads, bool focused) {
 
 using juraic::Lever; // (the setting "diagonal" off: the directions of a person go through it, control.h)
 
+// The buttons of a person held as a game begins do not count until they have been let go: on a controller the
+// button that chose the game in the menu is a rotation, and the game takes a button held in its first frame for
+// one pressed then (with pre-input the first pair would turn).
+struct HeldAtStart {
+    uint8_t waiting = 0; // buttons held over from the beginning, not let go yet
+    void begin() { waiting = 0xFF; } // (whatever is held in the next frame is held over)
+    uint8_t operator()(uint8_t buttons) {
+        waiting &= buttons;
+        return uint8_t(buttons & ~waiting);
+    }
+};
+
 // Devices for the two players when none was chosen: controllers first.
 inline void chooseDevices(const InputConfig& config, const Pads& pads, int players, int device[2]) {
     int nextPad = 0;

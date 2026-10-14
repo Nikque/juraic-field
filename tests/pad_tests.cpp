@@ -1,7 +1,8 @@
-// The controllers of the Windows game (play/pad.h): which pads SDL reads, and that a pad read by SDL is not read a
-// second time as a raw controller of Windows. With --live: what every connected pad gives, for ten seconds.
+// The controllers of the Windows game (play/pad.h, play/input.h): which pads SDL reads, that a pad read by SDL is not read a
+// second time as a raw controller of Windows, and that a button held as a game begins waits to be let go. With --live: what
+// every connected pad gives, for ten seconds.
 #define NOMINMAX // (as play/main.cpp: pad.h uses std::min)
-#include "../play/pad.h"
+#include "../play/input.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -53,6 +54,19 @@ int main(int argc, char** argv) {
     check(Pads::rawWanted(0x0F0D, 0x00C1, bySdl), "a HORIPAD is read raw as before");
     check(Pads::rawWanted(0x054C, 0x0CE6, bySdl), "a pad SDL has not opened is read raw as before");
     check(Pads::rawWanted(0x057E, 0x2009, {}), "with SDL reading nothing, every raw controller is read as before");
+
+    // The buttons held as a game begins (on a controller the button that chose it in the menu is a rotation): none of
+    // them counts until it has been let go.
+    {
+        HeldAtStart h;
+        check(h(juraic::BTN_CW) == juraic::BTN_CW, "before a game begins, the buttons pass");
+        h.begin();
+        check(h(juraic::BTN_CW) == 0, "the button held as the game began does not count");
+        check(h(juraic::BTN_CW | juraic::BTN_LEFT) == juraic::BTN_LEFT, "a button pressed after the beginning counts while the other is held");
+        check(h(0) == 0 && h(juraic::BTN_CW) == juraic::BTN_CW, "let go and pressed again, the button counts");
+        h.begin();
+        check(h(0) == 0 && h(juraic::BTN_CCW) == juraic::BTN_CCW, "with nothing held as the game began, the first press counts");
+    }
 
     std::printf(failures ? "%d FAILED\n" : "pad tests passed\n", failures);
     return failures ? 1 : 0;

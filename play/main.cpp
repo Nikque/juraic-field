@@ -119,6 +119,7 @@ struct App {
     bool binding = false; // waiting for the key or button of bindIndex
     unsigned tokoHeld = 0; // actions held in the previous frame of toko
     Lever lever[2];        // the directions of each person, when the diagonal is off
+    HeldAtStart heldAtStart[2]; // the buttons of each person held as a game began (beginGame)
     Toko toko;
     Versus versus;
     Viewer viewer;
@@ -168,7 +169,12 @@ struct App {
     uint8_t personButtons(int seat, unsigned held, bool up, bool quickDrop) {
         uint8_t b = gameButtons(held);
         if (quickDrop && up) b |= BTN_DROP;
+        b = heldAtStart[seat](b);
         return settings.diagonal ? b : lever[seat](b);
+    }
+    // A game begins (toko, a match, a match over a network): the buttons the people hold now count once let go.
+    void beginGame() {
+        for (HeldAtStart& h : heldAtStart) h.begin();
     }
 
     bool down(int vk) const { return focused && keyDown(vk); }
@@ -586,6 +592,7 @@ struct App {
         case 0:
             toko.seed = newSeed();
             toko.start(settings);
+            beginGame();
             screen = Screen::Toko;
             break;
         case 1:
@@ -597,6 +604,7 @@ struct App {
             versus.seat(1, menuIndex == 1 ? "" : aiOfLevel(settings.aiLevel, settings.aiStyle), settings);
             chooseDevices(input, pads, menuIndex == 1 ? 2 : 1, versus.device);
             versus.startMatch(settings, newSeed());
+            beginGame();
             screen = Screen::Versus;
             break;
         case 4: screen = Screen::NetLobby, lobbyEditing = false; break;
@@ -852,7 +860,7 @@ struct App {
                     v.picked[i] = false;
                 }
             }
-            if (again) v.startMatch(settings, newSeed());
+            if (again) v.startMatch(settings, newSeed()), beginGame();
             if (back) screen = Screen::Menu;
             return;
         }
@@ -971,6 +979,7 @@ struct App {
         }
         chooseDevices(input, pads, 1, netDevice);
         netQuit = 0;
+        beginGame();
         screen = Screen::Net;
     }
     // The match. There is no pause; the keyboard's Esc pressed twice leaves it (a button of a controller never does:
@@ -992,7 +1001,7 @@ struct App {
         } else {
             netQuit = 0;
             if (net.stage == NetPlay::Over ? (back || ok) : back) return leaveNet();
-            if (net.stage == NetPlay::MatchEnd && (ok || start)) net.askAgain(), audio.play(SND_SELECT);
+            if (net.stage == NetPlay::MatchEnd && (ok || start)) net.askAgain(), beginGame(), audio.play(SND_SELECT);
         }
         const int device = netDevice[0];
         // (the quick drop of the match, which is the host's: net.settings, not this machine's own)
