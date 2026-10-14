@@ -48,6 +48,9 @@
 #include <map>
 #include <memory>
 #include <set>
+#ifdef __ANDROID__
+#include <SDL3/SDL_main.h> // (main is called by the activity of SDL; last, as it renames the word main)
+#endif
 
 using namespace juraic;
 using namespace play;
@@ -2016,6 +2019,7 @@ int main(int argc, char** argv) {
     const std::chrono::nanoseconds frameTime(1000000000 / FPS);
     Clock::time_point next = Clock::now();
     for (;;) {
+        wantTyping(a.window, a.screen == Screen::NetLobby && a.lobbyEditing);
         handleEvents(a);
         if (a.quit) {
             a.net.leave(); // (the other end of a match is told)

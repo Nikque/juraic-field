@@ -1,0 +1,54 @@
+# The Android build (arm64): SDL 3 from its release, the game as libmain.so in an APK with SDL's Java part, signed
+# with the debug key of the machine that builds it (for trying it; each run has another key), kept as an artifact.
+name: Android
+
+on:
+  push:
+    branches: [linux]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      SDL_VERSION: 3.4.18
+      SDL_SHA256: 9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: SDL 3
+        run: |
+          curl -sSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz"
+          echo "$SDL_SHA256  sdl.tar.gz" | sha256sum -c
+          tar xzf sdl.tar.gz -C "$RUNNER_TEMP"
+          echo "JURAIC_SDL_SOURCE=$RUNNER_TEMP/SDL3-$SDL_VERSION" >> "$GITHUB_ENV"
+          # (the Gradle wrapper of SDL's Android project)
+          cp -r "$RUNNER_TEMP/SDL3-$SDL_VERSION/android-project/gradlew" "$RUNNER_TEMP/SDL3-$SDL_VERSION/android-project/gradle" android/
+          echo "NDK: $ANDROID_NDK_LATEST_HOME"
+
+      - name: APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug 2>&1 | tee ../gradle.log
+          echo "warnings of the game's code: $(grep -c 'puyo-19-chain-generator.*warning:\|juraic-field.*warning:' ../gradle.log || true)"
+          ls -l app/build/outputs/apk/debug/
+
+      - name: What is in the APK
+        run: |
+          unzip -l android/app/build/outputs/apk/debug/app-debug.apk | grep -E 'lib/|assets/game/files.txt|classes|AndroidManifest' | tee apk-contents.txt
+          unzip -p android/app/build/outputs/apk/debug/app-debug.apk assets/game/files.txt | tee -a apk-contents.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-results
+          path: |
+            gradle.log
+            apk-contents.txt
+            android/app/build/outputs/apk/debug/app-debug.apk

@@ -15,6 +15,9 @@
 #include <ctime>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,11 +32,15 @@ struct Window {
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* texture = nullptr;
     int textureW = 0, textureH = 0;
+    bool typing = false; // the characters typed are asked for (the keyboard of the screen is shown on Android)
 };
 
 // The folder the program is in.
 inline std::filesystem::path programFolder() {
-#ifdef __APPLE__
+#ifdef __ANDROID__
+    if (const char* inside = SDL_GetAndroidInternalStoragePath()) return std::filesystem::path(inside);
+    return std::filesystem::current_path();
+#elif defined(__APPLE__)
     if (const char* base = SDL_GetBasePath()) return std::filesystem::path(base);
     return std::filesystem::current_path();
 #else
@@ -48,6 +55,41 @@ inline std::filesystem::path programFolder() {
 // with the folders for one's own pictures and music made when they are not there.
 inline void programFolders(std::filesystem::path& data, std::filesystem::path& user) {
     data = user = programFolder();
+#ifdef __ANDROID__
+    // Android: the files that come with the game are assets of the APK, below "game" with their list game/files.txt; they are
+    // copied into the own folder of the app on the first start (and when the list is another: a new version). The
+    // settings, the replays and one's own pictures and music are in the folder of the app that a file manager or a PC
+    // on USB can reach (Android/data/<the app>/files), else in the own folder.
+    data = programFolder() / "game";
+    std::error_code ignored;
+    size_t listSize = 0;
+    if (void* list = SDL_LoadFile("game/files.txt", &listSize)) {
+        const std::string wanted(static_cast<const char*>(list), listSize);
+        SDL_free(list);
+        std::ifstream had(data / "files.txt", std::ios::binary);
+        const std::string have((std::istreambuf_iterator<char>(had)), std::istreambuf_iterator<char>());
+        if (have != wanted) {
+            std::istringstream lines(wanted);
+            for (std::string line; std::getline(lines, line);) {
+                const size_t space = line.rfind(' ');
+                if (line.rfind("version ", 0) == 0 || space == std::string::npos) continue;
+                const std::string name = line.substr(0, space);
+                size_t size = 0;
+                void* bytes = SDL_LoadFile(("game/" + name).c_str(), &size);
+                if (!bytes) continue;
+                std::filesystem::create_directories((data / name).parent_path(), ignored);
+                std::ofstream(data / name, std::ios::binary).write(static_cast<const char*>(bytes), std::streamsize(size));
+                SDL_free(bytes);
+            }
+            std::ofstream(data / "files.txt", std::ios::binary) << wanted;
+        }
+    }
+    Uint32 state = 0;
+    const char* outside = SDL_GetAndroidExternalStorageState(&state) && (state & SDL_ANDROID_EXTERNAL_STORAGE_WRITE) ? SDL_GetAndroidExternalStoragePath() : nullptr;
+    user = outside ? std::filesystem::path(outside) : programFolder() / "user";
+    for (const char* folder : {"background/1p", "background/2p", "background/other", "bgm/versus", "bgm/toko", "bgm/menu", "replays"})
+        std::filesystem::create_directories(user / folder, ignored);
+#endif
 #ifdef __APPLE__
     if (data.filename().empty() ? data.parent_path().filename() != "Resources" : data.filename() != "Resources") return;
     char* pref = SDL_GetPrefPath("", "JuraicField");
@@ -62,14 +104,36 @@ inline void programFolders(std::filesystem::path& data, std::filesystem::path& u
 
 inline bool openWindow(Window& w, const char* title, int width, int height) {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) return false;
+#ifdef __ANDROID__
+    w.window = SDL_CreateWindow(title, width, height, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+#else
     w.window = SDL_CreateWindow(title, width, height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+#endif
     if (!w.window) return false;
     w.renderer = SDL_CreateRenderer(w.window, nullptr);
     if (!w.renderer) return false;
     SDL_SetRenderVSync(w.renderer, 1); // (drawing waits for the display)
-    SDL_StartTextInput(w.window);      // (the characters typed: the name and the address of a match over a network)
+#ifndef __ANDROID__
+    SDL_StartTextInput(w.window); // (the characters typed: the name and the address of a match over a network)
+    w.typing = true;
+#endif
     return true;
+}
+// The characters typed are wanted (a text of the screen before a match over a network is being written) or not. On
+// Android this shows and hides the keyboard of the screen; elsewhere they are always taken.
+inline void wantTyping(Window& w, bool on) {
+#ifdef __ANDROID__
+    if (on == w.typing || !w.window) return;
+    if (on) SDL_StartTextInput(w.window);
+    else SDL_StopTextInput(w.window);
+    w.typing = on;
+#else
+    (void)w, (void)on;
+#endif
 }
 // (SDL itself is not shut down here: the sound and the controllers of the game are let go of when the program ends,
 //  after this, and SDL_Quit would have freed their streams before them)
@@ -167,6 +231,9 @@ inline int virtualKey(SDL_Scancode s) {
     case SDL_SCANCODE_RCTRL: return VK_RCONTROL;
     case SDL_SCANCODE_LSHIFT: return VK_LSHIFT;
     case SDL_SCANCODE_RSHIFT: return VK_RSHIFT;
+#ifdef __ANDROID__
+    case SDL_SCANCODE_AC_BACK: return VK_ESCAPE; // (the back button of Android)
+#endif
     case SDL_SCANCODE_LALT: return VK_LMENU;
     case SDL_SCANCODE_RALT: return VK_RMENU;
 #ifdef __APPLE__
@@ -236,6 +303,17 @@ inline bool chooseFile(Window& w, const wchar_t* filter, const std::filesystem::
     while (!answer.done) SDL_PumpEvents(), SDL_Delay(10);
     if (answer.file.empty()) return false;
     chosen = std::filesystem::path(answer.file);
+#ifdef __ANDROID__
+    // (Android hands over a content:// address: the file is read through SDL and put into older to be opened)
+    if (answer.file.rfind("content://", 0) == 0) {
+        size_t size = 0;
+        void* bytes = SDL_LoadFile(answer.file.c_str(), &size);
+        if (!bytes) return false;
+        chosen = folder / "opened.jfreplay";
+        std::ofstream(chosen, std::ios::binary).write(static_cast<const char*>(bytes), std::streamsize(size));
+        SDL_free(bytes);
+    }
+#endif
     return true;
 }
 

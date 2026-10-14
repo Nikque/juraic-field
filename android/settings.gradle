@@ -1,0 +1,3 @@
+// The Android version of the game (an APK). Built with SDL 3 from its sources: see app/build.gradle and
+// .github/workflows/android.yml.
+include ':app'

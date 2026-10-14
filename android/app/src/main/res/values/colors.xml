@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- (the colour of the ground of the game's screen, play/main.cpp) -->
+    <color name="ground">#1C2036</color>
+</resources>

@@ -52,6 +52,19 @@ if(MSVC)
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/background" "$<TARGET_FILE_DIR:juraic_field_game>/background"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/bgm" "$<TARGET_FILE_DIR:juraic_field_game>/bgm"
         VERBATIM)
+elseif(ANDROID)
+    # The game for Android: the shared library "main" that the activity of SDL loads (android/), and SDL 3 built from
+    # its sources (JURAIC_SDL_SOURCE: an unpacked release of SDL). The pictures, the music and the font are assets of
+    # the APK (android/app/build.gradle).
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${JURAIC_SDL_SOURCE}" sdl)
+    add_library(juraic_field_game SHARED play/main.cpp play/third_party_impl.cpp play/session.h play/view.h play/view_state.h play/canvas.h
+                play/gfx.h play/gfx_soft.h play/raster.h play/platform_sdl.h play/pad_sdl.h play/keys.h play/keyboard.h play/audio.h
+                play/media.h play/settings.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h game/link.h)
+    set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME main)
+    target_link_libraries(juraic_field_game PRIVATE juraic_engine SDL3::SDL3)
 else()
     # The playable game elsewhere: SDL 3 (built as a static library and found by CMAKE_PREFIX_PATH, or installed),
     # the libraries of one file in third_party/, a drawing engine of its own (play/raster.h).

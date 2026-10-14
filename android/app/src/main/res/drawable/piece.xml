@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A piece as the game draws it (play/gfx.h, Gfx::piece): a red body, a light, two eyes; in the middle of the 108 x 108
+     of an adaptive icon, inside its safe circle of 66. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#59141828" android:pathData="M54,25.4a28,26.4 0 1,0 0.01,0z" />
+    <path android:fillColor="#E84046" android:pathData="M54,29.2a26,23.2 0 1,0 0.01,0z" />
+    <path android:fillColor="#59FFFFFF" android:pathData="M46,33.5a9.5,5.3 0 1,0 0.01,0z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M45,48.3a5.6,6.4 0 1,0 0.01,0z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M63,48.3a5.6,6.4 0 1,0 0.01,0z" />
+    <path android:fillColor="#181824" android:pathData="M45,52.1a2.8,3.4 0 1,0 0.01,0z" />
+    <path android:fillColor="#181824" android:pathData="M63,52.1a2.8,3.4 0 1,0 0.01,0z" />
+</vector>

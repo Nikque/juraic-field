@@ -1,0 +1,75 @@
+// The APK of the game: the code of CMakeLists.txt at the top of the repository as libmain.so, SDL 3 from its sources
+// (the folder given by -PsdlSource=... or the environment JURAIC_SDL_SOURCE: an unpacked SDL3-3.4.18.tar.gz), whose
+// Java part loads it, and the pictures, the music and the font of media/ as assets (the game puts them into its own
+// folder when it first starts: play/platform_sdl.h).
+plugins {
+    id 'com.android.application'
+}
+
+def sdlSource = project.findProperty('sdlSource') ?: System.getenv('JURAIC_SDL_SOURCE')
+if (sdlSource == null) throw new GradleException('Name the unpacked SDL 3 source with -PsdlSource=<folder>')
+def repository = file('../..')
+def version = (file('../../CMakeLists.txt').text =~ /project\(juraic_field VERSION ([0-9.]+)/)[0][1]
+def assetsFolder = layout.buildDirectory.dir('gameAssets').get().asFile
+
+android {
+    namespace = 'io.github.nikque.juraicfield'
+    compileSdkVersion 35
+    def ndkFolder = System.getenv('ANDROID_NDK_LATEST_HOME')
+    if (ndkFolder != null) ndkPath = ndkFolder
+    defaultConfig {
+        applicationId 'io.github.nikque.juraicfield'
+        minSdkVersion 26
+        targetSdkVersion 35
+        versionCode 1
+        versionName version
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_PLATFORM=android-26', '-DANDROID_STL=c++_static', "-DJURAIC_SDL_SOURCE=${sdlSource}", '-DBUILD_TESTING=OFF'
+                abiFilters 'arm64-v8a'
+                targets 'juraic_field_game', 'SDL3-shared' // (the game and SDL alone: not the tools of the repository)
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    sourceSets.main {
+        java.srcDirs += "${sdlSource}/android-project/app/src/main/java"
+        assets.srcDirs += assetsFolder
+    }
+    externalNativeBuild {
+        cmake {
+            path '../../CMakeLists.txt'
+        }
+    }
+    lint {
+        abortOnError = false
+    }
+}
+
+// The files that come with the game, below "game" in the assets, and their list (game/files.txt), by which the game
+// copies them out on its first start and again when the list is another.
+tasks.register('gameAssets') {
+    inputs.dir("${repository}/media/background")
+    inputs.dir("${repository}/media/bgm")
+    inputs.dir("${repository}/media/fonts")
+    outputs.dir(assetsFolder)
+    doLast {
+        delete assetsFolder
+        def game = new File(assetsFolder, 'game')
+        ['background', 'bgm', 'fonts'].each { kind ->
+            copy {
+                from "${repository}/media/${kind}"
+                into new File(game, kind)
+            }
+        }
+        def names = []
+        game.eachFileRecurse(groovy.io.FileType.FILES) { names << game.toPath().relativize(it.toPath()).toString().replace('\\', '/') }
+        names.sort()
+        new File(game, 'files.txt').text = "version ${version}\n" + names.collect { n -> "${n} ${new File(game, n).length()}" }.join('\n') + '\n'
+    }
+}
+preBuild.dependsOn 'gameAssets'

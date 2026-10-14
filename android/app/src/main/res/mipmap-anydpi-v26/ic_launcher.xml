@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The icon of the game: a piece of the game on its ground (drawable/piece.xml). -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ground" />
+    <foreground android:drawable="@drawable/piece" />
+</adaptive-icon>
