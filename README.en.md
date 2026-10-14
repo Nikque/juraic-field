@@ -98,7 +98,9 @@ Japanese, with a short part in English).
 | pause | P | T |
 
 Controllers (Xbox ones and others) work too. With the setting クイックドロップ on, up (↑ on keyboard 1, W on
-keyboard 2, up on a controller) drops the pair at once; with it off, ↑ also rotates right in solo play.
+keyboard 2, up on a controller) drops the pair at once; with it off, ↑ also rotates right in solo play. On Windows,
+PlayStation pads and the Switch Pro Controller and Joy-Con are read through SDL 3 and taken by the places of their
+buttons, as Xbox pads are (the lower button rotates left, the right one rotates right).
 
 In solo play: Backspace takes a move back, R plays the same pieces again, N takes new pieces, O practises from a
 board file, E empties the board, Ctrl+C / Ctrl+V copy and paste the seed, F5 saves a replay. A board file of the
@@ -362,6 +364,21 @@ ctest --test-dir build -C Release --output-on-failure
 
 The build copies the pictures and the music of `media/` next to the game.
 
+On Windows, when SDL 3 is found, PlayStation pads and the Switch Pro Controller and Joy-Con are read through it: once
+another program has asked them for reports of their own kind (the Pro Controller on USB always), the generic reading
+of Windows sees directions and buttons held that nobody holds. Without SDL 3 the game still builds and reads those
+pads the generic way. Build SDL 3 as a static library and point `CMAKE_PREFIX_PATH` at it:
+
+```powershell
+# SDL 3 (in the unpacked SDL3-3.4.18.tar.gz of https://github.com/libsdl-org/SDL/releases)
+cmake -S . -B build -A x64 -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_INSTALL_PREFIX=C:/sdl3
+cmake --build build --config Release
+cmake --install build --config Release
+
+# Juraic Field
+cmake -S . -B build -DCMAKE_PREFIX_PATH=C:/sdl3
+```
+
 On Linux the game is built when SDL 3 is found (without it, the game alone is left out). Build SDL 3 as a static
 library and name it with `CMAKE_PREFIX_PATH`. The libraries of one file that read pictures, music and fonts
 (stb_image, stb_truetype, dr_flac, dr_mp3, dr_wav) are in `third_party/`.
@@ -414,7 +431,7 @@ The game has self tests that need no window:
 | `third_party/` | the libraries of one file the Linux version uses (stb, dr_libs) and their licences |
 | `tests/`, `tools/` | the tests; matches between AIs (`ai_match`), measuring and tuning tools, benchmarks |
 | `examples/`, `benchmarks/` | examples of the generator and the record of its speed measurements |
-| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic) |
+| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic; SDL 3 also in the Windows version) |
 
 ## License
 
@@ -425,5 +442,6 @@ The game has self tests that need no window:
   citrus610): see [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt) and
   [licenses/Ama-LICENSE.txt](licenses/Ama-LICENSE.txt).
 - The Linux version contains SDL 3 (zlib License), stb (MIT or public domain), dr_libs (public domain or MIT-0)
-  and BIZ UDPGothic (SIL Open Font License 1.1); their licences are in `licenses/`.
+  and BIZ UDPGothic (SIL Open Font License 1.1); their licences are in `licenses/`. The Windows version contains
+  SDL 3 as well, for reading controllers.
 - No warranty.

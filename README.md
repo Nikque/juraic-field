@@ -73,7 +73,7 @@ Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 �
 | 左回転 / 右回転 | Z / X | F / G |
 | 一時停止 | P | T |
 
-コントローラー（Xbox 系とそれ以外）も使えます。割り当てはメニューの「操作の割り当て」で変えられます。設定の「クイックドロップ」を「あり」にすると、上（キーボード 1 は ↑、キーボード 2 は W、コントローラーは上）が「一気に落とす」になります。「なし」の時、とこでは ↑ でも右回転できます。
+コントローラー（Xbox 系とそれ以外）も使えます。割り当てはメニューの「操作の割り当て」で変えられます。Windows 版では、PlayStation のパッドと Switch の Pro コントローラー・Joy-Con を SDL 3 で読み、Xbox 系と同じくボタンの位置で扱います（下のボタンが左回転、右のボタンが右回転）。設定の「クイックドロップ」を「あり」にすると、上（キーボード 1 は ↑、キーボード 2 は W、コントローラーは上）が「一気に落とす」になります。「なし」の時、とこでは ↑ でも右回転できます。
 
 とこでは、Backspace で 1 手戻す、R で同じツモでやり直す、N で新しいツモ、O で盤面ファイルからの練習、E で空の盤面、Ctrl+C / Ctrl+V でシードのコピーと貼り付け、F5 でリプレイの保存ができます。盤面ファイル（ジェネレーターの `.jfchain`・`.jfboard`）は、ウィンドウにドロップしても開けます。
 
@@ -318,6 +318,18 @@ cd build/Release
 
 性能測定は必ず **Release** で行ってください。ビルドすると、`media/` の絵と曲が exe の隣（`background`・`bgm`）に写されます。
 
+Windows では、SDL 3 があると、PlayStation のパッドと Switch の Pro コントローラー・Joy-Con をそれで読みます。これらのパッドは、ほかのソフトに頼まれると独自の形で送るようになり（Pro コントローラーは USB では必ず）、Windows の汎用の読み方では、押していない方向やボタンが押されているように読めてしまうためです。SDL 3 が無くてもビルドはでき、その時はこれらのパッドも汎用の読み方で読みます。SDL 3 は静的ライブラリーとしてビルドし、`CMAKE_PREFIX_PATH` で指します。
+
+```powershell
+# SDL 3（https://github.com/libsdl-org/SDL/releases の SDL3-3.4.18.tar.gz を展開したフォルダーで）
+cmake -S . -B build -A x64 -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_INSTALL_PREFIX=C:/sdl3
+cmake --build build --config Release
+cmake --install build --config Release
+
+# Juraic Field
+cmake -S . -B build -DCMAKE_PREFIX_PATH=C:/sdl3
+```
+
 Linux では、SDL 3 があればゲーム本体もビルドされます（無ければゲーム本体だけを飛ばします）。SDL 3 は静的ライブラリーとしてビルドしておき、`CMAKE_PREFIX_PATH` で指します。絵・曲・文字の読み込みに使う 1 ファイルのライブラリー（stb_image・stb_truetype・dr_flac・dr_mp3・dr_wav）は `third_party/` に入っています。
 
 ```bash
@@ -382,7 +394,7 @@ python tests/verify_output.py generator.log --allow-extra
 | `tests/` | テスト。`tests/reference/v030_engine.h` は照合用に残した v0.3.0 のエンジン |
 | `tools/` | AI どうしの対戦（`ai_match`）、1 人での探索の測定と調整（`ai_toko`・`ai_tune`）、ベンチマーク、到達規則の比較、配布物の作成 |
 | `examples/`・`benchmarks/` | 盤面ジェネレーターの例と、その速度の測定の記録 |
-| `licenses/` | Ama のライセンスと、AI のうち Ama に倣っている所の一覧。Linux 版に入るもの（SDL 3・stb・dr_libs・BIZ UDPゴシック）のライセンス |
+| `licenses/` | Ama のライセンスと、AI のうち Ama に倣っている所の一覧。Linux 版に入るもの（SDL 3・stb・dr_libs・BIZ UDPゴシック。SDL 3 は Windows 版にも）のライセンス |
 
 ## ライセンス
 
@@ -390,5 +402,5 @@ python tests/verify_output.py generator.log --allow-extra
 
 - 同梱の絵と曲（`media/`）も、同じ条件で使えます。作り方は [media/README.md](media/README.md) にあります。
 - 対戦 AI の一部は [Ama](https://github.com/citrus610/ama)（MIT License、Copyright (c) 2023 citrus610）に倣っています。どこが該当するかは [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt)、Ama のライセンスは [licenses/Ama-LICENSE.txt](licenses/Ama-LICENSE.txt) にあります。
-- Linux 版には、SDL 3（zlib License）、stb（MIT か public domain）、dr_libs（public domain か MIT-0）、BIZ UDPゴシック（SIL Open Font License 1.1）が入っています。それぞれのライセンスは `licenses/` にあります。
+- Linux 版には、SDL 3（zlib License）、stb（MIT か public domain）、dr_libs（public domain か MIT-0）、BIZ UDPゴシック（SIL Open Font License 1.1）が入っています。それぞれのライセンスは `licenses/` にあります。Windows 版にも、コントローラーを読むために SDL 3 が入っています。
 - 無保証です。このソフトを使って起きたことについて、作者は責任を負いません。
