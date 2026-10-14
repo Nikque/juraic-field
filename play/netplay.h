@@ -13,7 +13,7 @@
 // The host is 1P, the guest 2P. The rules are the host's. There is no pause.
 #include "net.h"
 #include "replay.h"
-#include "view.h"
+#include "view_state.h"
 
 namespace play {
 

@@ -13,7 +13,7 @@
 // a file that cannot be read is said so on the screen. Not .ogg and .opus: Media Foundation
 // does not read them in a program like this one, with the Web Media Extensions installed
 // either (MF_E_UNSUPPORTED_BYTESTREAM_TYPE).
-#include <d2d1.h>
+#include "gfx.h"
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -76,7 +76,8 @@ public:
     }
     // Draws the picture of `file` over `area`, darkened by `dim` percent.
     // False: there is no such picture (nothing is drawn).
-    bool draw(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, const std::filesystem::path& file, const D2D1_RECT_F& area, int dim) {
+    bool draw(Gfx& gfx, const std::filesystem::path& file, const RectF& area, int dim) {
+        ID2D1RenderTarget* rt = gfx.rt;
         if (file != shown) {
             if (file == failed) return false;
             if (bitmap) bitmap->Release();
@@ -96,8 +97,7 @@ public:
         const D2D1_RECT_F from = D2D1::RectF((size.width - w) / 2, (size.height - h) / 2, (size.width + w) / 2, (size.height + h) / 2);
         rt->DrawBitmap(bitmap, area, 1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, from);
         if (dim > 0) {
-            brush->SetColor(D2D1::ColorF(0, 0, 0, float(dim) / 100.f));
-            rt->FillRectangle(area, brush);
+            gfx.fill(area, colorF(0, 0, 0, float(dim) / 100.f));
         }
         return true;
     }

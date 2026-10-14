@@ -17,6 +17,10 @@
 //   JuraicField.exe --net-test host <port> <result file>            self test: a match over UDP on this machine, without
 //                              (host4: the host listens at 127.0.0.1 instead of ::1)
 //   JuraicField.exe --net-test join <address> <port> <result file>  a window: two programs, their result files must be equal
+//
+// Windows: Win32, Direct2D, XAudio2 and Media Foundation. Elsewhere: SDL (play/platform_sdl.h), the drawing engine
+// of play/raster.h; the program takes the same arguments.
+#ifdef _WIN32
 #define UNICODE
 #define _UNICODE
 #define NOMINMAX
@@ -26,6 +30,9 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <wincodec.h>
+#else
+#include "platform_sdl.h"
+#endif
 #include "../ai/agents.h"
 #include "../gui/gui_editor.h"
 #include "audio.h"
@@ -33,6 +40,7 @@
 #include "media.h"
 #include "netplay.h"
 #include "replay.h"
+#include "session.h"
 #include "settings.h"
 #include "udp.h"
 #include "view.h"
@@ -48,381 +56,21 @@ namespace {
 
 enum class Screen { Menu, Toko, Versus, Replay, Settings, Bindings, NetLobby, Net };
 
-// ---- a round being played, recorded and drawn ------------------------------------------
-struct Game {
-    Round round;
-    View view[2];
-    RoundLog log;
-    // The replay of a match of two machines (Replay::linkDelay): its rounds are played with the garbage late, both
-    // seats in step; `round` is then a copy of the linked round after every frame.
-    std::unique_ptr<LinkedRound> linked;
-
-    // timing: the frame counts of now, or those a replay was recorded with (Replay::timing).
-    void start(const Rules& rules, uint64_t seed, int players, const GameField* board = nullptr, const Timing& timing = DEFAULT_TIMING, int linkDelay = 0) {
-        round.start(rules, seed, players, timing);
-        linked.reset();
-        if (linkDelay > 0 && players == 2) linked = std::make_unique<LinkedRound>(), linked->start(rules, seed, linkDelay, timing);
-        log = RoundLog{};
-        log.seed = seed;
-        if (board) round.player[0].field = *board, log.hasBoard = true, log.board = *board;
-        for (int i = 0; i < 2; ++i) view[i].reset(round.player[i]);
-    }
-    // A round of a replay as it was recorded: its seed, the board it began on if it had one, and - a match of two
-    // machines - the delay its garbage travelled with. Whatever plays a replay starts its rounds here.
-    void startReplay(const Replay& replay, const RoundLog& of) {
-        start(replay.settings.rules, of.seed, replay.players, of.hasBoard ? &of.board : nullptr, replay.timing(), replay.linkDelay);
-    }
-    void step(const uint8_t buttons[2], PlayerEvents events[2]) {
-        if (round.state != RoundState::Playing) return;
-        log.frames.push_back(uint16_t(buttons[0] | buttons[1] << 8));
-        if (linked) {
-            for (int i = 0; i < 2; ++i) linked->play(i, buttons[i], events[i]);
-            round = linked->round;
-        } else {
-            round.step(buttons, events);
-        }
-        for (int i = 0; i < round.players; ++i) view[i].update(round.player[i], events[i]);
-    }
-};
-
-// Plays random legal placements with plain key presses (self test only).
-struct ScriptBot {
-    Rng rng{7};
-    Placement goal{};
-    int moves = -1, taps = 0;
-    bool early = false; // true: a direction is held also while no pair is in the hands, by turns (what pre-input takes up)
-    uint8_t operator()(const Player& p, int64_t frame) {
-        if (p.phase != Phase::Control) return early ? uint8_t(frame / 32 % 3 == 0 ? BTN_LEFT : frame / 32 % 3 == 1 ? BTN_RIGHT : BTN_CW) : uint8_t(0);
-        if (p.moves != moves) {
-            moves = p.moves, taps = 0;
-            const unsigned legal = legalPlacements(p.field);
-            int id = 0;
-            if (legal) do id = int(rng.below(PLACEMENTS)); while (!(legal >> id & 1));
-            goal = placement(id);
-        }
-        uint8_t b = frame % 3 ? BTN_DOWN : 0;
-        if (taps++ % 2 == 0) {
-            if (goal.dir == RIGHT && p.pair.dir == UP) b |= BTN_CW;
-            if (goal.dir == LEFT && p.pair.dir == UP) b |= BTN_CCW;
-            if (goal.dir == DOWN && p.pair.dir != DOWN) b |= BTN_CW;
-            if (p.pair.x < goal.x) b |= BTN_RIGHT;
-            if (p.pair.x > goal.x) b |= BTN_LEFT;
-        }
-        return b;
-    }
-};
-
-struct Prediction {
-    int chains = 0, points = 0;         // the placement the pair is over now
-    int bestChains = 0, bestPoints = 0; // the best of all placements of this pair
-};
-
-// ---- toko -------------------------------------------------------------------
-// The start of a move, to go back to: the round, what is drawn of it, and how many frames of buttons were
-// recorded by then. Not the record itself: it only grows at its end, so cutting it to that length gives the
-// record of then. (A whole Game kept here would have its record copied every frame, and once more for every
-// move of the history.)
-struct MoveStart {
-    Round round;
-    View view[2];
-    size_t frames = 0;
-    void take(const Game& g) {
-        round = g.round, view[0] = g.view[0], view[1] = g.view[1];
-        frames = g.log.frames.size();
-    }
-    void give(Game& g) const {
-        g.round = round, g.view[0] = view[0], g.view[1] = view[1];
-        g.log.frames.resize(frames);
-    }
-};
-struct Toko {
-    Game game;
-    MoveStart before;               // one frame ago (to save a move's start)
-    std::vector<MoveStart> history; // the start of every move
-    uint64_t seed = 1;
-    bool hasBoard = false; // practice: start from startField
-    GameField startField;
-    std::wstring boardName;
-    int maxChain = 0, lastChain = 0, lastPoints = 0;
-    Prediction prediction;
-    bool paused = false;
-
-    void start(const Settings& s) {
-        game.start(s.rules, seed, 1, hasBoard ? &startField : nullptr);
-        history.clear();
-        before.take(game);
-        maxChain = lastChain = lastPoints = 0;
-        prediction = {};
-        paused = false;
-    }
-    static void outcome(const Player& p, const Rules& rules, Placement at, int& chains, int& points) {
-        PlayerCore core = p;
-        Incoming nobody;
-        Rng rng(1);
-        const TurnResult t = playTurn(core, nobody, at, p.colors, rules, DEFAULT_TIMING, 0, rng);
-        chains = t.chains, points = t.points;
-    }
-    void predict() {
-        const Player& p = game.round.player[0];
-        prediction = {};
-        if (p.phase != Phase::Control) return;
-        const unsigned legal = legalPlacements(p.field);
-        const int here = placementId(p.pair.placement());
-        if (legal >> here & 1) outcome(p, game.round.rules, p.pair.placement(), prediction.chains, prediction.points);
-        for (int id = 0; id < PLACEMENTS; ++id) {
-            if (!(legal >> id & 1)) continue;
-            int chains, points;
-            outcome(p, game.round.rules, placement(id), chains, points);
-            if (points > prediction.bestPoints) prediction.bestChains = chains, prediction.bestPoints = points;
-        }
-    }
-    PlayerEvents step(uint8_t buttons) {
-        PlayerEvents e[2];
-        if (paused || game.round.state != RoundState::Playing) return e[0];
-        before.take(game);
-        const uint8_t b[2] = {buttons, 0};
-        game.step(b, e);
-        const Player& p = game.round.player[0];
-        if (e[0].spawned) history.push_back(before);
-        if (e[0].waveStarted) {
-            lastChain = p.chain.chains;
-            lastPoints = p.chain.chains == 1 ? p.wave.points : lastPoints + p.wave.points;
-            maxChain = std::max(maxChain, lastChain);
-        }
-        return e[0];
-    }
-    // Back to the start of the current move; a second press soon after goes one move further back.
-    void undo() {
-        if (history.empty()) return;
-        if (history.size() > 1 && game.round.frame - history.back().round.frame < 40) history.pop_back();
-        history.back().give(game); // the recorded buttons go back with it
-        history.pop_back();
-        before.take(game);
-        paused = false;
-    }
-};
-
-// The name of the AI of a seat (ai/agents.h) for the settings: `style` says which of the two AIs it is - Juraic as it
-// is, or the one that hardly pokes -, `level` its level. At the top level they are x3 and x3q; below it lv1 to
-// lv35, and lv1q to lv35q.
-inline std::string aiOfLevel(int level, int style) {
-    return level >= ai::LEVELS ? std::string(style ? "x3q" : "x3") : "lv" + std::to_string(level < 1 ? 1 : level) + (style ? "q" : "");
-}
-
-// ---- versus ------------------------------------------------------------------------------
-struct Versus {
-    // (SetEnd: a set is won and the match goes on - only with Rules::setsNeeded above 1)
-    enum State { Ready, Play, RoundEnd, SetEnd, MatchEnd } state = Ready;
-    Game game;
-    Replay replay; // the rounds played so far
-    int wins[2]{}, timer = 0, device[2]{};
-    int sets[2]{};     // the sets won so far (wins: the rounds won in the set that is played)
-    bool weak = false; // in the round that ended last an AI was short of time (App::judgeThinking): said on the screen
-    bool picked[2]{};  // the AI of the seat was changed at the end of the match: it is seated anew for the next
-    bool paused = false;
-    Rng seeds{1};
-    // A seat is played by a person (null) or by an AI.
-    std::unique_ptr<ai::Agent> agent[2];
-    std::wstring agentName[2];
-    Rng agentSeeds{1};
-    ai::Observation seen;
-    AiLog seatLog[2];       // the AI of each seat as the replay names it, with the seed of its round
-    bool notesKept = true;  // the round kept last has its AI's notes (keepNotes)
-    int64_t logged[2][5]{}; // what the AI of each seat had counted of its thinking when a round was judged last (App::judgeThinking)
-
-    // name = one of ai/agents.h, or empty for a person. live: the match is played at the speed of
-    // the screen (a self-test plays its frames as fast as they come).
-    void seat(int i, const std::string& name, const Settings& s, bool live = true) {
-        // One choice of the AI takes far longer than a frame (40 x 10, three queues: about 90 ms,
-        // at most about 300 seen). So the AI chooses in the pause before
-        // its pair appears (twelve frames, thinkAhead) and on a thread of its own: no frame waits
-        // for it, and a pair whose choice is not made when it appears is left alone until it is
-        // (ai/agent.h, Thinking::Free). In a self-test the frame waits for the choice instead,
-        // which gives the buttons of the tools whatever the speed of the machine.
-        ai::Params params;
-        params.beamWidth = 40, params.beamDepth = 10, params.beamQueues = 3;
-        // (a match on the screen: the search of the settings. Automatic = the search the AI is measured
-        // with (ai/params.h: 250 wide, 16 deep, eight queues), begun 40 wide and made as wide as the machine
-        // has time for, up to that width; its depth and its queues are not cut: against Ama a search 10 deep
-        // with three queues won 137 of 240 rounds where the measured one won 168 (10 deep with six queues
-        // 147, 16 deep with three 138). By hand = the values set, neither wider nor narrower.)
-        const ai::Params measured;
-        if (live && s.aiAuto) params.beamDepth = measured.beamDepth, params.beamQueues = measured.beamQueues, params.thinkWidthMax = measured.beamWidth;
-        if (live && !s.aiAuto) params.beamWidth = s.aiWidth, params.beamDepth = s.aiDepth, params.beamQueues = s.aiQueues, params.thinkFit = 0, params.thinkPlans = 0;
-        // (when a choice is begun: the frames of the settings, or — 0, automatic — as late as this
-        // machine's searches still get their full width, which the AI sets for every round
-        // (ai/pace.h, chooseAhead). A self-test: 12 frames before the pair.)
-        params.thinkAhead = live ? s.aiLead : 12;
-        params.x3BuildHold = s.aiBuildHold; // (the AI settings: a placement that builds does not fire the main chain while another is left)
-        // A level below the top plays with the search of its level, whatever the settings above say, and never a
-        // wider one (ai/level.h; on a machine too slow for it the clock still makes it narrower). The threads below
-        // follow its number of queues.
-        params = ai::agentParams(name, params);
-        // (each queue of the beam search on a thread of its own: the same choice in about a third of
-        // the time; on a machine with fewer threads than that, one of them is left to the game)
-        const int cores = int(std::thread::hardware_concurrency());
-        params.searchThreads = cores > 0 ? std::max(1, std::min(params.beamQueues, cores - 1)) : params.beamQueues;
-        // (the automatic search: every thread of the machine but one — but two from eight on —, and
-        // three a queue at most. The choices are the same with any number, and since the threads share
-        // the work of all queues (ai/build.h, Crew) every one of them helps.)
-        if (live && s.aiAuto && cores > 0) params.searchThreads = std::max(1, std::min(3 * params.beamQueues, cores - (cores >= 8 ? 2 : 1)));
-        // (set by hand: as many as said. Those beyond one a queue help to value the fields of a layer,
-        // ai/build.h; the choices are the same, a wide search takes less time)
-        if (live && s.aiThreads > 0) params.searchThreads = s.aiThreads;
-        // On a slower machine the searches are cut short rather than the pair kept waiting: they stop
-        // 180 ms after the choice was begun, 20 ms before the pair appears. (Not in a
-        // self-test: there the buttons must not depend on the machine.)
-        // (begun later than 200 ms before the pair, a choice has less: what is left 20 ms before the pair)
-        if (live) params.thinkBudget = s.aiLead > 0 ? std::min(s.aiBudget, s.aiLead * 1000 / 60 - 20) : s.aiBudget;
-        agent[i] = name.empty() ? nullptr : ai::makeAgent(name, params);
-        // (for the replay: what the AI needs to make its choices again, replay.h)
-        seatLog[i] = AiLog{name, 0, params.beamWidth, params.beamDepth, params.beamQueues, params.thinkAhead, {}};
-        if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(agent[i].get())) x3->noting = true;
-        for (int64_t& held : logged[i]) held = 0;
-        if (ai::PlacementAgent* placing = dynamic_cast<ai::PlacementAgent*>(agent[i].get())) {
-            placing->thinking = live ? ai::Thinking::Free : ai::Thinking::Thread;
-            if (placing->ahead < 1) placing->ahead = 12; // (an AI that does not choose the moment itself)
-        }
-        // (the AI of the game is called Juraic; in the tools, the replays and the sources it is x3, x3q for the one
-        //  that hardly pokes, and lv1 to lv35 and lv1q to lv35q for their levels below the top. The two names on the
-        //  screen are 催促（小） for x3 and 催促（極小） for x3q.)
-        const bool juraic = name == "x3" || name == "x3q" || ai::levelOf(name);
-        const int level = ai::levelOf(name) ? ai::levelOf(name) : ai::LEVELS;
-        agentName[i] = juraic ? std::wstring(ai::quietOf(name) ? L"Juraic 催促（極小） Lv " : L"Juraic 催促（小） Lv ") + std::to_wstring(level)
-                              : L"AI（" + std::wstring(name.begin(), name.end()) + L"）";
-    }
-    void startMatch(const Settings& s, uint64_t seed) {
-        seeds = Rng(seed);
-        agentSeeds = Rng(seed, ai::AGENT_STREAM);
-        wins[0] = wins[1] = sets[0] = sets[1] = 0;
-        weak = false;
-        replay = Replay{s, 2, TIMING_VERSION, {}};
-        notesKept = true;
-        startRound(s);
-    }
-    void startRound(const Settings& s) {
-        keepNotes();
-        game.start(s.rules, seeds.next() % 1000000000ull, 2);
-        for (int i = 0; i < 2; ++i) {
-            if (!agent[i]) continue;
-            agent[i]->startRound(i, seatLog[i].seed = agentSeeds.next());
-            // (the moment of its choices in this round, which an AI may set as the round begins: for the replay)
-            if (const ai::PlacementAgent* placing = dynamic_cast<const ai::PlacementAgent*>(agent[i].get())) seatLog[i].ahead = placing->ahead;
-        }
-        state = Ready, timer = 90, paused = false;
-    }
-    // The round is over (or left): it goes to the replay, with the AI of its seats.
-    void keepRound() {
-        for (int i = 0; i < 2; ++i)
-            if (agent[i]) game.log.ai[i] = seatLog[i];
-        replay.rounds.push_back(game.log);
-        notesKept = false;
-    }
-    // The round has ended: its win is counted and it goes to the replay.
-    void roundOver() {
-        if (game.round.state == RoundState::Won0) ++wins[0];
-        if (game.round.state == RoundState::Won1) ++wins[1];
-        keepRound();
-        state = RoundEnd;
-    }
-    // After a round: the seat that has won the set with it (the set is counted, here), or -1 while the set goes on.
-    int setWon(const Rules& rules) {
-        const int seat = wins[0] >= rules.winsNeeded ? 0 : wins[1] >= rules.winsNeeded ? 1 : -1;
-        if (seat >= 0) ++sets[seat];
-        return seat;
-    }
-    // What the AI seats decided by the clock in the round kept last, for the replay. Before the
-    // next round begins and before the replay is saved, not as the round ends: an AI may be in
-    // the middle of a choice then, and this waits for it.
-    void keepNotes() {
-        if (notesKept || replay.rounds.empty()) return;
-        notesKept = true;
-        for (int i = 0; i < 2; ++i) {
-            ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(agent[i].get());
-            AiLog& a = replay.rounds.back().ai[i];
-            if (!x3 || a.name.empty()) continue;
-            for (const ai::X3Agent::Note& n : x3->takeNotes()) a.choices.push_back(AiChoice{n.move, n.pairs, n.id, 0, n.cut, n.widths});
-            for (size_t k = 0; k + 1 < x3->lateLog.size(); k += 2)
-                for (AiChoice& c : a.choices)
-                    if (c.move == x3->lateLog[k]) c.late = x3->lateLog[k + 1];
-            // (a second choice of a move, the note after that of its first: the frames after the pair appeared at which it came)
-            for (size_t k = 0; k + 1 < x3->againLog.size(); k += 2)
-                for (size_t c = a.choices.size(); c-- > 1;)
-                    if (a.choices[c].move == x3->againLog[k] && a.choices[c - 1].move == x3->againLog[k]) {
-                        a.choices[c].late = x3->againLog[k + 1];
-                        break;
-                    }
-        }
-    }
-    // The buttons of an AI seat for the frame that is played next.
-    uint8_t agentButtons(int i) {
-        ai::observe(game.round, i, seen);
-        return agent[i]->frame(seen);
-    }
-};
-
-// ---- watching a replay --------------------------------------------------------------------
-struct Viewer {
-    Replay replay;
-    Game game;
-    size_t round = 0, frame = 0;
-    bool paused = false, finished = false;
-    std::wstring name;
-    int wins[2]{};        // rounds won so far in the set on the screen, for the stars between the fields
-    int sets[2]{};        // the sets that are over (a replay with Rules::setsNeeded above 1)
-    bool counted = false; // the round on the screen is in `wins`
-
-    void startRound() {
-        game.startReplay(replay, replay.rounds[round]);
-        frame = 0, counted = false;
-    }
-    // From the first round again.
-    void restart() {
-        round = 0, finished = false, wins[0] = wins[1] = sets[0] = sets[1] = 0;
-        startRound();
-    }
-    // On to the next round. A set that is over is counted, and the rounds are counted anew (Versus::setWon).
-    void nextRound() {
-        const Rules& rules = replay.settings.rules;
-        if (rules.setsNeeded > 1 && std::max(wins[0], wins[1]) >= rules.winsNeeded) ++sets[wins[1] > wins[0]], wins[0] = wins[1] = 0;
-        ++round;
-        startRound();
-    }
-    // The round on the screen is over: its winner gets his star, as in the match (Versus::roundOver).
-    void countRound() {
-        const RoundState s = game.round.state;
-        if (counted || s == RoundState::Playing) return;
-        counted = true;
-        if (s == RoundState::Won0) ++wins[0];
-        if (s == RoundState::Won1) ++wins[1];
-    }
-};
-
-// A replay played from its buttons without a window: for every round one line that tells how it ended
-// (roundSummary). --check-replay writes them; a self test compares them with the rounds as they were played.
-std::string replayResult(const Replay& replay) {
-    const auto game = std::make_unique<Game>();
-    std::string result;
-    for (const RoundLog& log : replay.rounds) {
-        game->startReplay(replay, log);
-        for (const uint16_t f : log.frames) {
-            const uint8_t buttons[2] = {uint8_t(f & 255), uint8_t(f >> 8)};
-            PlayerEvents e[2];
-            game->step(buttons, e);
-        }
-        result += roundSummary(game->round) + '\n';
-    }
-    return result;
-}
-
 // ---- the application --------------------------------------------------------------------
+#ifdef _WIN32
 LRESULT CALLBACK windowProc(HWND w, UINT m, WPARAM wp, LPARAM lp); // (below; a self test sends it the messages of the mouse)
+#endif
 
 struct App {
+#ifdef _WIN32
     HWND window = nullptr;
     ID2D1Factory* factory = nullptr;
     IDWriteFactory* dwrite = nullptr;
     ID2D1HwndRenderTarget* target = nullptr;
+#else
+    Window window;
+    bool quit = false; // the window is to close
+#endif
     Gfx gfx;
     Audio audio;
     Settings settings;
@@ -501,7 +149,7 @@ struct App {
         return settings.diagonal ? b : lever[seat](b);
     }
 
-    bool down(int vk) const { return focused && (GetAsyncKeyState(vk) & 0x8000); }
+    bool down(int vk) const { return focused && keyDown(vk); }
     // True on the frame the key goes down.
     bool pressed(int vk) {
         const bool now = down(vk), was = keyWas[vk];
@@ -690,13 +338,18 @@ struct App {
         if (next.empty()) return;
         const std::filesystem::path file = exeDirectory / L"bgm" / next;
         musicJob = std::async(std::launch::async, [file, name = next] {
+#ifdef _WIN32
             const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
             std::pair<std::wstring, MusicSamples> out{name, readMusic(file)};
             if (com) CoUninitialize();
             return out;
+#else
+            return std::pair<std::wstring, MusicSamples>{name, readMusic(file)};
+#endif
         });
     }
 
+#ifdef _WIN32
     void createFonts() {
         const float sizes[] = {18, 24, 36, 60};
         for (int i = 0; i < 4; ++i) {
@@ -709,7 +362,7 @@ struct App {
         if (gfx.brush) gfx.brush->Release();
         for (Backdrop& b : backdrop) b.release();
         gfx.rt = rt;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0), &gfx.brush);
+        rt->CreateSolidColorBrush(colorF(0, 0, 0), &gfx.brush);
     }
     bool createTarget() {
         RECT rc;
@@ -720,6 +373,7 @@ struct App {
         bind(target);
         return true;
     }
+#endif
 
     // ---- files ----
     bool loadBoardFile(const std::filesystem::path& path) {
@@ -751,6 +405,11 @@ struct App {
         }
     }
     bool openDialog(const wchar_t* filter, const std::filesystem::path& folder, std::filesystem::path& chosen) {
+#ifndef _WIN32
+        const bool ok = chooseFile(window, filter, folder, chosen);
+        forgetKeys();
+        return ok;
+#else
         wchar_t file[MAX_PATH] = L"";
         OPENFILENAMEW ofn{};
         ofn.lStructSize = sizeof ofn;
@@ -765,12 +424,20 @@ struct App {
         forgetKeys();
         if (ok) chosen = file;
         return ok;
+#endif
     }
     std::filesystem::path replayPath(const wchar_t* kind) const {
+        wchar_t name[64];
+#ifdef _WIN32
         SYSTEMTIME t;
         GetLocalTime(&t);
-        wchar_t name[64];
         swprintf_s(name, L"%s-%04d%02d%02d-%02d%02d%02d.jfreplay", kind, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+#else
+        const std::time_t now = std::time(nullptr);
+        std::tm t{};
+        localtime_r(&now, &t);
+        std::swprintf(name, 64, L"%ls-%04d%02d%02d-%02d%02d%02d.jfreplay", kind, t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+#endif
         return exeDirectory / L"replays" / name;
     }
     void saveTokoReplay() {
@@ -803,6 +470,7 @@ struct App {
     }
     void copySeed() {
         const std::wstring s = std::to_wstring(toko.seed);
+#ifdef _WIN32
         if (!OpenClipboard(window)) return;
         EmptyClipboard();
         if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (s.size() + 1) * sizeof(wchar_t))) {
@@ -811,10 +479,16 @@ struct App {
             SetClipboardData(CF_UNICODETEXT, h);
         }
         CloseClipboard();
+#else
+        if (!setClipboardText(s)) return;
+#endif
         say(L"シード " + s + L" をコピーしました");
     }
     // The text on the clipboard (nothing when it holds none).
     std::wstring clipboardText() {
+#ifndef _WIN32
+        return play::clipboardText();
+#else
         std::wstring s;
         if (OpenClipboard(window)) {
             if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
@@ -824,6 +498,7 @@ struct App {
             CloseClipboard();
         }
         return s;
+#endif
     }
     void pasteSeed() {
         try {
@@ -835,12 +510,18 @@ struct App {
         }
     }
     void launchGenerator() {
+#ifndef _WIN32
+        say(L"盤面ジェネレーターの窓は Windows 版だけです（コマンドの random_19_chain は同じフォルダーにあります）");
+        return;
+#endif
         const std::filesystem::path exe = exeDirectory / L"JuraicFieldGenerator.exe";
         if (!std::filesystem::exists(exe)) {
             say(L"盤面ジェネレーターの exe が同じフォルダーにありません");
             return;
         }
+#ifdef _WIN32
         ShellExecuteW(window, L"open", exe.c_str(), nullptr, exeDirectory.c_str(), SW_SHOWNORMAL);
+#endif
     }
     // A setting of the self tests (--screenshot), given in the environment: its text, nothing when it is not set.
     //   JURAIC_SELFTEST_ALL_CLEAR  the picture is taken with "all clear" on every field
@@ -850,9 +531,14 @@ struct App {
     //   JURAIC_SELFTEST_WINS       "rounds sets won0 won1 sets0 sets1": the picture of a match is taken with these numbers of rounds
     //                              and sets to win and won (for looking at how many of them are written; nothing is played by them)
     static std::wstring selfTestSetting(const wchar_t* name) {
+#ifdef _WIN32
         wchar_t text[128];
         const DWORD length = GetEnvironmentVariableW(name, text, 128);
         return length > 0 && length < 128 ? std::wstring(text, length) : std::wstring();
+#else
+        const char* text = std::getenv(toUtf8(name).c_str());
+        return text && std::strlen(text) < 128 ? fromUtf8(text) : std::wstring();
+#endif
     }
     static uint64_t newSeed() { return uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()) % 1000000000ull; }
 
@@ -904,7 +590,11 @@ struct App {
             break;
         case 7: screen = Screen::Bindings, binding = false; break;
         case 8: launchGenerator(); break;
+#ifdef _WIN32
         default: PostMessageW(window, WM_CLOSE, 0, 0);
+#else
+        default: quit = true;
+#endif
         }
     }
     // The settings screen: the parts on the left, the settings of the part chosen on the right. A
@@ -1180,16 +870,16 @@ struct App {
     // The match-end banner has a row for every AI seat, in which its AI and its level are changed with the mouse:
     // ◀ and ▶ on either side of each (and the value itself, which goes on as ▶ does). The boxes of the row of
     // `seat`, k = 0 to 5: ◀, the AI, ▶, ◀, the level, ▶.
-    D2D1_RECT_F pickBox(int seat, int k) const {
+    RectF pickBox(int seat, int k) const {
         const float x[8] = {396, 426, 600, 630, 640, 670, 898, 928}, y = 586 + (seat == 1 && versus.agent[0] ? 32.f : 0.f);
         const int at = k < 3 ? k : k + 1; // (a gap between the two)
-        return D2D1::RectF(x[at], y, x[at + 1], y + 28);
+        return rectF(x[at], y, x[at + 1], y + 28);
     }
     // What a click at (x, y) of the canvas changes: seat * 4 + (0, 1: the other AI; 2, 3: the level below and above), -1 = nothing.
     int pickAt(float x, float y) const {
         for (int seat = 0; seat < 2; ++seat)
             for (int k = 0; versus.agent[seat] && k < 6; ++k) {
-                const D2D1_RECT_F r = pickBox(seat, k);
+                const RectF r = pickBox(seat, k);
                 if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return seat * 4 + (k < 3 ? (k == 0 ? 0 : 1) : (k == 3 ? 2 : 3));
             }
         return -1;
@@ -1241,7 +931,12 @@ struct App {
                 return;
             }
             ownAddressList = ownAddresses();
-            net.host(std::move(line), settings, toUtf8(netName), newSeed() ^ uint64_t(GetTickCount64()) << 20, settings.netDelay);
+#ifdef _WIN32
+            const uint64_t ticks = uint64_t(GetTickCount64());
+#else
+            const uint64_t ticks = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+            net.host(std::move(line), settings, toUtf8(netName), newSeed() ^ ticks << 20, settings.netDelay);
         } else {
             std::string host;
             int port = netPort;
@@ -1342,7 +1037,7 @@ struct App {
                                   L"リプレイを見る",         L"設定",           L"操作の割り当て",     L"盤面ジェネレーター", L"終了"};
         for (int i = 0; i < 10; ++i) {
             const float y = 164 + i * 46.f;
-            if (i == menuIndex) gfx.round(D2D1::RectF(410, y - 1, 870, y + 43), 12, rgb(84, 104, 190));
+            if (i == menuIndex) gfx.round(rectF(410, y - 1, 870, y + 43), 12, rgb(84, 104, 190));
             gfx.text(items[i], 410, y, 460, 44, 2, i == menuIndex ? rgb(255, 255, 255) : rgb(170, 178, 204), 0);
         }
         gfx.text(L"↑↓ で選ぶ　Enter で決定　（コントローラー: 方向と決定ボタン。「操作の割り当て」で変えられます）", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
@@ -1356,7 +1051,7 @@ struct App {
         for (int k = 0; k < SETTING_SECTIONS; ++k) {
             const float y = 132 + float(k) * 58;
             const bool on = k == settingSection;
-            if (on) gfx.round(D2D1::RectF(96, y - 6, 316, y + 40), 8, settingInside ? rgb(52, 62, 104) : rgb(84, 104, 190));
+            if (on) gfx.round(rectF(96, y - 6, 316, y + 40), 8, settingInside ? rgb(52, 62, 104) : rgb(84, 104, 190));
             gfx.text(SETTING_SECTION_NAMES[k], 96, y, 220, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212), 0);
         }
         // The settings of the part chosen (fourteen rows fit: the list moves with the row chosen).
@@ -1368,13 +1063,13 @@ struct App {
         for (int n = 0; n < count; ++n)
             if (shown[size_t(n)] == settingIndex) at = n;
         const int top = count <= rows || !settingInside ? 0 : std::clamp(at - rows / 2, 0, count - rows);
-        gfx.round(D2D1::RectF(344, 112, 1184, 112 + float(rows) * 36 + 16), 10, rgb(34, 39, 64));
+        gfx.round(rectF(344, 112, 1184, 112 + float(rows) * 36 + 16), 10, rgb(34, 39, 64));
         for (int n = top; n < count && n < top + rows; ++n) {
             SettingItem& item = table.items[size_t(shown[size_t(n)])];
             const float y = 122 + float(n - top) * 36;
             const bool on = settingInside && shown[size_t(n)] == settingIndex, usable = table.enabled(item, settings);
-            if (on) gfx.round(D2D1::RectF(356, y - 3, 1172, y + 31), 8, rgb(84, 104, 190));
-            const D2D1_COLOR_F name = !usable ? rgb(98, 104, 128) : on ? rgb(255, 255, 255) : rgb(180, 188, 212);
+            if (on) gfx.round(rectF(356, y - 3, 1172, y + 31), 8, rgb(84, 104, 190));
+            const ColorF name = !usable ? rgb(98, 104, 128) : on ? rgb(255, 255, 255) : rgb(180, 188, 212);
             gfx.text(item.name, 376, y, 400, 30, 1, name);
             // (the levels of the AI are written in the colour of their group, play/settings.h)
             const unsigned tint = usable && item.color ? item.color(item.value(settings)) : 0xFFFFFF;
@@ -1390,7 +1085,7 @@ struct App {
         const auto row = [&](int index, const std::wstring& name, const std::wstring& value, bool arrows) {
             const float y = 112 + float(index) * 34 + (index >= 2 ? 14 : 0) + (index >= 3 ? 8 : 0) + (index >= 3 + GAME_ACTIONS ? 10 : 0);
             const bool on = index == bindIndex;
-            if (on) gfx.round(D2D1::RectF(300, y - 2, 980, y + 30), 8, binding ? rgb(190, 110, 60) : rgb(84, 104, 190));
+            if (on) gfx.round(rectF(300, y - 2, 980, y + 30), 8, binding ? rgb(190, 110, 60) : rgb(84, 104, 190));
             gfx.text(name, 320, y, 360, 30, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
             gfx.text((on && arrows ? L"◀  " : L"") + value + (on && arrows ? L"  ▶" : L""), 600, y, 360, 30, 1, rgb(255, 255, 255), 1);
         };
@@ -1410,7 +1105,7 @@ struct App {
         struct Symbol {
             int value;
             float size;
-            D2D1_COLOR_F color;
+            ColorF color;
         };
         const Symbol symbols[] = {{720, 22, rgb(250, 210, 60)}, {360, 21, rgb(240, 240, 170)}, {180, 20, rgb(250, 170, 60)},
                                   {30, 19, rgb(214, 80, 70)},   {6, 16, rgb(190, 196, 208)},   {1, 10, rgb(190, 196, 208)}};
@@ -1419,7 +1114,7 @@ struct App {
         for (const Symbol& s : symbols)
             for (; n >= s.value && shown < 6; n -= s.value, ++shown, cx += 44) {
                 gfx.circle(cx, y + 20, s.size, s.size * 0.92f, rgb(20, 24, 40));
-                gfx.circle(cx, y + 20, s.size - 2, (s.size - 2) * 0.92f, in.confirmed ? s.color : D2D1::ColorF(s.color.r, s.color.g, s.color.b, 0.6f));
+                gfx.circle(cx, y + 20, s.size - 2, (s.size - 2) * 0.92f, in.confirmed ? s.color : colorF(s.color.r, s.color.g, s.color.b, 0.6f));
                 if (s.value >= 180) gfx.text(s.value == 720 ? L"王" : s.value == 360 ? L"月" : L"星", cx - 14, y + 7, 28, 24, 0, rgb(60, 40, 20), 0);
             }
         gfx.text(std::to_wstring(in.total()), x + W * CELL - 80, y + 4, 80, 30, 1, rgb(255, 255, 255), 1);
@@ -1474,7 +1169,7 @@ struct App {
     // The dark band across the lower middle of a match: a title and a line below it. size: the font of the title;
     // bottom: where the band ends (further down when rows follow below the line).
     void banner(const std::wstring& title, const std::wstring& note, int size = 2, float bottom = 600) {
-        gfx.round(D2D1::RectF(340, 470, 940, bottom), 14, rgb(20, 24, 44, 0.9f));
+        gfx.round(rectF(340, 470, 940, bottom), 14, rgb(20, 24, 44, 0.9f));
         gfx.text(title, 340, size == 2 ? 480.f : 490.f, 600, 60, size, rgb(255, 236, 120), 0);
         gfx.text(note, 340, 550, 600, 30, 0, rgb(200, 206, 226), 0);
     }
@@ -1487,7 +1182,7 @@ struct App {
         // (an AI was short of time in the round before: between the fields at the top, until a round without it has
         //  ended: short, near the middle, off the fields, and not gone at once)
         if (v.weak) {
-            gfx.round(D2D1::RectF(446, 46, 834, 86), 10, rgb(20, 24, 44, 0.9f));
+            gfx.round(rectF(446, 46, 834, 86), 10, rgb(20, 24, 44, 0.9f));
             gfx.text(L"処理落ち: AI が弱くなった可能性", 446, 50, 388, 30, 1, rgb(255, 170, 110), 0);
         }
         const int picks = v.state == Versus::MatchEnd ? (v.agent[0] ? 1 : 0) + (v.agent[1] ? 1 : 0) : 0;
@@ -1509,8 +1204,8 @@ struct App {
                 const std::wstring words[6] = {L"◀", style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", L"▶", L"◀", levelText(level), L"▶"};
                 gfx.text(seat ? L"2P" : L"1P", 352, pickBox(seat, 0).top, 40, 28, 0, rgb(200, 206, 226));
                 for (int k = 0; k < 6; ++k) {
-                    const D2D1_RECT_F r = pickBox(seat, k);
-                    if (k % 3 != 1) gfx.round(D2D1::RectF(r.left + 2, r.top + 1, r.right - 2, r.bottom - 1), 6, rgb(84, 104, 190));
+                    const RectF r = pickBox(seat, k);
+                    if (k % 3 != 1) gfx.round(rectF(r.left + 2, r.top + 1, r.right - 2, r.bottom - 1), 6, rgb(84, 104, 190));
                     gfx.text(words[k], r.left, r.top + 1, r.right - r.left, 26, 0,
                              k == 4 ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 0);
                 }
@@ -1526,7 +1221,7 @@ struct App {
         for (int i = 0; i < 5; ++i) {
             const float y = 150 + float(i) * 56;
             const bool on = i == lobbyIndex;
-            if (on) gfx.round(D2D1::RectF(260, y - 6, 1020, y + 40), 8, lobbyEditing ? rgb(190, 110, 60) : rgb(84, 104, 190));
+            if (on) gfx.round(rectF(260, y - 6, 1020, y + 40), 8, lobbyEditing ? rgb(190, 110, 60) : rgb(84, 104, 190));
             gfx.text(rows[i], 284, y, 400, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
             gfx.text(values[i] + (on && lobbyEditing ? L"_" : L""), 600, y, 400, 34, 1, rgb(255, 255, 255), 1);
         }
@@ -1616,7 +1311,7 @@ struct App {
         // right: prediction and keys
         const float rx = x0 + W * CELL + 130;
         if (settings.prediction && p.phase == Phase::Control) {
-            gfx.round(D2D1::RectF(rx, y0, rx + 360, y0 + 150), 10, rgb(40, 46, 70));
+            gfx.round(rectF(rx, y0, rx + 360, y0 + 150), 10, rgb(40, 46, 70));
             gfx.text(L"連鎖の予測", rx + 16, y0 + 8, 300, 26, 0, rgb(150, 158, 186));
             const Prediction& q = toko.prediction;
             gfx.text(L"今の位置に置くと", rx + 16, y0 + 38, 330, 26, 0, rgb(200, 206, 226));
@@ -1663,29 +1358,33 @@ struct App {
     }
     // The picture the settings give a place, drawn over `area` (the whole canvas, or a field in the
     // place of its plain ground). False: there is none, or it cannot be read (said once).
-    bool showPicture(int place, const D2D1_RECT_F& area) {
+    bool showPicture(int place, const RectF& area) {
         const std::wstring& name = settings.backgroundName[place];
         if (!settings.background[place] || name.empty()) return false;
-        backdropShown[place] = backdrop[place].draw(gfx.rt, gfx.brush, exeDirectory / L"background" / PICTURE_FOLDERS[place] / name, area, settings.backgroundDim);
+        backdropShown[place] = backdrop[place].draw(gfx, exeDirectory / L"background" / PICTURE_FOLDERS[place] / name, area, settings.backgroundDim);
         if (!backdropShown[place] && backdropFailed[place] != name) {
             backdropFailed[place] = name;
             say(L"背景を読めませんでした: " + name);
         }
         return backdropShown[place];
     }
-    std::function<bool(const D2D1_RECT_F&)> fieldPicture(int place) {
-        return [this, place](const D2D1_RECT_F& area) { return showPicture(place, area); };
+    std::function<bool(const RectF&)> fieldPicture(int place) {
+        return [this, place](const RectF& area) { return showPicture(place, area); };
     }
     void draw(float width, float height) {
+#ifdef _WIN32
         gfx.rt->BeginDraw();
         gfx.rt->SetTransform(D2D1::Matrix3x2F::Identity());
         gfx.rt->Clear(rgb(14, 16, 30));
         const float scale = std::min(width / CANVAS_W, height / CANVAS_H);
         gfx.rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) *
                              D2D1::Matrix3x2F::Translation((width - CANVAS_W * scale) / 2, (height - CANVAS_H * scale) / 2));
-        gfx.fill(D2D1::RectF(0, 0, CANVAS_W, CANVAS_H), rgb(28, 32, 54));
+#else
+        gfx.begin(int(width), int(height), rgb(14, 16, 30)); // (the canvas as large as fits, in the middle)
+#endif
+        gfx.fill(rectF(0, 0, CANVAS_W, CANVAS_H), rgb(28, 32, 54));
         for (bool& shown : backdropShown) shown = false;
-        gfx.shadow = showPicture(PICTURE_OTHER, D2D1::RectF(0, 0, CANVAS_W, CANVAS_H)); // (text over a picture gets a dark edge)
+        gfx.shadow = showPicture(PICTURE_OTHER, rectF(0, 0, CANVAS_W, CANVAS_H)); // (text over a picture gets a dark edge)
         switch (screen) {
         case Screen::Menu: drawMenu(); break;
         case Screen::Settings: drawSettings(); break;
@@ -1699,6 +1398,7 @@ struct App {
         if (messageTimer) gfx.text(message, 0, 692, CANVAS_W, 26, 0, rgb(255, 236, 120, std::min(1.f, float(messageTimer) / 30.f)), 0);
     }
     void present() {
+#ifdef _WIN32
         RECT rc;
         GetClientRect(window, &rc);
         draw(float(rc.right), float(rc.bottom));
@@ -1707,6 +1407,12 @@ struct App {
             target = nullptr;
             createTarget();
         }
+#else
+        int width = 0, height = 0;
+        windowPixels(window, width, height);
+        draw(float(width), float(height));
+        showFrame(window, gfx.raster);
+#endif
     }
 
     // ---- self test: play by script, save one picture ----
@@ -1715,6 +1421,7 @@ struct App {
         //  person at the machine may be typing, and the settings file next to the exe is theirs - nothing of the
         //  machine is read, and nothing is saved)
         focused = false, selfTest = true;
+#ifdef _WIN32
         IWICImagingFactory* wic = nullptr;
         if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return 2;
         IWICBitmap* bitmap = nullptr;
@@ -1722,6 +1429,7 @@ struct App {
         ID2D1RenderTarget* rt = nullptr;
         if (FAILED(factory->CreateWicBitmapRenderTarget(bitmap, D2D1::RenderTargetProperties(), &rt))) return 3;
         bind(rt);
+#endif
         const int mode = frames > 0 ? frames % 10 : 0;
         screen = frames == -2 || frames == -3 ? Screen::Bindings : frames == -4 ? Screen::NetLobby : frames == -6 ? Screen::Versus : frames < 0 ? Screen::Settings : frames == 0 ? Screen::Menu : mode == 8 ? Screen::Net : mode >= 2 ? Screen::Versus : Screen::Toko;
         if (frames <= -11 && frames > -11 - SETTING_SECTIONS) {
@@ -1810,7 +1518,7 @@ struct App {
             v.startMatch(settings, 4242);
             v.state = Versus::MatchEnd;
             const auto at = [&](int k, bool click) {
-                const D2D1_RECT_F r = pickBox(1, k);
+                const RectF r = pickBox(1, k);
                 mouseX = (r.left + r.right) / 2, mouseY = (r.top + r.bottom) / 2, mouseDown = true;
                 if (click) clicked = true, clickX = mouseX, clickY = mouseY;
                 updateVersus(), clicked = false;
@@ -1830,6 +1538,7 @@ struct App {
             for (int f = 1; f < 100; ++f) at(0, false);
             good = good && settings.aiStyle != style && settings.aiLevel == 26 && v.state == Versus::MatchEnd;
             mouseDown = false, updateVersus();
+#ifdef _WIN32
             // The window's part (windowProc), on a window that is never shown: the button that goes down takes the
             // mouse, so that its release and the pointer are heard outside the window too; the release gives the mouse
             // back, and another window that takes it ends the hold.
@@ -1844,6 +1553,7 @@ struct App {
             SendMessageW(testWindow, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(10, 10));
             ReleaseCapture(); // (what the window is told when another one takes the mouse)
             good = good && !mouseDown;
+#endif
             clicked = false;
             if (!good) result = 15;
             say(good ? L"the mouse button held down on a level: the steps are as the rule says" : L"the mouse button held down on a level: a count is not what the rule says");
@@ -2070,17 +1780,27 @@ struct App {
             // is given until its music plays or its file has turned out unreadable, twenty seconds at
             // most (a large file on a busy machine takes seconds to read), and half a second at least.
             audio.init();
+#ifdef _WIN32
             MFStartup(MF_VERSION, MFSTARTUP_LITE);
+#endif
             std::wstring heard;
             const wchar_t* const sceneNames[MUSIC_SCENES] = {L"対戦", L"とこ", L"メニュー"};
             for (int scene : {int(MUSIC_OTHER), int(MUSIC_VERSUS), int(MUSIC_TOKO), int(MUSIC_OTHER)}) {
                 musicSceneForced = scene;
                 for (int i = 0; i < 1000; ++i) {
+#ifdef _WIN32
                     MSG msg;
                     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+#else
+                    pumpEvents();
+#endif
                     pads.update();
                     updateMedia();
+#ifdef _WIN32
                     Sleep(20);
+#else
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+#endif
                     const bool settled = musicWanted.empty() ? !audio.musicOn() : (audio.musicOn() && musicPlaying == musicWanted) || musicFailed.count(musicWanted) != 0;
                     if (settled && i >= 25) break;
                 }
@@ -2105,7 +1825,9 @@ struct App {
             versus.wins[0] = n[2], versus.wins[1] = n[3], versus.sets[0] = n[4], versus.sets[1] = n[5];
         }
         draw(CANVAS_W, CANVAS_H);
+#ifdef _WIN32
         if (FAILED(rt->EndDraw())) return 4;
+#endif
         {
             // (a picture the settings name must be there: the one of the screen always, those of the fields where fields are)
             const bool fields = screen == Screen::Toko || screen == Screen::Versus || screen == Screen::Replay;
@@ -2114,6 +1836,9 @@ struct App {
             for (int k = 0; k < PICTURE_PLACES; ++k)
                 if (settings.background[k] && wanted[k] && !backdropShown[k] && !result) result = 11;
         }
+#ifndef _WIN32
+        if (!gfx.raster.savePng(out.string())) return 5;
+#else
         IWICStream* stream = nullptr;
         IWICBitmapEncoder* encoder = nullptr;
         IWICBitmapFrameEncode* frame = nullptr;
@@ -2126,12 +1851,14 @@ struct App {
         if (FAILED(frame->WriteSource(bitmap, nullptr))) return 6;
         frame->Commit();
         encoder->Commit();
+#endif
         return result;
     }
 };
 
 App* app = nullptr;
 
+#ifdef _WIN32
 LRESULT CALLBACK windowProc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_SIZE:
@@ -2184,64 +1911,102 @@ LRESULT CALLBACK windowProc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(w, m, wp, lp);
 }
+#else
+// What the window was told since the last frame (SDL): keys, typed text, the mouse, focus, a dropped file, closing.
+void handleEvents(App& a) {
+    for (SDL_Event e; SDL_PollEvent(&e);) {
+        switch (e.type) {
+        case SDL_EVENT_QUIT: a.quit = true; break;
+        case SDL_EVENT_WINDOW_FOCUS_GAINED: a.focused = true; break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST: a.focused = false, a.mouseDown = false; break;
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP: noteKey(e.key.scancode, e.type == SDL_EVENT_KEY_DOWN); break;
+        case SDL_EVENT_TEXT_INPUT:
+            for (const wchar_t c : fromUtf8(e.text.text))
+                if (a.typed.size() < 256) a.typed += c;
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_MOTION: {
+            if (e.type != SDL_EVENT_MOUSE_MOTION && e.button.button != SDL_BUTTON_LEFT) break;
+            const float x = e.type == SDL_EVENT_MOUSE_MOTION ? e.motion.x : e.button.x, y = e.type == SDL_EVENT_MOUSE_MOTION ? e.motion.y : e.button.y;
+            // (to the canvas, which App::draw scales into the middle of the window)
+            float cx = 0, cy = 0;
+            if (canvasPoint(a.window, x, y, cx, cy)) {
+                a.mouseX = cx, a.mouseY = cy;
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) a.clickX = cx, a.clickY = cy, a.clicked = true;
+            }
+            // (while the button is down the mouse is this window's: its release and the pointer are heard outside it too)
+            if (e.type != SDL_EVENT_MOUSE_MOTION) a.mouseDown = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_CaptureMouse(a.mouseDown);
+            break;
+        }
+        case SDL_EVENT_DROP_FILE:
+            if (e.drop.data) a.openDropped(std::filesystem::path(fromUtf8(e.drop.data)));
+            break;
+        default: break;
+        }
+    }
+}
+#endif
 
 } // namespace
 
-// Plays a replay without a window, the way the viewer does (loadReplay, then
-// Game::step with the recorded buttons), and writes how every round ended to
-// <file>.result. Returns 0; 7 when the file cannot be read; 8 when
-// <file>.expected exists and says something else (tools/ai_match writes it).
-static int checkReplay(const std::filesystem::path& file) {
-    Replay replay;
-    if (!loadReplay(file, replay)) return 7;
-    const std::string result = replayResult(replay);
-    std::ofstream(file.wstring() + L".result", std::ios::binary) << result;
-    std::ifstream expected(file.wstring() + L".expected", std::ios::binary);
-    if (!expected) return 0;
-    std::stringstream text;
-    text << expected.rdbuf();
-    return text.str() == result ? 0 : 8;
-}
+#ifndef _WIN32
+int main(int argc, char** argv) {
+    static App a; // large (move history): not on the stack
+    app = &a;
+    a.exeDirectory = programFolder();
+    a.loadAll();
+    a.gfx.loadFonts(a.exeDirectory / "fonts");
+    std::filesystem::path board, replay;
+    for (int i = 1; i + 1 < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--board") board = fromUtf8(argv[i + 1]);
+        if (arg == "--replay") replay = fromUtf8(argv[i + 1]);
+        if (arg == "--check-replay") return checkReplay(fromUtf8(argv[i + 1]));
+        if (arg == "--net-test" && i + 3 < argc) {
+            const std::string kind = argv[i + 1];
+            const int host = kind == "host" ? 1 : kind == "host4" ? 2 : 0;
+            if (!host && i + 4 >= argc) return 2;
+            return netTest(a.net, host, host ? std::string() : std::string(argv[i + 2]), std::atoi(argv[i + (host ? 2 : 3)]), fromUtf8(argv[i + (host ? 3 : 4)]));
+        }
+        if (arg == "--screenshot") {
+            if (!board.empty()) a.loadBoardFile(board);
+            return a.screenshot(fromUtf8(argv[i + 1]), i + 2 < argc ? std::atoi(argv[i + 2]) : 600);
+        }
+    }
+    if (!openWindow(a.window, "Juraic Field", 1280, 720)) return 1;
+    a.audio.init();
+    a.audio.setVolume(a.settings.volume);
+    a.mediaChanged();
+    if (!board.empty() && a.loadBoardFile(board)) {
+        a.toko.start(a.settings);
+        a.screen = Screen::Toko;
+    }
+    if (!replay.empty()) a.openReplay(replay);
 
-// A match over UDP without a window, a script in the own seat (--net-test): the host listens on this machine only,
-// the guest calls. Ticks come every two milliseconds instead of sixty a second. Writes how every round ended and
-// what both seats pressed to `out`; the files of the two programs must be equal. Returns 0 when the match was
-// played to its end.
-static int netTest(App& a, int host, const std::string& address, int port, const std::filesystem::path& out) {
-    auto line = std::make_unique<UdpLine>();
-    if (host ? !line->listen(port, host) : !line->call(address, port)) return 2;
-    Settings s;
-    s.rules.winsNeeded = 2;
-    NetPlay& n = a.net;
-    if (host) n.host(std::move(line), s, "host", 4242, 0);
-    else n.join(std::move(line), s, "guest");
-    n.peer.silenceLimit = 5000;
-    ScriptBot bot;
-    bot.rng = Rng(host ? 7 : 99);
-    const auto nothing = [](int, const PlayerEvents&) {};
+    // Game frames are 1/60 s whatever the display does; drawing waits for the display.
     using Clock = std::chrono::steady_clock;
-    const Clock::time_point begun = Clock::now();
-    int linger = 1500; // (after the end: the other program may still need the last buttons)
-    for (int64_t tick = 0; linger > 0; ++tick) {
-        while (Clock::now() < begun + std::chrono::milliseconds(2 * tick)) Sleep(1);
-        if (tick > 2 * 60 * 500) return 3; // (two minutes with nobody, or a match that does not end)
-        if ((n.stage == NetPlay::Ready || n.stage == NetPlay::RoundEnd || n.stage == NetPlay::SetEnd) && n.timer > 2) n.timer = 2;
-        n.tick(bot(n.link.round.player[n.seat()], tick), nothing);
-        if (n.stage == NetPlay::Over && linger == 1500) return 4;
-        if (n.stage == NetPlay::Over) break; // (the other program has left after the end of the match)
-        if (n.stage == NetPlay::MatchEnd) --linger;
+    const std::chrono::nanoseconds frameTime(1000000000 / FPS);
+    Clock::time_point next = Clock::now();
+    for (;;) {
+        handleEvents(a);
+        if (a.quit) {
+            a.net.leave(); // (the other end of a match is told)
+            a.saveAll();
+            closeWindow(a.window);
+            return 0;
+        }
+        const Clock::time_point now = Clock::now();
+        if (now - next > frameTime * 10) next = now - frameTime; // after a stall: do not catch up
+        while (next <= now) {
+            a.update();
+            next += frameTime;
+        }
+        a.present();
     }
-    std::ofstream file(out, std::ios::binary);
-    file << "delay " << n.peer.match.delay << " rounds " << n.replay.rounds.size() << " sets " << n.sets[0] << ' ' << n.sets[1] << '\n';
-    for (const RoundLog& log : n.replay.rounds) {
-        uint64_t h = log.seed;
-        for (const uint16_t b : log.frames) h = (h ^ b) * 0x9E3779B97F4A7C15ull, h ^= h >> 29;
-        file << "round seed " << log.seed << " frames " << log.frames.size() << " buttons " << std::hex << h << std::dec << '\n';
-    }
-    n.leave();
-    return 0;
 }
-
+#else
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     static App a; // large (move history): not on the stack
@@ -2265,7 +2030,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             const int host = std::wstring(argv[i + 1]) == L"host" ? 1 : std::wstring(argv[i + 1]) == L"host4" ? 2 : 0;
             const std::wstring address = host ? L"" : argv[i + 2];
             if (!host && i + 4 >= argc) return 2;
-            return netTest(a, host, toUtf8(address),_wtoi(argv[i + (host ? 2 : 3)]), argv[i + (host ? 3 : 4)]);
+            return netTest(a.net, host, toUtf8(address),_wtoi(argv[i + (host ? 2 : 3)]), argv[i + (host ? 3 : 4)]);
         }
         if (std::wstring(argv[i]) == L"--screenshot") {
             if (!board.empty()) a.loadBoardFile(board);
@@ -2318,3 +2083,4 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         a.present();
     }
 }
+#endif

@@ -8,7 +8,10 @@
 // 32..35 the direction (hat switch or first stick): up, down, left, right.
 // XInput buttons are numbered A 0, B 1, X 2, Y 3, LB 4, RB 5, Back 6, Start 7,
 // left stick 8, right stick 9. Which bit means what in the game is decided by
-// the bindings in input.h.
+// the bindings in input.h. Outside Windows the pads are those of SDL (play/pad_sdl.h), reduced to the same word.
+#ifndef _WIN32
+#include "pad_sdl.h"
+#else
 #include <windows.h>
 #include <xinput.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -109,3 +112,4 @@ public:
 };
 
 } // namespace play
+#endif

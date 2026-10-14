@@ -2,6 +2,7 @@
 // Who plays with what: two keyboard layouts and any number of controllers,
 // each action bound to a key or a controller button that the player can change.
 #include "../game/control.h"
+#include "keyboard.h"
 #include "pad.h"
 #include <string>
 
@@ -92,8 +93,12 @@ inline std::wstring codeName(int layout, int code) {
     case VK_SHIFT: return L"Shift";
     case VK_CONTROL: return L"Ctrl";
     }
+#ifdef _WIN32
     wchar_t name[32] = L"";
     if (GetKeyNameTextW(LONG(MapVirtualKeyW(UINT(code), MAPVK_VK_TO_VSC) << 16), name, 32) > 0) return name;
+#else
+    if (const std::wstring name = keyName(code); !name.empty()) return name;
+#endif
     return L"キー " + std::to_wstring(code);
 }
 
@@ -104,7 +109,7 @@ inline unsigned actionsOf(int device, const InputConfig& config, const Pads& pad
     if (device < 2) {
         if (!focused) return 0;
         for (int a = 0; a < ACT_COUNT; ++a)
-            if (GetAsyncKeyState(bind[a]) & 0x8000) held |= 1u << a;
+            if (keyDown(bind[a])) held |= 1u << a;
     } else {
         const uint64_t raw = pads.raw(device - 2);
         for (int a = 0; a < ACT_COUNT; ++a)
@@ -118,7 +123,7 @@ inline uint8_t gameButtons(unsigned held) { return uint8_t(held & 31u); } // the
 // Is "up" held on a device: the quick drop, when that setting is on. It has no entry on the
 // binding screen: the up key of the two keyboard layouts (↑ and W) and up on a controller.
 inline bool upHeld(int device, const Pads& pads, bool focused) {
-    if (device < 2) return focused && (GetAsyncKeyState(device == 0 ? VK_UP : 'W') & 0x8000) != 0;
+    if (device < 2) return focused && keyDown(device == 0 ? VK_UP : 'W');
     return (pads.raw(device - 2) >> PAD_UP & 1) != 0;
 }
 
