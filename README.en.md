@@ -4,9 +4,9 @@
 
 Juraic Field is a falling-block puzzle program for versus and solo play: building chains alone, two players on
 one PC, matches against the versus AI "Juraic", watching two AIs, matches between two people over a network,
-replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit) and on Linux (x86-64). The screens are in Japanese.
+replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit), on Linux (x86-64) and on macOS (Apple silicon). The screens are in Japanese.
 
-- `JuraicField.exe` (`JuraicField` on Linux): the game
+- `JuraicField.exe` (`JuraicField` on Linux, `JuraicField.app` on macOS): the game
 - `JuraicFieldGenerator.exe` / `random_19_chain.exe`: the chain board generator (GUI / CLI; the GUI on Windows only)
 
 The rules follow those of Puyo Puyo Tsu. Juraic Field is an unofficial program made by an individual and is
@@ -38,6 +38,20 @@ To remove it, delete the folder (nothing is written to the registry). Settings a
   have not been tried yet. A network match with the Windows version was played on one PC (the Linux version in
   the WSL opened the room, the Windows version came in), scripts on both sides, the same to its end on both;
   between two machines, and with people at the screens, not yet.
+
+### macOS
+
+1. Unpack `juraic-field-…-macos-arm64.zip` from the release page and open `JuraicField.app` (move it where you like).
+   It is for Macs with Apple silicon (M1 and later), macOS 11 or later.
+2. It is not signed nor notarized by an Apple developer, so the first time macOS refuses to open it (it cannot
+   check the developer). Open System Settings, Privacy & Security, and press "Open Anyway" near the bottom.
+
+- Settings, replays and your own pictures and music are in `~/Library/Application Support/JuraicField` (the files
+  are those of the Windows version). It reads the formats the Linux version reads.
+- **It has been tried on the Mac build machines of GitHub only (Apple silicon)**: it builds, the tests pass (replays
+  saved on Windows play the same), AI matches give the checksums of Windows, and the self-test pictures, taken without
+  a window, are those of the Linux version byte for byte. A person playing it in a window, the sound and controllers
+  have not been tried yet.
 
 ## Playing
 
@@ -317,7 +331,7 @@ See [BENCHMARK.md](BENCHMARK.md) (Japanese).
 A C++20 compiler (e.g. Visual Studio 2022) and CMake 3.16 or later. On x64 the code uses SSE4.1 and
 POPCNT; PEXT/PDEP is chosen at run time. A plain 64-bit implementation is included and tested as well. The GUI of the
 generator builds on Windows with MSVC only; the game runs on Direct2D and XAudio2 on Windows and on SDL 3 on
-Linux (below); the generator's CLI, the AI tools (`ai_match`
+Linux (below); the generator's CLI (with GCC and Clang), the AI tools (`ai_match`
 and others) and the tests of the core, the game, the AI and the network code also build with GCC.
 
 ```powershell

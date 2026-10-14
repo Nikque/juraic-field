@@ -2,9 +2,9 @@
 
 [English README](README.en.md)
 
-Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 人で連鎖を組む「とこ」、同じ PC での 2 人対戦、対戦 AI「Juraic」との対戦、AI どうしの観戦、ネット対戦（人 対 人）、リプレイの保存と再生、連鎖の盤面を作るジェネレーターが入っています。Windows 10 / 11（64 ビット）用と Linux（x86-64）用があります。
+Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 人で連鎖を組む「とこ」、同じ PC での 2 人対戦、対戦 AI「Juraic」との対戦、AI どうしの観戦、ネット対戦（人 対 人）、リプレイの保存と再生、連鎖の盤面を作るジェネレーターが入っています。Windows 10 / 11（64 ビット）用と Linux（x86-64）用と macOS（Apple シリコン）用があります。
 
-- `JuraicField.exe`（Linux 版は `JuraicField`）: ゲーム本体
+- `JuraicField.exe`（Linux 版は `JuraicField`、Mac 版は `JuraicField.app`）: ゲーム本体
 - `JuraicFieldGenerator.exe` / `random_19_chain.exe`: 連鎖盤面ジェネレーター（GUI / CLI。GUI は Windows 版だけ）
 
 ルールは「ぷよぷよ通」に合わせてあります。Juraic Field は個人が作った非公式のソフトで、株式会社セガとは関係がありません。「ぷよぷよ」は株式会社セガの登録商標です。
@@ -27,6 +27,14 @@ Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 �
 - 自分の絵は png・jpg・bmp、曲は mp3・wav・flac が読めます（Windows 版より少なくなります）。
 - 画面の文字は同梱の BIZ UDPゴシックで描きます。
 - **確かめたのは Windows の WSL（Ubuntu 22.04、WSLg）の上だけです。** 実機の Linux とコントローラーでは、まだ確かめていません。Windows 版とのネット対戦は、同じ PC の中（WSL の Linux 版が部屋を立て、Windows 版が入る）で、台本どうしの対戦が最後まで同じに進むことを確かめました。2 台の PC の間と、人が画面で操作する対戦は、まだです。
+
+### Mac 版
+
+1. Releases の `juraic-field-…-macos-arm64.zip` を展開し、`JuraicField.app` を好きな所に移して開きます。Apple シリコンの Mac（M1 以降）、macOS 11 以降用です。
+2. Apple の開発者の署名と公証を受けていないので、最初は「開発元を確認できない」などと出て開きません。「システム設定」→「プライバシーとセキュリティ」の下の方の「このまま開く」を押すと、開けるようになります。
+
+- 設定・リプレイ・自分の絵と曲は `~/Library/Application Support/JuraicField` に置かれます（形は Windows 版と同じです）。読める絵と曲の形式は Linux 版と同じです。
+- **確かめたのは GitHub の Mac のビルド機（Apple シリコン）の上だけです**: ビルド、テスト（Windows で保存したリプレイの再生を含む）、AI どうしの対戦のチェックサムが Windows と同じこと、窓を出さない自己テストの画像（Linux 版とバイト単位で同じ）。人が Mac で窓を開いて遊ぶこと、音、コントローラーは、まだ確かめていません。
 
 ## 遊び方
 
@@ -286,7 +294,7 @@ python tests/verify_output.py run.log --allow-extra
 
 ## ビルドとテスト
 
-Visual Studio 2022 などの C++20 コンパイラーと CMake 3.16 以降を使います。x64 では SSE4.1 と POPCNT を使います（PEXT/PDEP は実行時に CPU を判定して使い分けます）。それ以外の CPU 向けに 64bit 演算だけの実装も入っています（`core/field_bits.h`）。盤面ジェネレーターの GUI は Windows（MSVC）だけです。ゲーム本体は Windows では Direct2D・XAudio2 で、Linux では SDL 3 で動きます（下）。ジェネレーターの CLI、AI のツール（`ai_match` など）、盤面コア・ゲーム・AI・通信のテストは GCC でもビルドできます。
+Visual Studio 2022 などの C++20 コンパイラーと CMake 3.16 以降を使います。x64 では SSE4.1 と POPCNT を使います（PEXT/PDEP は実行時に CPU を判定して使い分けます）。それ以外の CPU 向けに 64bit 演算だけの実装も入っています（`core/field_bits.h`）。盤面ジェネレーターの GUI は Windows（MSVC）だけです。ゲーム本体は Windows では Direct2D・XAudio2 で、Linux では SDL 3 で動きます（下）。ジェネレーターの CLI、AI のツール（`ai_match` など）、盤面コア・ゲーム・AI・通信のテストは GCC と Clang でもビルドできます。macOS では、ゲーム本体はアプリ（`JuraicField.app`）になります。GitHub Actions の `.github/workflows/macos.yml` が、Apple シリコンの Mac でビルドとテストを行います。
 
 ```powershell
 cmake -S . -B build
