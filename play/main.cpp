@@ -1441,6 +1441,10 @@ struct App {
         if (m.pad.running())
             lines.push_back(L"仮想のパッド: 差し込み中（XInput " + std::to_wstring(m.pad.xinputSlot() + 1) + L" 番）" +
                             (m.playing ? L"　操作した組: " + std::to_wstring(m.driver.played) + L"　画面で位置を直した回数: " + std::to_wstring(m.driver.corrected) : L""));
+        if (m.playing)
+            lines.push_back(m.driver.measuredLag() < 0 ? std::wstring(L"画面から測った遅れ: まだ測れていません")
+                                                       : L"画面から測った遅れ: " + std::to_wstring(m.driver.measuredLag()) + L" フレーム（" + std::to_wstring(m.driver.lags.size()) +
+                                                             L" 回の真ん中。「遅れ」をこれに合わせてください）");
         for (size_t i = 0; i < lines.size(); ++i) gfx.text(lines[i], 44, 400 + float(i) * 20, 620, 20, 0, rgb(200, 206, 226));
         // The two sides as they are read: the pieces at rest, the pair in play, the window of the next pairs, the notice.
         const float cell = 22;

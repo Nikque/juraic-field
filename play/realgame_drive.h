@@ -8,11 +8,17 @@
 // is checked against where the engine had it in the frame of the picture: when it is elsewhere (a button that came
 // late or early, or was not taken) the engine's pair is put where the picture shows it, the frames since are played
 // again with the buttons sent for them, and the way to the placement chosen is planned again from there
-// (ai::PlacementAgent::steer). Once the pair is locked nothing is pressed until the next pair is seen.
+// (ai::PlacementAgent::steer). Once the pair is locked nothing is pressed until the next pair is seen; the AI is still
+// shown every frame (an AI of a lower level sees the other side as it was some frames before: ai/pace.h).
+//
+// The lag is measured too: from the frame a move to the side was first sent for a pair to the first picture that
+// shows the pair moved (Driver::measuredLag, the middle of the last measurements).
 #include "../ai/agent.h"
 #include "realgame_follow.h"
+#include <algorithm>
 #include <deque>
 #include <memory>
+#include <vector>
 
 namespace play::realgame {
 
@@ -25,6 +31,15 @@ public:
     uint64_t seed = 1;                        // of the agent's rounds
     int played = 0;                           // pairs played
     int corrected = 0;                        // pictures that showed the pair elsewhere than the engine had it
+    std::vector<int> lags;                    // the lags measured, the last first ones dropped (at most 15)
+
+    // The middle of the lags measured; -1: none yet.
+    int measuredLag() const {
+        if (lags.empty()) return -1;
+        std::vector<int> sorted = lags;
+        std::sort(sorted.begin(), sorted.end());
+        return sorted[sorted.size() / 2];
+    }
 
     // Nothing is pressed from the next frame on until a new own pair is seen (the buttons of this frame are sent: the
     // pair locks with them).
@@ -51,12 +66,19 @@ public:
             pairsSeen = side.pairs;
             begin(f, side);
         }
-        if (!active) return held = 0;
+        measure(f);
+        if (!active) {
+            wait(f, now);
+            return held = 0;
+        }
         correct(f);
         const int64_t at = now + lag;
         // (frames of the game whose buttons were sent before: they took what was held)
         while (active && next < at) play(f, false);
-        if (active && next == at) play(f, true);
+        if (active && next == at) {
+            play(f, true);
+            if ((held & (juraic::BTN_LEFT | juraic::BTN_RIGHT)) && movedAt < 0) movedAt = now, movedFrom = spawnX;
+        }
         return held;
     }
 
@@ -74,6 +96,10 @@ private:
     uint8_t held = 0;
     int round = -1, pairsSeen = 0;
     int64_t checked = -1;
+    int64_t movedAt = -1; // the frame of the clock a move to the side was first sent for the pair in play (-1: none)
+    int movedFrom = 0;    // ... and the column the pair was then seen in
+    int spawnX = juraic::SPAWN_X;
+    bool measured = true;
 
     int64_t roundFrame(const Tracker& t, int64_t at) const { return t.roundStart >= 0 && at >= t.roundStart ? at - t.roundStart : 0; }
 
@@ -96,6 +122,7 @@ private:
         next = side.spawnedAt + (side.late ? 0 : 1);
         past.clear();
         checked = -1;
+        movedAt = -1, measured = side.late, spawnX = side.lastSeen.at.x;
         active = true;
         ++played;
         bool same = true;
@@ -119,6 +146,32 @@ private:
         ++next;
         if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) stop();
         return wanted == held;
+    }
+
+    // Between the own pairs the AI is shown each frame all the same, the own side waiting for its pair; nothing it
+    // asks for is pressed.
+    void wait(const Follower& f, int64_t now) {
+        const Tracker& t = f.tracker;
+        if (t.roundStart < 0 || now <= t.roundStart) return;
+        juraic::Player waiting;
+        waiting.field = f.model[me].known ? f.model[me].core.field : t.side[me].resting;
+        waiting.phase = juraic::Phase::Next;
+        waiting.wait = 60; // (not about to appear: the AI does not choose yet)
+        waiting.nextPair = waiting.moves = t.side[me].pairs;
+        juraic::ai::Observation o;
+        f.observeAt(me, rules, waiting, now, o);
+        agent->frame(o);
+    }
+
+    // The first picture that shows the pair moved to the side after a move was sent: the lag (frames of the clock).
+    void measure(const Follower& f) {
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        if (measured || movedAt < 0 || !side.pair.seen || t.frame <= movedAt) return;
+        if (side.pair.at.x == movedFrom) return;
+        measured = true;
+        lags.push_back(int(t.frame - movedAt));
+        if (lags.size() > 15) lags.erase(lags.begin());
     }
 
     void steer(const Follower& f) {

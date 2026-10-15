@@ -11,7 +11,8 @@
 //     tells. Pieces of a chain that move keep a field from standing still.
 //  5. The AI plays 2P of rounds of this program through their screen and a pad (Driver), its buttons reaching the round
 //     `lag` frames after they are sent: every pair goes where the AI chose; with a pad that is now and then a frame
-//     early or late, the pair is found elsewhere at times, put right and still brought where the AI chose.
+//     early or late, the pair is found elsewhere at times, put right and still brought where the AI chose. The lag
+//     measured from the screen is that of the pad.
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
 //     Followed with the rules of the game (Follower): where each pair came to rest is found, the pieces reckoned are
 //     those read as the next pair appears, and a notice of more than the chains can have sent is held back.
@@ -511,7 +512,7 @@ static void testNoticeCeiling() {
 }
 
 struct DriveCounts {
-    long frames = 0, locks = 0, hits = 0, corrected = 0, played = 0;
+    long frames = 0, locks = 0, hits = 0, corrected = 0, played = 0, lagRight = 0, lagRounds = 0;
 };
 
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n) {
@@ -560,11 +561,13 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         ++n.frames;
     }
     n.corrected += d.corrected, n.played += d.played;
+    n.lagRounds += 1, n.lagRight += d.measuredLag() == lag;
 }
 
 static void testDriver() {
     DriveCounts exact, shaky;
     for (int lag = 1; lag <= 3; ++lag) driveRound(60 + uint64_t(lag), lag, false, 2500, exact);
+    check(exact.lagRight == exact.lagRounds, "the lag measured is not the lag of the pad");
     check(exact.locks >= 60 && exact.hits == exact.locks && exact.corrected == 0,
           "through a pad that is late as said, a pair is not brought where the AI chose (" + std::to_string(exact.hits) + " of " + std::to_string(exact.locks) +
               ") or found elsewhere than the engine had it (" + std::to_string(exact.corrected) + ")");
@@ -573,7 +576,7 @@ static void testDriver() {
           "through a shaky pad, pairs are not put right: " + std::to_string(shaky.hits) + " of " + std::to_string(shaky.locks) + " where the AI chose, " +
               std::to_string(shaky.corrected) + " found elsewhere");
     std::cout << "the AI playing 2P through the screen and a pad: late as said, " << exact.hits << " pairs of " << exact.locks
-              << " where it chose and none found elsewhere; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
+              << " where it chose and none found elsewhere, the lag measured as it was; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
               << shaky.locks << " went where it chose\n";
 }
 
