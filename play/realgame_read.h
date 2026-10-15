@@ -431,13 +431,13 @@ inline int readNotice(const Picture& p, const Layout& l, const Scale& s, const S
         const Mark* found = nullptr;
         long foundAway = 0;
         for (const Mark& m : l.marks) {
-            bool near = true;
+            bool allNear = true;
             long away = 0;
             for (const Probe& q : m.probes) {
                 const int apart = distance2(sample(p, s, at.x + q.dx, at.y + q.dy, l.markPatch), q.rgb);
-                near = near && apart <= limit, away += apart;
+                allNear = allNear && apart <= limit, away += apart;
             }
-            if (near && (!found || m.probes.size() > found->probes.size() || (m.probes.size() == found->probes.size() && away < foundAway))) found = &m, foundAway = away;
+            if (allNear && (!found || m.probes.size() > found->probes.size() || (m.probes.size() == found->probes.size() && away < foundAway))) found = &m, foundAway = away;
         }
         if (found) total += found->value;
     }

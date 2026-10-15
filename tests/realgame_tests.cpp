@@ -20,6 +20,11 @@
 //     small dot, the background and the mark where the pair appears (red or orange) are not, a piece over that mark is
 //     (red with its shine, green without), pale grey (bright or dim) is garbage, a bright light of the screen of no
 //     colour of a piece is UNSURE. A reading with such a point takes nothing of that side's field.
+#ifdef _WIN32
+// (as in play/main.cpp the headers come after those of Windows, whose macros - near, far, small - are no names there)
+#define NOMINMAX
+#include <windows.h>
+#endif
 #include "../ai/agents.h"
 #include "../play/realgame_drive.h"
 #include <chrono>
@@ -347,12 +352,12 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
 static void testRounds() {
     const auto started = std::chrono::steady_clock::now();
     const Layout l = sampleLayout();
-    ai::Params small;
-    small.beamWidth = 30, small.beamDepth = 8, small.beamQueues = 3;
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
     Counts n;
     const int sizes[4][2] = {{BASE_WIDTH, BASE_HEIGHT}, {1920, 1080}, {2560, 1440}, {1280, 720}};
     for (int k = 0; k < 4; ++k) {
-        const std::unique_ptr<ai::Agent> x3 = ai::makeAgent("x3", small), random = ai::makeAgent("random");
+        const std::unique_ptr<ai::Agent> x3 = ai::makeAgent("x3", narrow), random = ai::makeAgent("random");
         check(x3 && random, "the agents x3 and random are not there");
         playAndRead(l, sizes[k][0], sizes[k][1], 31 + uint64_t(k), x3.get(), random.get(), 2500, n);
         playAndRead(l, sizes[k][0], sizes[k][1], 41 + uint64_t(k), nullptr, random.get(), 1500, n);
@@ -374,7 +379,7 @@ static void testOneColour() {
     // A pair of one colour upside down, in the air: read so while it was so before, and the other way round when it was.
     SideRead s;
     for (auto& column : s.point)
-        for (int k = 0; k < POINTS; ++k) column[k] = k >= 25 ? HIDDEN : EMPTY;
+        for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = k >= 25 ? HIDDEN : EMPTY;
     s.point[3][10] = s.point[3][11] = s.point[3][12] = s.point[3][13] = 2; // (cells 5 and 6 of column 4)
     const GameField none;
     PairSeen before;
@@ -430,7 +435,7 @@ static void testUnclearFrames() {
     Reading clear;
     for (SideRead& side : clear.side) {
         for (auto& column : side.point)
-            for (int k = 0; k < POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
         side.next[0] = {2, 3}, side.next[1] = {4, 2};
         side.nextRead[0] = side.nextRead[1] = true;
     }
@@ -464,7 +469,7 @@ static void testUnclearFrames() {
     // A new pair hidden by a light as it appeared: taken when it is seen after it, moved already; not without the light.
     Reading empty = clear;
     for (auto& column : empty.side[1].point)
-        for (int k = 0; k < POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
     Reading moved = empty;
     moved.side[1].point[3][21] = moved.side[1].point[3][22] = 2, moved.side[1].point[3][23] = 3; // (axis 2 half a cell up in the fourth column, child 3 above it)
     Reading movedInFog = moved;
@@ -487,7 +492,7 @@ static void testNoticeCeiling() {
     Reading empty;
     for (SideRead& side : empty.side) {
         for (auto& column : side.point)
-            for (int k = 0; k < POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
         side.next[0] = {2, 3}, side.next[1] = {4, 2};
         side.nextRead[0] = side.nextRead[1] = true;
     }
@@ -522,13 +527,13 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     r.start(rules, seed);
     Canvas canvas(1280, 720, l);
     Rng noise(seed, 7), shake(seed, 9);
-    ai::Params small;
-    small.beamWidth = 30, small.beamDepth = 8, small.beamQueues = 3;
-    const std::unique_ptr<ai::Agent> other = ai::makeAgent("x3", small);
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    const std::unique_ptr<ai::Agent> other = ai::makeAgent("x3", narrow);
     other->startRound(0, seed);
     Follower follow;
     Driver d;
-    d.lag = lag, d.rules = rules, d.agent = ai::makeAgent("x3", small);
+    d.lag = lag, d.rules = rules, d.agent = ai::makeAgent("x3", narrow);
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
