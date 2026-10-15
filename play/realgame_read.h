@@ -15,7 +15,9 @@
 // A point is the square around it: its pixels of strong colour (pieces have faces and shines of white, outlines of
 // dark) tell the colour of a piece, by the colour of the table nearest to their mean, when with the pixels of pale
 // grey or white they cover enough of it (a small dot of colour is no piece); with few of them, many pixels of pale
-// grey are garbage; the background of the field (dark) is neither.
+// grey are garbage; the background of the field (dark) is neither. A point that shows something bright that is none of
+// these (the lights, the smoke and the words the screen draws over a field) is UNSURE, and a reading with such points
+// is not taken by Tracker for the pieces of that side.
 //
 // Tracker follows the readings frame by frame: the pieces at rest and whether they stand still, the pair in play,
 // the pairs each side has been given and the pairs the windows of the next pairs have shown. observeSpawn makes of
@@ -39,6 +41,7 @@ constexpr int BASE_WIDTH = 2240, BASE_HEIGHT = 1260; // the inside of the window
 constexpr int ROWS = 14;                             // rows read, the 14th included (the screen does not show it)
 constexpr int POINTS = 2 * ROWS;                     // points read in a column
 constexpr juraic::Cell HIDDEN = 7;                   // a point above what the screen shows of the field
+constexpr juraic::Cell UNSURE = 8;                   // a point that shows something bright that is neither a piece nor the field
 
 // One picture: four bytes a pixel, blue, green, red and one more (not read), rows from the top.
 struct Picture {
@@ -101,8 +104,9 @@ struct Layout {
     int colorDistance = 60;       // a point within this distance (red, green, blue) of a colour of the table is that colour
     std::vector<ColorRef> colors; // (the nearest counts; a point near none of them is empty)
     // A point is a piece of a colour when `colored` in a hundred of its pixels have strong colour and `cover` in a hundred
-    // have strong colour or are pale grey; with fewer of strong colour, garbage when `garbage` in a hundred are pale grey.
-    int colored = 8, cover = 45, garbage = 30;
+    // have strong colour or are pale grey; with fewer of strong colour, garbage when `garbage` in a hundred are pale grey;
+    // otherwise UNSURE when `unsure` in a hundred are bright (at least 45 in a hundred as bright as white), else nothing.
+    int colored = 8, cover = 45, garbage = 30, unsure = 30;
     int markDistance = 60;        // the same for the points of a mark
     std::vector<Mark> marks;
     int stillFrames = 2;          // pieces at rest read the same for this many frames stand still
@@ -196,7 +200,7 @@ inline Layout measuredLayout() {
 
 // The table as text: one item a line, a word and its numbers; # begins a remark.
 //   base <width> <height>              patch <half side>        markpatch <half side>        still <frames>
-//   distance <colours> <marks>         share <strong colour> <cover> <garbage>      (in a hundred pixels of a point)
+//   distance <colours> <marks>         share <strong colour> <cover> <garbage> <unsure>   (in a hundred pixels of a point)
 //   color <piece> <r> <g> <b>          (piece: 0 no piece, 1 to 5 the colours, 6 garbage; one line a colour)
 //   mark <pieces> <dx> <dy> <r> <g> <b> [<dx> <dy> <r> <g> <b> ...]
 //   field <side> <left> <bottom> <cell width> <cell height> <rows shown>      (side: 1 or 2)
@@ -206,7 +210,7 @@ inline Layout measuredLayout() {
 inline std::string formatLayout(const Layout& l) {
     std::ostringstream o;
     o << "base " << l.baseWidth << ' ' << l.baseHeight << "\npatch " << l.patch << "\nmarkpatch " << l.markPatch << "\nstill " << l.stillFrames << "\ndistance " << l.colorDistance << ' ' << l.markDistance
-      << "\nshare " << l.colored << ' ' << l.cover << ' ' << l.garbage << '\n';
+      << "\nshare " << l.colored << ' ' << l.cover << ' ' << l.garbage << ' ' << l.unsure << '\n';
     for (const ColorRef& c : l.colors) o << "color " << int(c.cell) << ' ' << c.rgb.r << ' ' << c.rgb.g << ' ' << c.rgb.b << '\n';
     for (const Mark& m : l.marks) {
         o << "mark " << m.value;
@@ -253,8 +257,8 @@ inline bool parseLayout(const std::string& text, Layout& out, std::string* error
         else if (word == "still") ok = bool(words >> l.stillFrames) && l.stillFrames >= 1;
         else if (word == "distance") ok = bool(words >> l.colorDistance >> l.markDistance) && l.colorDistance >= 0 && l.markDistance >= 0;
         else if (word == "share") {
-            ok = bool(words >> l.colored >> l.cover >> l.garbage);
-            for (int v : {l.colored, l.cover, l.garbage}) ok = ok && v >= 0 && v <= 100;
+            ok = bool(words >> l.colored >> l.cover >> l.garbage >> l.unsure);
+            for (int v : {l.colored, l.cover, l.garbage, l.unsure}) ok = ok && v >= 0 && v <= 100;
         }
         else if (word == "color") {
             int cell = 0;
@@ -358,7 +362,7 @@ inline juraic::Cell classify(const Layout& l, const Rgb& c) {
     return cell;
 }
 
-// What the square around (x, y) shows (in base pixels): a piece of a colour, garbage or nothing. Strong colour: at
+// What the square around (x, y) shows (in base pixels): a piece of a colour, garbage, nothing or UNSURE. Strong colour: at
 // least 45 in a hundred as bright as white and its weakest part at most half its strongest; pale grey: at least 40 in
 // a hundred as bright as white and its weakest part at least three quarters of its strongest. `mark`: the mark of the
 // screen in that cell, if any.
@@ -367,33 +371,37 @@ inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, flo
     const float px = x * s.x, py = y * s.y, hx = l.patch * s.x, hy = l.patch * s.y;
     const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
     const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
-    long r = 0, g = 0, b = 0, strong = 0, light = 0, all = 0, pr = 0, pb = 0;
+    long r = 0, g = 0, b = 0, strong = 0, light = 0, all = 0, pr = 0, pb = 0, bright = 0;
     for (int j = y0; j <= y1; ++j) {
         const uint8_t* row = p.pixels + size_t(j) * size_t(p.stride);
         for (int i = x0; i <= x1; ++i) {
             const int cb = row[4 * i], cg = row[4 * i + 1], cr = row[4 * i + 2];
             const int high = std::max(cr, std::max(cg, cb)), low = std::min(cr, std::min(cg, cb));
             ++all;
+            if (100 * high > 45 * 255) ++bright;
             if (2 * (high - low) > high && 100 * high > 45 * 255) r += cr, g += cg, b += cb, ++strong;
             else if (4 * (high - low) < high && 10 * high > 4 * 255) ++light, pr += cr, pb += cb;
         }
     }
     if (!all) return juraic::EMPTY;
+    const juraic::Cell other = 100 * bright >= long(l.unsure) * all ? UNSURE : juraic::EMPTY;
     // (the white face of a piece is warm, garbage is grey)
     const bool warm = light && (pr - pb) >= 8 * light && strong;
     if (100 * strong >= long(l.colored) * all || (warm && 100 * (strong + light) >= long(l.cover) * all)) {
-        if (100 * (strong + light) < long(l.cover) * all) return juraic::EMPTY;
         const Rgb mean{int(r / strong), int(g / strong), int(b / strong)};
-        const juraic::Cell cell = classify(l, mean);
-        if (cell && mark && 100 * light < long(mark->pale) * all) {
+        if (mark && 100 * light < long(mark->pale) * all) {
+            // (the mark of the screen in this cell)
             int nearest = 1 << 30;
             for (const ColorRef& ref : l.colors) nearest = std::min(nearest, distance2(mean, ref.rgb));
             for (const Rgb& c : mark->colors)
                 if (distance2(mean, c) < nearest) return juraic::EMPTY;
         }
-        return cell;
+        const juraic::Cell cell = classify(l, mean);
+        // (too little of a piece's colour: the dots where the pair would land; of another colour: something else)
+        if (100 * (strong + light) < long(l.cover) * all) return cell ? juraic::EMPTY : other;
+        return cell ? cell : UNSURE;
     }
-    return 100 * light >= long(l.garbage) * all ? juraic::GARBAGE : juraic::EMPTY;
+    return 100 * light >= long(l.garbage) * all ? juraic::GARBAGE : other;
 }
 
 // The point `k` of column x (2y: the lower point of row y, 2y + 1: its upper point), in base pixels; how high it is in
@@ -408,6 +416,7 @@ struct SideRead {
     juraic::Pair next[2]{};                  // the window of the next pairs: next, next-next
     bool nextRead[2]{};                      // false: a piece of it is no colour of the table (the window is moving)
     int notice = 0;                          // garbage pieces the notice shows
+    int unsure = 0;                          // points of the field that are UNSURE
 };
 struct Reading {
     SideRead side[2]; // by seat
@@ -448,6 +457,7 @@ inline Reading read(const Picture& p, const Layout& l) {
                 for (const MarkedCell& m : d.marked)
                     if (m.x == x && m.y == k / 2) mark = &m;
                 out.point[x][k] = pointHeight(k) > d.shownRows ? HIDDEN : piece(p, l, s, at.x, at.y, mark);
+                out.unsure += out.point[x][k] == UNSURE;
             }
         for (int n = 0; n < 2; ++n) {
             const juraic::Cell axis = piece(p, l, s, d.next[n][0].x, d.next[n][0].y);
@@ -462,7 +472,7 @@ inline Reading read(const Picture& p, const Layout& l) {
 
 // ---- what a reading shows ---------------------------------------------------------------------------------------
 
-inline bool isPiece(juraic::Cell c) { return c != juraic::EMPTY && c != HIDDEN; }
+inline bool isPiece(juraic::Cell c) { return c != juraic::EMPTY && c != HIDDEN && c != UNSURE; }
 
 // The pieces at rest: from the floor of each column up, the cells whose two points show the same piece (or whose upper
 // point is above the screen). What is above the first cell that is not such a cell is not in it.
@@ -601,7 +611,10 @@ struct SideTrack {
     PairSeen lastSeen;         // as seen last
     int pairs = 0;             // pairs this side has been given since the round began
     int64_t spawnedAt = -1;    // the frame in which the last of them was seen first
-    int notice = 0;
+    bool clear = true;         // the last reading of this side had no UNSURE point (otherwise nothing of its field was taken)
+    int notice = 0;            // the garbage notice, as it has read the same for Tracker::noticeFrames frames
+    int noticeRead = 0;        // ... as last read, and since which frame
+    int64_t noticeSince = 0;
     juraic::Pair next[2]{};    // the window of the next pairs as last read
     bool nextRead[2]{};
 };
@@ -612,6 +625,8 @@ public:
     int stillFrames = 2;
     // Both fields empty, with no pair, for this many frames: a new round (the screen before a round shows them so).
     int roundGap = 30;
+    // The notice is taken when it has read the same for this many frames (a light of the screen over it changes it).
+    int noticeFrames = 3;
     SideTrack side[2];
     // The pairs the screen has shown, numbered as the players draw them (both draw from one tsumo).
     std::vector<juraic::Pair> pairs;
@@ -625,12 +640,14 @@ public:
 
     void reset() {
         const juraic::Timing t = timing;
-        const int still = stillFrames, gap = roundGap;
+        const int still = stillFrames, gap = roundGap, notice = noticeFrames;
         *this = Tracker{};
-        timing = t, stillFrames = still, roundGap = gap;
+        timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice;
     }
 
-    bool still(int s) const { return frame - side[s].changedAt >= stillFrames && side[s].loose == 0; }
+    // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
+    // last reading clear. (A reading that is not clear is no reading: it neither changes the pieces nor counts.)
+    bool still(int s) const { return side[s].clear && frame - side[s].changedAt >= stillFrames && side[s].loose == 0; }
     bool knows(int index) const { return index >= 0 && index < int(known.size()) && known[size_t(index)]; }
 
     // One picture, of the frame `at` (frames counted by the clock: a frame that was not taken is a number left out).
@@ -642,10 +659,18 @@ public:
         for (int s = 0; s < 2; ++s) {
             const SideRead& read = r.side[s];
             SideTrack& t = side[s];
+            if (read.notice != t.noticeRead) t.noticeRead = read.notice, t.noticeSince = at;
+            if (at - t.noticeSince + 1 >= noticeFrames) t.notice = t.noticeRead;
+            for (int n = 0; n < 2; ++n) t.next[n] = read.next[n], t.nextRead[n] = read.nextRead[n];
+            t.clear = read.unsure == 0;
+            if (!t.clear) {
+                // (something the screen draws over the field: nothing of it is taken, the pair not seen in this frame)
+                t.pair = {};
+                empty = false;
+                continue;
+            }
             const juraic::GameField resting = restingField(read);
             if (!(resting == t.resting)) t.resting = resting, t.changedAt = at;
-            t.notice = read.notice;
-            for (int n = 0; n < 2; ++n) t.next[n] = read.next[n], t.nextRead[n] = read.nextRead[n];
             t.pair = {};
             if (t.inHand) {
                 // (gone: the field under it changed - a chain, or a field read wrong -, or something came to rest and
@@ -660,13 +685,13 @@ public:
                 }
             }
             if (!t.pair.seen) {
-                // A new pair where pairs appear, on a field that stood still before it (pieces of a chain falling past
-                // the place are no pair).
+                // A new pair where pairs appear, on a field that stood still before it with nothing above it in the
+                // last clear reading (pieces of a chain falling past the place are no pair).
                 const juraic::Pair coming = knows(t.pairs) ? pairs[size_t(t.pairs)] : juraic::Pair{};
                 const PairSeen fresh = readPair(read, resting, coming);
                 const juraic::PairControl spawn = juraic::spawnPair(timing);
                 const bool there = fresh.seen && fresh.at.x == spawn.x && fresh.at.y == spawn.y && fresh.at.upper == spawn.upper && fresh.at.dir == spawn.dir;
-                if (there && at - t.changedAt >= stillFrames) newPair(s, fresh, resting, read, at);
+                if (there && at - t.changedAt >= stillFrames && t.loose == 0) newPair(s, fresh, resting, read, at);
             }
             t.loose = looseOf(read, t);
             empty = empty && resting.f.empty() && t.loose == 0 && !t.inHand;

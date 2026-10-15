@@ -5,7 +5,8 @@
 //   realgame_read --write-layout FILE
 //
 // Prints what the picture shows on each side: every point of the field (from the top: a space above what the screen
-// shows, . nothing, 1 to 5 the colours, x garbage; two lines a row, the upper point first), the pieces at rest, the
+// shows, . nothing, 1 to 5 the colours, x garbage, ? something bright that is none of them; two lines a row, the upper
+// point first), the pieces at rest, the
 // pair in play, the window of the next pairs and the garbage notice. Without --layout the table built in is used
 // (measuredLayout).
 //   --points OUT.bmp     the picture with every point read marked on it, in the colour read there (grey: garbage,
@@ -25,7 +26,7 @@ using namespace play::realgame;
 namespace {
 
 char symbol(juraic::Cell c) {
-    return c == HIDDEN ? ' ' : c == juraic::EMPTY ? '.' : c == juraic::GARBAGE ? 'x' : char('0' + c);
+    return c == HIDDEN ? ' ' : c == juraic::EMPTY ? '.' : c == juraic::GARBAGE ? 'x' : c == UNSURE ? '?' : char('0' + c);
 }
 
 // A small square around a point, in the colour of the table read there (black: none), with a white rim.
@@ -108,7 +109,7 @@ int main(int argc, char** argv) {
         for (int n = 0; n < 2; ++n)
             std::cout << "  " << (n ? "next-next" : "next") << ": " << (d.nextRead[n] ? std::string{symbol(d.next[n].axis), ' ', symbol(d.next[n].child)} : std::string("not read"))
                       << " (axis, child)\n";
-        std::cout << "  garbage notice: " << d.notice << '\n';
+        std::cout << "  garbage notice: " << d.notice << "\n  points not sure: " << d.unsure << '\n';
     }
     if (!pointsPath.empty()) {
         std::vector<uint8_t> marked = pixels;

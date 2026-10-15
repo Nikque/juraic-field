@@ -12,7 +12,8 @@
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
 //  5. A point of the table measured on the real game (measuredLayout): a piece with its face and shine is read, a
 //     small dot, the background and the mark where the pair appears (red or orange) are not, a piece over that mark is
-//     (red with its shine, green without), pale grey (bright or dim) is garbage.
+//     (red with its shine, green without), pale grey (bright or dim) is garbage, a bright light of the screen of no
+//     colour of a piece is UNSURE. A reading with such a point takes nothing of that side's field.
 #include "../ai/agents.h"
 #include "../play/realgame_read.h"
 #include <chrono>
@@ -54,7 +55,8 @@ static Rgb colorOf(const Layout& l, Cell cell) {
     throw std::runtime_error("no colour in the table for a piece");
 }
 
-const Rgb ABOVE{40, 40, 60}; // what the screen shows above the field (no colour of the table)
+const Rgb ABOVE{40, 40, 60};    // what the screen shows above the field (no colour of the table)
+const Rgb LIGHT{120, 230, 230}; // a light the screen draws over the field
 
 // A piece of the field whose middle is `height` cells above the floor of the field.
 static void piece(Canvas& c, const Layout& l, const SideLayout& d, int x, float height, Cell cell) {
@@ -121,6 +123,11 @@ static Drawn draw(Canvas& c, const Layout& l, const Round& r, bool ready, Rng& n
                 const float cx = d.left + (float(y) + 0.5f) * d.cellWidth, cy = d.bottom - (float(h[y]) - 0.5f) * d.cellHeight;
                 c.fill(cx - d.cellWidth / 2, cy - d.cellHeight / 2, cx + d.cellWidth / 2, cy + d.cellHeight / 2, Rgb{}, top);
             }
+            if (noise.below(3) == 0) {
+                // A light the screen draws over the field: bright, of no colour of a piece.
+                const float cx = d.left + float(noise.below(W - 1)) * d.cellWidth, cy = d.bottom - float(noise.below(12)) * d.cellHeight;
+                c.fill(cx, cy - 2 * d.cellHeight, cx + 2 * d.cellWidth, cy, LIGHT, top);
+            }
         }
         // The window: it moves on shortly before a pair appears (play/view.h drawNext).
         const int first = p.phase == Phase::Next && p.wait <= r.timing.nextShown && !ready ? 1 : 0;
@@ -185,7 +192,7 @@ static void testTableText() {
 // ---- 2. and 3. rounds drawn and read ------------------------------------------------------------------------------
 
 struct Counts {
-    long frames = 0, resting = 0, pairs = 0, nexts = 0, notices = 0, spawns = 0, observed = 0, otherInAir = 0, garbageShown = 0, movingFrames = 0;
+    long frames = 0, resting = 0, pairs = 0, nexts = 0, notices = 0, spawns = 0, observed = 0, otherInAir = 0, garbageShown = 0, movingFrames = 0, unclear = 0;
 };
 
 // One frame of the round, the buttons of the AIs (null: random buttons).
@@ -225,6 +232,8 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
     }
     check(tracker.fromStart && tracker.knows(0) && tracker.knows(1) && !tracker.knows(2), "the first two pairs are not learnt before the round");
     uint8_t held[2] = {};
+    int total[2] = {}; // the garbage above each field, and the frame of the clock since which it has been so
+    int64_t totalSince[2] = {clock, clock};
     ai::Observation o, mine;
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
         // (now and then a frame is not taken, as by a capture that misses one; not one in which a pair appears)
@@ -233,6 +242,8 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
             stepRound(r, agents, o, hands, held);
             continue;
         }
+        for (int s = 0; s < 2; ++s)
+            if (r.player[s].incoming.total() != total[s]) total[s] = r.player[s].incoming.total(), totalSince[s] = clock;
         const Drawn shown = draw(canvas, l, r, false, noise);
         const Reading got = read(canvas.picture(), l);
         tracker.step(got, clock);
@@ -242,6 +253,8 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
             const SideRead& g = got.side[s];
             const std::string where = "seed " + std::to_string(seed) + ", " + std::to_string(width) + "x" + std::to_string(height) + ", frame " + std::to_string(f) + ", side " + std::to_string(s) + ": ";
             n.movingFrames += shown.moving[s];
+            n.unclear += g.unsure > 0;
+            check(g.unsure == 0 || shown.moving[s], where + "a point not sure where no light is drawn");
             // The pieces at rest, where nothing moves.
             if (!shown.moving[s]) {
                 GameField expected = p.field;
@@ -303,7 +316,8 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
                 const int i = p.nextPair + k;
                 check(o.mine().known(i) && o.mine().pair(i).axis == mine.mine().pair(i).axis && o.mine().pair(i).child == mine.mine().pair(i).child, where + "a pair shown is not observed");
             }
-            if (shown.noticeFits[s]) {
+            if (shown.noticeFits[s] && clock - totalSince[s] + 1 >= tracker.noticeFrames) {
+                // (the notice is taken when it has read the same for Tracker::noticeFrames frames)
                 check(me.incoming.total() == p.incoming.total(), where + "the garbage above the own field is not observed");
                 // (garbage of a chain that still runs: the other side moves, and it waits for the chain)
                 if (p.incoming.pending) check(me.incoming.pending == p.incoming.total(), where + "garbage of a chain that runs is observed as falling");
@@ -334,12 +348,12 @@ static void testRounds() {
         playAndRead(l, sizes[k][0], sizes[k][1], 31 + uint64_t(k), x3.get(), random.get(), 2500, n);
         playAndRead(l, sizes[k][0], sizes[k][1], 41 + uint64_t(k), nullptr, random.get(), 1500, n);
     }
-    check(n.spawns > 300 && n.otherInAir > 50 && n.garbageShown > 50 && n.movingFrames > 1000, "the rounds read show too little");
+    check(n.spawns > 300 && n.otherInAir > 50 && n.garbageShown > 50 && n.movingFrames > 1000 && n.unclear > 300, "the rounds read show too little");
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     std::cout << "rounds drawn at four sizes and read (" << n.frames << " frames, " << seconds << " s): the pieces at rest " << n.resting << " times, the pair in play " << n.pairs
               << ", the window " << n.nexts << ", the notice " << n.notices << " (" << n.garbageShown << " with garbage); " << n.spawns
               << " new pairs seen in the frame before they can be moved, and observed as the round shows them (the other side's pair in the air "
-              << n.otherInAir << " times)\n";
+              << n.otherInAir << " times); " << n.unclear << " readings of a side under a light, not taken\n";
 }
 
 // ---- 4. small things ---------------------------------------------------------------------------------------------
@@ -391,7 +405,51 @@ static void testPointRules() {
     check(at(DEATH_X, DEATH_Y, red, 60, white, 20) == 1 && at(DEATH_X, DEATH_Y, green, 60, white, 0) == 2, "a piece where the mark is is not read");
     check(at(2, 4, red, 70, white, 0) == 1, "two red pieces joined (no white between them) are not read away from the mark");
     check(at(3, 1, white, 60, white, 0) == GARBAGE && at(3, 1, dim, 40, dim, 0) == GARBAGE, "garbage is not read");
+    check(at(2, 6, Rgb{120, 230, 230}, 60, white, 0) == UNSURE && at(2, 6, Rgb{230, 150, 200}, 70, white, 0) == UNSURE,
+          "a light of the screen over the field is not read as not sure");
+    check(at(2, 6, Rgb{60, 60, 70}, 100, white, 0) == EMPTY, "the dark of the field is read as not sure");
     std::cout << "the measured table: pieces, small dots, the background, the mark where the pair appears and garbage read as they should\n";
+}
+
+// A reading with a point not sure (a light of the screen) takes nothing of that side's field: the pieces neither
+// change nor stand still in it, no new pair is seen in it, and the frames after it go on as if it had not been. The
+// notice is taken when it has read the same for Tracker::noticeFrames frames.
+static void testUnclearFrames() {
+    Reading clear;
+    for (SideRead& side : clear.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {2, 3}, side.next[1] = {4, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    clear.side[1].point[0][0] = clear.side[1].point[0][1] = clear.side[1].point[0][2] = clear.side[1].point[0][3] = 1;
+    Reading fog = clear;
+    fog.side[1].point[4][9] = UNSURE, fog.side[1].unsure = 1;
+    Reading coming = clear;
+    coming.side[1].point[SPAWN_X][23] = 3; // (the pair where pairs appear: its axis half a cell up, its child above the screen)
+    Reading comingInFog = coming;
+    comingInFog.side[1].point[4][9] = UNSURE, comingInFog.side[1].unsure = 1;
+    Tracker t;
+    int64_t at = 100;
+    for (int f = 0; f < 5; ++f) t.step(clear, at++);
+    const GameField before = t.side[1].resting;
+    check(t.still(1) && before.f.get(0, 1) == 1, "a field read clear does not stand still");
+    t.step(fog, at++);
+    check(!t.still(1) && t.side[1].resting == before && !t.side[1].clear, "a reading with a point not sure is taken for the field");
+    t.step(clear, at++);
+    check(t.still(1), "after a reading with a point not sure the field does not stand still again at once");
+    t.step(comingInFog, at++);
+    check(!t.spawned[1] && t.side[1].pairs == 0, "a new pair is seen in a reading with a point not sure");
+    t.step(coming, at++);
+    check(t.spawned[1] && t.side[1].pairs == 1 && t.side[1].lastSeen.colors.axis == 3, "the new pair is not seen in the clear reading after it");
+    // The notice: a value read for fewer frames than noticeFrames is not taken.
+    Reading noted = clear;
+    noted.side[0].notice = 720;
+    t.step(noted, at++), t.step(clear, at++);
+    check(t.side[0].notice == 0, "a notice read for one frame is taken");
+    for (int f = 0; f < t.noticeFrames; ++f) t.step(noted, at++);
+    check(t.side[0].notice == 720, "a notice read for noticeFrames frames is not taken");
+    std::cout << "a reading with a point not sure takes nothing of the field and does not stop what follows; the notice is taken when it has stayed\n";
 }
 
 static void testPicture(const std::string& folder) {
@@ -414,6 +472,7 @@ int main(int argc, char** argv) {
         testTableText();
         testOneColour();
         testPointRules();
+        testUnclearFrames();
         testPicture(argc > 1 ? argv[1] : ".");
         testRounds();
     } catch (const std::exception& e) {

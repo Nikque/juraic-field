@@ -1419,7 +1419,7 @@ struct App {
                     gfx.piece(t.next[n].axis, nx, ny + cell * 0.9f, 1, 1, cell * 0.9f);
                 }
             gfx.text(L"おじゃま " + std::to_wstring(t.notice), x0, bottom + 8, W * cell + 50, 24, 0, rgb(220, 226, 240), -1);
-            gfx.text(m.tracker.still(s) ? L"止まっている" : L"動いている", x0, bottom + 34, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
+            gfx.text(!t.clear ? L"光などで読めない" : m.tracker.still(s) ? L"止まっている" : L"動いている", x0, bottom + 34, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
             gfx.text(L"組 " + std::to_wstring(t.pairs), x0, bottom + 60, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
         }
         const wchar_t* notes[] = {L"同じ PC で動かしている実機の、オフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなたです）。オンラインの対戦では使えません。",
