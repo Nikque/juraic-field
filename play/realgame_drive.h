@@ -1,0 +1,164 @@
+#pragma once
+// The mode in which Juraic plays 2P of the real game (play/realgame_win.h): the AI plays one side of the real game
+// through the buttons of a pad (play/realgame_pad_win.h on Windows), frame after frame. Plain C++, tested on every system
+// (tests/realgame_tests.cpp, against rounds of this program drawn, read and played through a pad that is late).
+//
+// The own pair is followed with the engine (game/player.h): from the frame its new pair is seen (Tracker), as the game
+// moves it with the buttons sent, each reaching the game `lag` frames after it was sent. Every clear picture of the pair
+// is checked against where the engine had it in the frame of the picture: when it is elsewhere (a button that came
+// late or early, or was not taken) the engine's pair is put where the picture shows it, the frames since are played
+// again with the buttons sent for them, and the way to the placement chosen is planned again from there
+// (ai::PlacementAgent::steer). Once the pair is locked nothing is pressed until the next pair is seen.
+#include "../ai/agent.h"
+#include "realgame_follow.h"
+#include <deque>
+#include <memory>
+
+namespace play::realgame {
+
+class Driver {
+public:
+    int me = 1;                               // the seat played
+    int lag = 2;                              // frames from a button sent to the frame of the game that takes it
+    juraic::Rules rules;                      // the real game's
+    std::unique_ptr<juraic::ai::Agent> agent; // a PlacementAgent
+    uint64_t seed = 1;                        // of the agent's rounds
+    int played = 0;                           // pairs played
+    int corrected = 0;                        // pictures that showed the pair elsewhere than the engine had it
+
+    // Nothing is pressed from the next frame on until a new own pair is seen (the buttons of this frame are sent: the
+    // pair locks with them).
+    void stop() { active = false; }
+    bool playing() const { return active; }
+    // The placement the pair in play is brought to (-1: none).
+    int target() const {
+        const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(agent.get());
+        return active && placing ? placing->targetPlacement() : -1;
+    }
+
+    // In each frame of the clock `now`, after the readings of the screen up to it are in `f`: the buttons to hold on
+    // the pad from now on (they reach the frame now + lag of the game).
+    uint8_t tick(const Follower& f, int64_t now) {
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        if (!agent) return held = 0;
+        if (t.rounds != round || side.pairs < pairsSeen) {
+            round = t.rounds, pairsSeen = 0;
+            agent->startRound(me, seed++);
+            stop();
+        }
+        if (side.pairs > pairsSeen) {
+            pairsSeen = side.pairs;
+            begin(f, side);
+        }
+        if (!active) return held = 0;
+        correct(f);
+        const int64_t at = now + lag;
+        // (frames of the game whose buttons were sent before: they took what was held)
+        while (active && next < at) play(f, false);
+        if (active && next == at) play(f, true);
+        return held;
+    }
+
+private:
+    struct Past {
+        int64_t frame;        // the state after this frame of the game,
+        juraic::Player state; // ... and the buttons it took
+        uint8_t buttons;
+    };
+    juraic::Player own;
+    juraic::Tsumo tsumo;
+    int64_t next = 0; // the frame of the game the engine plays next
+    std::deque<Past> past;
+    bool active = false;
+    uint8_t held = 0;
+    int round = -1, pairsSeen = 0;
+    int64_t checked = -1;
+
+    int64_t roundFrame(const Tracker& t, int64_t at) const { return t.roundStart >= 0 && at >= t.roundStart ? at - t.roundStart : 0; }
+
+    // A new own pair was seen: the engine takes the side as it was then (the pair about to appear), with the pairs
+    // the screen has shown.
+    void begin(const Follower& f, const SideTrack& side) {
+        const Tracker& t = f.tracker;
+        own = juraic::Player{};
+        own.field = f.model[me].known ? f.model[me].core.field : side.under; // (with the 14th row the moves followed put there)
+        own.phase = juraic::Phase::Next;
+        own.wait = 1;
+        own.nextPair = own.moves = side.pairs - 1;
+        if (f.model[me].known) own.scoring = f.model[me].core.scoring;
+        tsumo = juraic::Tsumo{};
+        for (size_t i = 0; i < t.pairs.size(); ++i) {
+            const juraic::Pair p = t.known[i] ? t.pairs[i] : juraic::Pair{1, 1};
+            tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2] = p.axis, tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2 + 1] = p.child;
+        }
+        // (seen late, it was in play already in the frame of the picture: it is taken as appearing in that frame)
+        next = side.spawnedAt + (side.late ? 0 : 1);
+        past.clear();
+        checked = -1;
+        active = true;
+        ++played;
+        bool same = true;
+        // (the frames from the picture to now have passed: the agent decides them, the game took what was held)
+        const int64_t at = t.frame + lag; // (at least the frames the picture is behind)
+        while (active && next < at) same = play(f, false) && same;
+        if (!same) steer(f);
+    }
+
+    // One frame of the game: the agent decides it (its buttons are sent), or it took what was held. False when the
+    // agent decided other buttons than those the frame took.
+    bool play(const Follower& f, bool send) {
+        juraic::ai::Observation o;
+        f.observeAt(me, rules, own, next, o);
+        const uint8_t wanted = uint8_t(agent->frame(o) & ~juraic::BTN_DROP);
+        if (send) held = wanted;
+        juraic::Incoming nobody;
+        juraic::advancePlayer(own, nobody, held, tsumo, rules, f.tracker.timing, roundFrame(f.tracker, next));
+        past.push_back({next, own, held});
+        if (past.size() > 240) past.pop_front();
+        ++next;
+        if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) stop();
+        return wanted == held;
+    }
+
+    void steer(const Follower& f) {
+        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent.get())) {
+            juraic::ai::Observation o;
+            f.observeAt(me, rules, own, next, o);
+            placing->steer(o);
+        }
+    }
+
+    // A clear picture of the pair against the engine in the frame of the picture.
+    void correct(const Follower& f) {
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        if (!side.pair.seen || !side.clear || t.frame <= checked) return;
+        checked = t.frame;
+        size_t i = 0;
+        while (i < past.size() && past[i].frame != t.frame) ++i;
+        if (i == past.size() || past[i].state.phase != juraic::Phase::Control) return;
+        juraic::PairControl& had = past[i].state.pair;
+        const juraic::PairControl& seen = side.pair.at;
+        int ax, ah, cx, ch, sx, sh, tx, th;
+        pairHalves(had, ax, ah, cx, ch);
+        pairHalves(seen, sx, sh, tx, th);
+        const juraic::Pair c = past[i].state.colors;
+        const bool sameCells = (ax == sx && ah == sh && cx == tx && ch == th) || (c.axis == c.child && ax == tx && ah == th && cx == sx && ch == sh);
+        if (sameCells) return;
+        ++corrected;
+        had.x = seen.x, had.y = seen.y, had.dir = seen.dir, had.upper = seen.upper;
+        had.grounded = false, had.moveWait = 0;
+        // (the frames since played again with the buttons they took)
+        own = past[i].state;
+        for (size_t k = i + 1; k < past.size(); ++k) {
+            juraic::Incoming nobody;
+            juraic::advancePlayer(own, nobody, past[k].buttons, tsumo, rules, t.timing, roundFrame(t, past[k].frame));
+            past[k].state = own;
+        }
+        if (own.phase != juraic::Phase::Control) return stop();
+        steer(f);
+    }
+};
+
+} // namespace play::realgame

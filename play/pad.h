@@ -176,6 +176,10 @@ private:
     }
 
 public:
+    // The XInput number of a pad this program presses itself (the mode of the real game, play/realgame_pad_win.h): not
+    // read. -1: none.
+    int skipXInput = -1;
+
 #ifdef JURAIC_PADS_SDL
     ~Pads() {
         for (auto& [id, g] : sdlPads) SDL_CloseGamepad(g);
@@ -194,7 +198,7 @@ public:
 #endif
         for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
             uint64_t bits;
-            if (readXInput(i, bits)) state.push_back(bits), xbox.push_back(true), bySdl.push_back(false);
+            if (int(i) != skipXInput && readXInput(i, bits)) state.push_back(bits), xbox.push_back(true), bySdl.push_back(false);
         }
         try {
             if (!failed && --refresh < 0) {

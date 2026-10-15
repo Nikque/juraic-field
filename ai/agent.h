@@ -97,6 +97,17 @@ public:
 
     ~PlacementAgent() override { finish(); }
 
+    // The pair in play is not where the buttons this agent gave would have brought it (an agent that plays a game
+    // through another program, whose buttons reach that game late or not at all): the way to the placement chosen is
+    // planned again from where `o` shows the pair. No way left: the pair goes down where it is.
+    void steer(const Observation& o) {
+        if (o.self().phase != Phase::Control || late || target < 0) return;
+        step = 0;
+        if (!planner.plan(o.self().field, o.self().pair, placement(target), o.timing, o.rules.speedPercent, path)) path.buttons.clear();
+    }
+    // The placement the pair in play is brought to (-1: none yet).
+    int targetPlacement() const { return target; }
+
     void startRound(int, uint64_t seed) override {
         finish();
         rng = Rng(seed, AGENT_STREAM);

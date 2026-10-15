@@ -8,6 +8,8 @@
 // sent: a notice of more is taken only when it has read the same for a long time (a light of the screen over the
 // notice changes what it shows).
 //
+// The 14th row is not on the screen: its pieces are those the placements followed put there (they never move).
+//
 // What the screen does not tell: the points of the down key (a point a row, which count towards garbage), so the
 // garbage a chain sends is reckoned short by a little at times (Follower::slack).
 #include "realgame_read.h"
@@ -80,7 +82,10 @@ public:
                     ++checks;
                     if (!fits(t.under, m.core.field)) ++misses;
                 }
+                // (the 14th row is not on the screen: its pieces, put there by the moves followed, stay as they were)
+                const std::array<juraic::Cell, juraic::W> row14 = m.core.field.row14;
                 m.core.field = t.under;
+                m.core.field.row14 = row14;
                 m.known = true;
                 // (its chain has ended: what it sent is in the notice of the other side)
                 model[1 - s].budget = 0;
@@ -95,17 +100,27 @@ public:
     // points as the game reckons them.
     bool observe(int me, const juraic::Rules& real, juraic::ai::Observation& o) const {
         if (!observeSpawn(tracker, me, real, o)) return false;
-        for (int s = 0; s < 2; ++s) {
-            juraic::Player& p = o.player[s];
-            p.incoming = {};
-            (tracker.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = notice[s];
-            if (model[s].known) p.scoring = model[s].core.scoring;
-        }
+        complete(o);
         return true;
+    }
+    // ... and with the own side as the caller follows it at the frame `at` of the clock (observeWith).
+    void observeAt(int me, const juraic::Rules& real, const juraic::Player& own, int64_t at, juraic::ai::Observation& o) const {
+        observeWith(tracker, me, real, &own, at, o);
+        complete(o);
     }
 
 private:
     int round = 0;
+
+    void complete(juraic::ai::Observation& o) const {
+        for (int s = 0; s < 2; ++s) {
+            juraic::Player& p = o.player[s];
+            p.field.row14 = model[s].core.field.row14; // (the 14th row as the moves followed put it)
+            p.incoming = {};
+            (tracker.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = notice[s];
+            if (model[s].known) p.scoring = model[s].core.scoring;
+        }
+    }
 
     static int count(const juraic::GameField& g) { return g.f.count(); }
     // `read` is `game` with garbage above it, or nothing more.
@@ -134,11 +149,14 @@ private:
     }
 
     // The pieces of side s since its pair appeared: the pair lying where it would be locked (which of the placements of
-    // the game makes them), or locked.
+    // the game makes them: the field it appeared over and two pieces more, or one when the other is in the 14th row),
+    // or locked.
     void find(int s, int64_t at) {
         const SideTrack& t = tracker.side[s];
         SideModel& m = model[s];
-        if (count(t.resting) == count(t.under) + 2 && contains(t.resting, t.under)) {
+        // (one piece more when the other went into the 14th row, which the screen does not show)
+        const int more = count(t.resting) - count(t.under);
+        if ((more == 2 || more == 1) && contains(t.resting, t.under)) {
             if (m.lying && m.index == t.pairs - 1 && t.resting == m.with) return;
             const unsigned legal = juraic::legalPlacements(t.under);
             for (juraic::Cell child = 0; child <= juraic::MAX_COLORS; ++child) {
@@ -151,6 +169,7 @@ private:
                     juraic::place(g, juraic::placement(id), colors);
                     if (!(g.f == t.resting.f)) continue;
                     m.lying = true, m.index = t.pairs - 1, m.at = juraic::placement(id), m.colors = colors, m.base = t.under, m.with = t.resting;
+                    m.base.row14 = m.core.field.row14; // (the 14th row, which the screen does not show)
                     juraic::PlayerCore core = m.core;
                     juraic::Incoming other{0, notice[1 - s]};
                     core.incoming = {0, notice[s]};

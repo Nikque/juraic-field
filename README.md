@@ -390,11 +390,11 @@ python tests/verify_output.py generator.log --allow-extra
 | `app/` | CLIの入口とコンソール出力 |
 | `gui/` | 盤面ジェネレーターの Windows GUI、エディター、URL出力、結果ファイル |
 | `media/` | 同梱の絵と曲、その作り方の記録、Linux 版のフォント（`fonts/`） |
-| `third_party/` | Linux 版が使う 1 ファイルのライブラリー（stb・dr_libs）とそのライセンス |
+| `third_party/` | Linux 版が使う 1 ファイルのライブラリー（stb・dr_libs）、Windows 版が仮想のパッドに使う ViGEmClient と、そのライセンス |
 | `tests/` | テスト。`tests/reference/v030_engine.h` は照合用に残した v0.3.0 のエンジン |
 | `tools/` | AI どうしの対戦（`ai_match`）、1 人での探索の測定と調整（`ai_toko`・`ai_tune`）、ベンチマーク、到達規則の比較、配布物の作成 |
 | `examples/`・`benchmarks/` | 盤面ジェネレーターの例と、その速度の測定の記録 |
-| `licenses/` | Ama のライセンスと、AI のうち Ama に倣っている所の一覧。Linux 版に入るもの（SDL 3・stb・dr_libs・BIZ UDPゴシック。SDL 3 は Windows 版にも）のライセンス |
+| `licenses/` | Ama のライセンスと、AI のうち Ama に倣っている所の一覧。Linux 版に入るもの（SDL 3・stb・dr_libs・BIZ UDPゴシック。SDL 3 は Windows 版にも）と、Windows 版に入る ViGEmClient のライセンス |
 
 ## ライセンス
 
@@ -402,5 +402,5 @@ python tests/verify_output.py generator.log --allow-extra
 
 - 同梱の絵と曲（`media/`）も、同じ条件で使えます。作り方は [media/README.md](media/README.md) にあります。
 - 対戦 AI の一部は [Ama](https://github.com/citrus610/ama)（MIT License、Copyright (c) 2023 citrus610）に倣っています。どこが該当するかは [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt)、Ama のライセンスは [licenses/Ama-LICENSE.txt](licenses/Ama-LICENSE.txt) にあります。
-- Linux 版には、SDL 3（zlib License）、stb（MIT か public domain）、dr_libs（public domain か MIT-0）、BIZ UDPゴシック（SIL Open Font License 1.1）が入っています。それぞれのライセンスは `licenses/` にあります。Windows 版にも、コントローラーを読むために SDL 3 が入っています。
+- Linux 版には、SDL 3（zlib License）、stb（MIT か public domain）、dr_libs（public domain か MIT-0）、BIZ UDPゴシック（SIL Open Font License 1.1）が入っています。それぞれのライセンスは `licenses/` にあります。Windows 版にも、コントローラーを読むために SDL 3 が入っています。Windows 版には、実機の 2P を Juraic が操作するモードの仮想のパッドのために ViGEmClient（MIT License）が入っています（ドライバーの ViGEmBus（BSD-3-Clause）は入っていません。使う人が入れます）。
 - 無保証です。このソフトを使って起きたことについて、作者は責任を負いません。

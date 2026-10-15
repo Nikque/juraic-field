@@ -428,10 +428,10 @@ The game has self tests that need no window:
 | `play/` | the game itself: screen, sound, input, settings, replays, network; the parts of Windows (Direct2D, XAudio2, Media Foundation, Win32) and of Linux (SDL 3, a drawing engine of its own, `raster.h`) apart by `#ifdef` |
 | `generator/`, `app/`, `gui/` | the chain board generator: the search, the CLI, the Windows GUI and editor |
 | `media/` | the pictures and the music that come with the game, how they were made, and the font of the Linux version (`fonts/`) |
-| `third_party/` | the libraries of one file the Linux version uses (stb, dr_libs) and their licences |
+| `third_party/` | the libraries of one file the Linux version uses (stb, dr_libs), ViGEmClient the Windows version uses for its virtual pad, and their licences |
 | `tests/`, `tools/` | the tests; matches between AIs (`ai_match`), measuring and tuning tools, benchmarks |
 | `examples/`, `benchmarks/` | examples of the generator and the record of its speed measurements |
-| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic; SDL 3 also in the Windows version) |
+| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic; SDL 3 also in the Windows version) and of ViGEmClient in the Windows version |
 
 ## License
 
@@ -443,5 +443,6 @@ The game has self tests that need no window:
   [licenses/Ama-LICENSE.txt](licenses/Ama-LICENSE.txt).
 - The Linux version contains SDL 3 (zlib License), stb (MIT or public domain), dr_libs (public domain or MIT-0)
   and BIZ UDPGothic (SIL Open Font License 1.1); their licences are in `licenses/`. The Windows version contains
-  SDL 3 as well, for reading controllers.
+  SDL 3 as well, for reading controllers, and ViGEmClient (MIT License) for the virtual pad of the mode in which Juraic
+  plays 2P of the real game (the driver ViGEmBus, BSD-3-Clause, is not included: the user installs it).
 - No warranty.

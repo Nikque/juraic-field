@@ -6,17 +6,21 @@
 // changed here is not written back to the settings.
 // And the reading of the real game's screen: the pictures of the window the person chooses (play/realgame_capture_win.h)
 // read with the table (play/realgame_read.h) and followed frame after frame with the rules of the game
-// (play/realgame_follow.h). Nothing is pressed in the real game yet.
+// (play/realgame_follow.h). And the play: the AI plays 2P (play/realgame_drive.h) through a pad of the driver ViGEmBus
+// (play/realgame_pad_win.h), plugged in while it plays or while the person presses it by hand to pick it for 2P in the
+// real game's menus.
 #include "../ai/level.h"
 #include "realgame_capture_win.h"
+#include "realgame_drive.h"
 #include "realgame_follow.h"
+#include "realgame_pad_win.h"
 #include <deque>
 #include <mutex>
 
 namespace play {
 
 struct RealGameMode {
-    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_BACK, ROWS };
+    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_LAG, ROW_TURN, ROW_HAND, ROW_BACK, ROWS };
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
@@ -24,10 +28,11 @@ struct RealGameMode {
     RealGameMode() = default;
     RealGameMode(const RealGameMode&) = delete;
     RealGameMode& operator=(const RealGameMode&) = delete;
-    ~RealGameMode() { capture.stop(); } // (before the members the capture's thread hands its pictures to are gone)
+    ~RealGameMode() { capture.stop(), pad.stop(); } // (before the members the capture's thread hands its pictures to are gone)
 
     void open(int settingsStyle, int settingsLevel) {
         row = ROW_STYLE;
+        stopPlaying(), stopHand();
         style = settingsStyle ? 1 : 0;
         level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LEVELS ? juraic::ai::LEVELS : settingsLevel;
         stopReading();
@@ -37,8 +42,53 @@ struct RealGameMode {
     bool change(int by) {
         if (row == ROW_STYLE) style = ((style + by) % 2 + 2) % 2;
         else if (row == ROW_LEVEL) level = ((level - 1 + by) % juraic::ai::LEVELS + juraic::ai::LEVELS) % juraic::ai::LEVELS + 1;
+        else if (row == ROW_LAG) lag = ((lag + by) % (MAX_LAG + 1) + MAX_LAG + 1) % (MAX_LAG + 1), driver.lag = lag;
+        else if (row == ROW_TURN) pad.aTurnsRight = !pad.aTurnsRight;
         else return false;
         return true;
+    }
+
+    // ---- the play ----
+    // The frames from a button of the pad to the frame of the real game that takes it (Driver::lag), and which button
+    // turns which way: as the person sets them here (measured: the screen of the real game shows a key 2 to 4 frames
+    // after it is pressed; this is the part before the frame of the game).
+    static constexpr int MAX_LAG = 6;
+    int lag = 2;
+    VirtualPad pad;
+    realgame::Driver driver;
+    bool playing = false; // the AI plays 2P
+    bool byHand = false;  // the keys of this program press the pad (the real game's menus)
+
+    // The AI `agent` begins to play 2P. False, with the reason in `error`, when it cannot.
+    bool startPlaying(std::unique_ptr<juraic::ai::Agent> agent, std::wstring& error) {
+        if (reading != Reading::On) return error = L"先に「読み始める」で実機の窓を選んでください", false;
+        if (!pad.running() && !pad.start(error)) return false;
+        driver = realgame::Driver{};
+        driver.lag = lag, driver.agent = std::move(agent);
+        playing = true;
+        return true;
+    }
+    void stopPlaying() {
+        playing = false;
+        driver.stop();
+        driver.agent.reset();
+        pad.press(0);
+        if (!byHand) pad.stop();
+    }
+    bool startHand(std::wstring& error) {
+        if (!pad.running() && !pad.start(error)) return false;
+        byHand = true;
+        return true;
+    }
+    void stopHand() {
+        byHand = false;
+        pad.hold(0);
+        if (!playing) pad.stop();
+    }
+    // Every frame of the game while the AI plays: the buttons for the frame `now` of the clock (frames of 1/60 s of
+    // QueryPerformanceCounter, as the times of the pictures).
+    void drive(int64_t now) {
+        if (playing && !byHand) pad.press(driver.tick(follow, now));
     }
 
     // ---- the reading of the real game's screen ----
@@ -82,6 +132,7 @@ struct RealGameMode {
         return started;
     }
     void stopReading() {
+        if (playing) stopPlaying();
         capture.stop();
         reading = Reading::Off;
         std::lock_guard<std::mutex> hold(lock);

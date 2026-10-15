@@ -9,6 +9,9 @@
 //     it can be moved, of each side and of no other frame; what the AI is then shown (observeSpawn) is what the round
 //     shows it (ai/observe.h) - the own field and phase, the frame, the pairs, the other side as far as one picture
 //     tells. Pieces of a chain that move keep a field from standing still.
+//  5. The AI plays 2P of rounds of this program through their screen and a pad (Driver), its buttons reaching the round
+//     `lag` frames after they are sent: every pair goes where the AI chose; with a pad that is now and then a frame
+//     early or late, the pair is found elsewhere at times, put right and still brought where the AI chose.
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
 //     Followed with the rules of the game (Follower): where each pair came to rest is found, the pieces reckoned are
 //     those read as the next pair appears, and a notice of more than the chains can have sent is held back.
@@ -17,7 +20,7 @@
 //     (red with its shine, green without), pale grey (bright or dim) is garbage, a bright light of the screen of no
 //     colour of a piece is UNSURE. A reading with such a point takes nothing of that side's field.
 #include "../ai/agents.h"
-#include "../play/realgame_follow.h"
+#include "../play/realgame_drive.h"
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -507,6 +510,73 @@ static void testNoticeCeiling() {
     std::cout << "the notice: more than the chains followed can have sent is held back until it stays\n";
 }
 
+struct DriveCounts {
+    long frames = 0, locks = 0, hits = 0, corrected = 0, played = 0;
+};
+
+static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n) {
+    const Layout l = sampleLayout();
+    const Rules rules;
+    Round r;
+    r.start(rules, seed);
+    Canvas canvas(1280, 720, l);
+    Rng noise(seed, 7), shake(seed, 9);
+    ai::Params small;
+    small.beamWidth = 30, small.beamDepth = 8, small.beamQueues = 3;
+    const std::unique_ptr<ai::Agent> other = ai::makeAgent("x3", small);
+    other->startRound(0, seed);
+    Follower follow;
+    Driver d;
+    d.lag = lag, d.rules = rules, d.agent = ai::makeAgent("x3", small);
+    int64_t clock = 1000;
+    for (int f = 0; f < 45; ++f, ++clock) {
+        draw(canvas, l, r, true, noise);
+        follow.step(read(canvas.picture(), l), clock);
+        check(d.tick(follow, clock) == 0, "buttons before the round");
+    }
+    std::vector<uint8_t> sent(size_t(frames) + 100, 0); // by the frame of the clock they were sent in
+    const int64_t first = clock;
+    ai::Observation o;
+    int target = -1, played = 0; // (the engine of the Driver plays `lag` frames ahead of the round: the target of the pair it played last)
+    for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
+        draw(canvas, l, r, false, noise);
+        follow.step(read(canvas.picture(), l), clock);
+        sent[size_t(clock - first)] = d.tick(follow, clock);
+        if (d.played != played) played = d.played, target = -1;
+        if (d.target() >= 0) target = d.target();
+        // The next frame of the round takes what was sent `lag` frames before it (a shaky pad: now and then a frame
+        // sooner or later).
+        int64_t from = clock + 1 - lag;
+        if (shaky && shake.below(8) == 0) from += shake.below(2) ? 1 : -1;
+        from = std::min(from, clock);
+        uint8_t buttons[2];
+        ai::observe(r, 0, o);
+        buttons[0] = other->frame(o);
+        buttons[1] = from >= first ? sent[size_t(from - first)] : 0;
+        PlayerEvents e[2];
+        r.step(buttons, e);
+        // (a pair the AI found no placement for - the field full - is not counted)
+        if (e[1].locked && target >= 0) n.locks += 1, n.hits += placementId(r.player[1].pair.placement()) == target;
+        ++n.frames;
+    }
+    n.corrected += d.corrected, n.played += d.played;
+}
+
+static void testDriver() {
+    DriveCounts exact, shaky;
+    for (int lag = 1; lag <= 3; ++lag) driveRound(60 + uint64_t(lag), lag, false, 2500, exact);
+    check(exact.locks >= 60 && exact.hits == exact.locks && exact.corrected == 0,
+          "through a pad that is late as said, a pair is not brought where the AI chose (" + std::to_string(exact.hits) + " of " + std::to_string(exact.locks) +
+              ") or found elsewhere than the engine had it (" + std::to_string(exact.corrected) + ")");
+    for (int k = 0; k < 3; ++k) driveRound(70 + uint64_t(k), 2, true, 2500, shaky);
+    check(shaky.locks >= 60 && shaky.corrected > 0 && shaky.hits * 10 >= shaky.locks * 9,
+          "through a shaky pad, pairs are not put right: " + std::to_string(shaky.hits) + " of " + std::to_string(shaky.locks) + " where the AI chose, " +
+              std::to_string(shaky.corrected) + " found elsewhere");
+    std::cout << "the AI playing 2P through the screen and a pad: late as said, " << exact.hits << " pairs of " << exact.locks
+              << " where it chose and none found elsewhere; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
+              << shaky.locks << " went where it chose\n";
+}
+
 static void testPicture(const std::string& folder) {
     const Layout l = sampleLayout();
     Canvas c(301, 173, l); // (rows of an odd length)
@@ -529,6 +599,7 @@ int main(int argc, char** argv) {
         testPointRules();
         testUnclearFrames();
         testNoticeCeiling();
+        testDriver();
         testPicture(argc > 1 ? argv[1] : ".");
         testRounds();
     } catch (const std::exception& e) {

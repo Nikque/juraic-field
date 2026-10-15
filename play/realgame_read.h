@@ -621,6 +621,7 @@ struct SideTrack {
     PairSeen lastSeen;         // as seen last
     int pairs = 0;             // pairs this side has been given since the round began
     int64_t spawnedAt = -1;    // the frame in which the last of them was seen first
+    bool late = false;         // ... seen late (Tracker::late)
     bool clear = true;         // the last reading of this side had no UNSURE point (otherwise nothing of its field was taken)
     int64_t unclearAt = -1;    // the frame of the last reading that was not clear
     int notice = 0;            // the garbage notice, as it has read the same for Tracker::noticeFrames frames
@@ -714,7 +715,7 @@ public:
                 const bool hidden = !there && !t.inHand && t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && fresh.seen && !fresh.childHidden &&
                                     knows(t.pairs) && same(fresh.colors, pairs[size_t(t.pairs)]) && fresh.at.y >= juraic::SPAWN_Y - 3 &&
                                     !pairLying(fresh, resting);
-                if (settled && (there || hidden)) newPair(s, fresh, resting, read, at), late[s] = hidden;
+                if (settled && (there || hidden)) newPair(s, fresh, resting, read, at), late[s] = t.late = hidden;
             }
             t.loose = looseOf(read, t);
             empty = empty && resting.f.empty() && t.loose == 0 && !t.inHand;
@@ -761,6 +762,7 @@ private:
         SideTrack& t = side[s];
         const int index = t.pairs++;
         t.spawnedAt = at;
+        t.late = false;
         t.inHand = true;
         t.under = resting;
         t.pair = t.lastSeen = fresh;
@@ -790,15 +792,17 @@ private:
 // pair (Next); pieces that move are a chain that runs (Land, one frame, over every piece the picture shows let fall).
 // The garbage above a field waits for a chain when the other side moves, and falls after the next move when it stands
 // still.
-inline bool observeSpawn(const Tracker& t, int me, const juraic::Rules& rules, juraic::ai::Observation& o) {
+//
+// observeWith: the same with the own side as the caller follows it (`own`, the engine's player) at the frame `at` of
+// the clock; null: as observeSpawn shows it.
+inline void observeWith(const Tracker& t, int me, const juraic::Rules& rules, const juraic::Player* own, int64_t at, juraic::ai::Observation& o) {
     using namespace juraic;
-    if (me < 0 || me > 1 || !t.spawned[me]) return false;
     o = ai::Observation{};
     o.rules = rules;
     o.timing = t.timing;
     o.players = 2;
     o.me = me;
-    o.frame = t.roundStart >= 0 && t.frame >= t.roundStart ? t.frame - t.roundStart : 0;
+    o.frame = t.roundStart >= 0 && at >= t.roundStart ? at - t.roundStart : 0;
     o.state = RoundState::Playing;
     // The colours in play.
     bool seen[8]{};
@@ -817,7 +821,11 @@ inline bool observeSpawn(const Tracker& t, int me, const juraic::Rules& rules, j
         Player& p = o.player[s];
         (t.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = side.notice;
         p.nextPair = p.moves = side.pairs;
-        if (s == me && t.late[me]) {
+        if (s == me && own) {
+            const Incoming in = p.incoming;
+            p = *own;
+            p.incoming = in;
+        } else if (s == me && t.late[me]) {
             // (seen late: in play already, where it was seen)
             p.field = side.under;
             p.phase = Phase::Control;
@@ -852,6 +860,11 @@ inline bool observeSpawn(const Tracker& t, int me, const juraic::Rules& rules, j
     o.tsumo.pairs.assign(count, Pair{o.rules.palette[0], o.rules.palette[0]});
     for (size_t i = 0; i < t.pairs.size(); ++i)
         if (t.known[i]) o.tsumo.pairs[i] = t.pairs[i];
+}
+
+inline bool observeSpawn(const Tracker& t, int me, const juraic::Rules& rules, juraic::ai::Observation& o) {
+    if (me < 0 || me > 1 || !t.spawned[me]) return false;
+    observeWith(t, me, rules, nullptr, t.frame, o);
     return true;
 }
 
