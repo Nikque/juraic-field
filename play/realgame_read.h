@@ -134,9 +134,10 @@ inline Layout sampleLayout() {
     return l;
 }
 
-// The table of the real game, measured on five pictures of its offline versus (taken by its store's own key for
-// pictures, 2000 x 1125, of a window whose inside is 2240 x 1260; here in the pixels of the latter, 1.12 times those
-// of the pictures):
+// The table of the real game, measured on seven pictures of its offline versus taken by its store's own key for
+// pictures (saved at 2272 x 1278, measured at 2000 x 1125; the inside of the window was 2240 x 1260, the same shape:
+// the pictures are taken as the window shows them, scaled). Here in the pixels of a picture of 2240 x 1260, 1.12 times
+// those of the pictures measured:
 //  - the fields: the dark inside 412 x 749 pixels of the pictures; the pieces stand in columns 67 apart (the first
 //    5 pixels from its left edge) and rows 62.5 apart from its lower edge, twelve rows; the 13th row is behind the
 //    frame above it;
