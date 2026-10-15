@@ -44,7 +44,7 @@ endif()
 
 if(MSVC)
     # The playable game (Direct2D, XAudio2). One self-contained executable.
-    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_capture_win.h game/link.h)
+    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_capture_win.h game/link.h)
     set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
     target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32 d3d11 dxgi dwmapi)
     # The pads of Sony and Nintendo are read through SDL 3 (play/pad.h), built as a static library and found by
@@ -152,8 +152,8 @@ if(BUILD_TESTING)
     add_executable(ai_tests tests/ai_tests.cpp ai/observe.h ai/duel.h ai/input.h ai/detect.h ai/params.h ai/build.h ai/gaze.h ai/value.h ai/exchange.h ai/pace.h ai/tactics.h ai/level.h)
 target_link_libraries(ai_tests PRIVATE Threads::Threads)
     add_test(NAME ai COMMAND ai_tests)
-    # The reading of the real game's screen (play/realgame_read.h), with pictures drawn from rounds of this program.
-    add_executable(realgame_tests tests/realgame_tests.cpp play/realgame_read.h ai/observe.h ai/agents.h)
+    # The reading of the real game's screen (play/realgame_read.h, realgame_follow.h), with pictures drawn from rounds of this program.
+    add_executable(realgame_tests tests/realgame_tests.cpp play/realgame_read.h play/realgame_follow.h ai/observe.h ai/agents.h)
     target_link_libraries(realgame_tests PRIVATE Threads::Threads)
     add_test(NAME realgame_screen_read COMMAND realgame_tests "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME ai_match_same_result COMMAND ai_match --self-test)

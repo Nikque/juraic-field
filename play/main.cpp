@@ -1390,8 +1390,10 @@ struct App {
             lines.push_back(m.layoutOwn ? L"表: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"表: 組み込みの値（実機の画像 5 枚から測ったもの。おじゃまの予告はまだ読めません）");
             if (!m.layoutError.empty()) lines.push_back(std::wstring(RealGameMode::LAYOUT_FILE) + L" を読めませんでした: " + m.layoutError);
             lines.push_back(L"前と合わない読み: " + std::to_wstring(m.tracker.doubts) + L" 回" + (m.tracker.fromStart ? L"" : L"（対戦の初めから読んでいません）"));
+            lines.push_back(L"置いた所が分かった組: " + std::to_wstring(m.follow.placements) + L"　止めた予告: " + std::to_wstring(m.follow.held) + L" 回");
+            lines.push_back(L"計算した盤面と画面の照らし合わせ: " + std::to_wstring(m.follow.checks) + L" 回中 " + std::to_wstring(m.follow.misses) + L" 回合わない");
         }
-        for (size_t i = 0; i < lines.size(); ++i) gfx.text(lines[i], 44, 330 + float(i) * 28, 620, 26, 0, rgb(200, 206, 226));
+        for (size_t i = 0; i < lines.size(); ++i) gfx.text(lines[i], 44, 316 + float(i) * 26, 620, 26, 0, rgb(200, 206, 226));
         // The two sides as they are read: the pieces at rest, the pair in play, the window of the next pairs, the notice.
         const float cell = 22;
         for (int s = 0; s < 2; ++s) {
@@ -1418,7 +1420,7 @@ struct App {
                     gfx.piece(t.next[n].child, nx, ny, 1, 1, cell * 0.9f);
                     gfx.piece(t.next[n].axis, nx, ny + cell * 0.9f, 1, 1, cell * 0.9f);
                 }
-            gfx.text(L"おじゃま " + std::to_wstring(t.notice), x0, bottom + 8, W * cell + 50, 24, 0, rgb(220, 226, 240), -1);
+            gfx.text(L"おじゃま " + std::to_wstring(m.follow.notice[s]), x0, bottom + 8, W * cell + 50, 24, 0, rgb(220, 226, 240), -1);
             gfx.text(!t.clear ? L"光などで読めない" : m.tracker.still(s) ? L"止まっている" : L"動いている", x0, bottom + 34, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
             gfx.text(L"組 " + std::to_wstring(t.pairs), x0, bottom + 60, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
         }

@@ -5,9 +5,11 @@
 // mode is opened both start from the AI of the 2P side in the settings (Settings::aiStyle, aiLevel); what is
 // changed here is not written back to the settings.
 // And the reading of the real game's screen: the pictures of the window the person chooses (play/realgame_capture_win.h)
-// read with the table (play/realgame_read.h) and followed frame after frame. Nothing is pressed in the real game yet.
+// read with the table (play/realgame_read.h) and followed frame after frame with the rules of the game
+// (play/realgame_follow.h). Nothing is pressed in the real game yet.
 #include "../ai/level.h"
 #include "realgame_capture_win.h"
+#include "realgame_follow.h"
 #include <deque>
 #include <mutex>
 
@@ -52,7 +54,8 @@ struct RealGameMode {
     realgame::Layout layout = realgame::measuredLayout();
     bool layoutOwn = false;
     std::wstring layoutError; // (the file is there and a line of it is not understood: the table built in is used)
-    realgame::Tracker tracker;
+    realgame::Follower follow;
+    const realgame::Tracker& tracker = follow.tracker;
     WindowCapture capture;
     int width = 0, height = 0;  // of the last picture
     int64_t pictures = 0;       // pictures read since reading began
@@ -71,8 +74,8 @@ struct RealGameMode {
             if (realgame::loadLayout(file, own, &why)) layout = own, layoutOwn = true;
             else layoutError = std::wstring(why.begin(), why.end());
         }
-        tracker.reset();
-        tracker.stillFrames = layout.stillFrames;
+        follow.reset();
+        follow.tracker.stillFrames = layout.stillFrames;
         const realgame::Layout table = layout; // (the capture's own copy: it reads on its thread)
         const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table); }, error);
         reading = started ? Reading::On : Reading::Off;
@@ -97,7 +100,7 @@ struct RealGameMode {
         framesWithout = now.empty() ? framesWithout + 1 : 0;
         for (const Taken& t : now) {
             if (firstFrame < 0) firstFrame = t.frame;
-            tracker.step(t.reading, t.frame);
+            follow.step(t.reading, t.frame);
             width = t.width, height = t.height;
             ++pictures;
         }

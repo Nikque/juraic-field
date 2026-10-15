@@ -598,6 +598,16 @@ inline bool pairLying(const PairSeen& p, const juraic::GameField& under) {
 
 // ---- frame after frame ------------------------------------------------------------------------------------------
 
+// Every piece of `part` is in `whole` (the pieces of a pair lying on it, or garbage, may be above them).
+inline bool contains(const juraic::GameField& whole, const juraic::GameField& part) {
+    int h[juraic::W];
+    part.heights(h);
+    for (int x = 0; x < juraic::W; ++x)
+        for (int y = 0; y < h[x]; ++y)
+            if (whole.f.get(x, y) != part.f.get(x, y)) return false;
+    return true;
+}
+
 struct SideTrack {
     juraic::GameField resting; // the pieces at rest as last read
     int64_t changedAt = 0;     // the frame in which they were last read other than before
@@ -612,6 +622,7 @@ struct SideTrack {
     int pairs = 0;             // pairs this side has been given since the round began
     int64_t spawnedAt = -1;    // the frame in which the last of them was seen first
     bool clear = true;         // the last reading of this side had no UNSURE point (otherwise nothing of its field was taken)
+    int64_t unclearAt = -1;    // the frame of the last reading that was not clear
     int notice = 0;            // the garbage notice, as it has read the same for Tracker::noticeFrames frames
     int noticeRead = 0;        // ... as last read, and since which frame
     int64_t noticeSince = 0;
@@ -627,6 +638,9 @@ public:
     int roundGap = 30;
     // The notice is taken when it has read the same for this many frames (a light of the screen over it changes it).
     int noticeFrames = 3;
+    // A new pair hidden by a light as it appeared: taken when it is seen within this many frames after the light, in
+    // the air, of the colours of the pair that comes next (Tracker::late).
+    int lateFrames = 20;
     SideTrack side[2];
     // The pairs the screen has shown, numbered as the players draw them (both draw from one tsumo).
     std::vector<juraic::Pair> pairs;
@@ -636,13 +650,15 @@ public:
     int64_t roundStart = -1;  // the frame that is frame 0 of the round (-1: not known yet)
     bool fromStart = false;   // the round has been followed from its beginning (both fields seen empty before it)
     bool spawned[2] = {};     // in the last reading a new pair was seen on that side
+    bool late[2] = {};        // ... seen late: it was hidden as it appeared, and may have been moved already
     int doubts = 0;           // readings that did not fit what had been read before
+    int rounds = 0;           // rounds seen begin (both fields empty for roundGap frames)
 
     void reset() {
         const juraic::Timing t = timing;
-        const int still = stillFrames, gap = roundGap, notice = noticeFrames;
+        const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames;
         *this = Tracker{};
-        timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice;
+        timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness;
     }
 
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
@@ -654,7 +670,7 @@ public:
     void step(const Reading& r, int64_t at) {
         last = r;
         frame = at;
-        spawned[0] = spawned[1] = false;
+        spawned[0] = spawned[1] = late[0] = late[1] = false;
         bool empty = true;
         for (int s = 0; s < 2; ++s) {
             const SideRead& read = r.side[s];
@@ -666,6 +682,7 @@ public:
             if (!t.clear) {
                 // (something the screen draws over the field: nothing of it is taken, the pair not seen in this frame)
                 t.pair = {};
+                t.unclearAt = at;
                 empty = false;
                 continue;
             }
@@ -691,7 +708,13 @@ public:
                 const PairSeen fresh = readPair(read, resting, coming);
                 const juraic::PairControl spawn = juraic::spawnPair(timing);
                 const bool there = fresh.seen && fresh.at.x == spawn.x && fresh.at.y == spawn.y && fresh.at.upper == spawn.upper && fresh.at.dir == spawn.dir;
-                if (there && at - t.changedAt >= stillFrames && t.loose == 0) newPair(s, fresh, resting, read, at);
+                const bool settled = at - t.changedAt >= stillFrames && t.loose == 0;
+                // (hidden by a light as it appeared: seen after it, in the air, both pieces, of the colours of the pair
+                //  that comes)
+                const bool hidden = !there && !t.inHand && t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && fresh.seen && !fresh.childHidden &&
+                                    knows(t.pairs) && same(fresh.colors, pairs[size_t(t.pairs)]) && fresh.at.y >= juraic::SPAWN_Y - 3 &&
+                                    !pairLying(fresh, resting);
+                if (settled && (there || hidden)) newPair(s, fresh, resting, read, at), late[s] = hidden;
             }
             t.loose = looseOf(read, t);
             empty = empty && resting.f.empty() && t.loose == 0 && !t.inHand;
@@ -710,15 +733,6 @@ private:
     int64_t emptySince = -1;
 
     static bool same(juraic::Pair a, juraic::Pair b) { return a.axis == b.axis && a.child == b.child; }
-    // Every piece of `part` is in `whole` (the pieces of a pair lying on it, or garbage, may be above them).
-    static bool contains(const juraic::GameField& whole, const juraic::GameField& part) {
-        int h[juraic::W];
-        part.heights(h);
-        for (int x = 0; x < juraic::W; ++x)
-            for (int y = 0; y < h[x]; ++y)
-                if (whole.f.get(x, y) != part.f.get(x, y)) return false;
-        return true;
-    }
     // Points that show a piece above the field the pair moves over (or above the pieces at rest), the pair's own left out.
     static int looseOf(const SideRead& read, const SideTrack& t) {
         int ax = -1, ah = -1, cx = -1, ch = -1;
@@ -737,6 +751,7 @@ private:
         pairs[size_t(index)] = p, known[size_t(index)] = 1;
     }
     void newRound() {
+        ++rounds;
         for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false;
         pairs.clear(), known.clear();
         roundStart = -1;
@@ -764,7 +779,7 @@ private:
 };
 
 // What the AI of seat `me` is shown in the frame in which its new pair was seen (Tracker::spawned[me]): the own side
-// as it is then in the game (phase Next, one frame left), the other side as far as the picture tells, and the pairs
+// as it is then in the game (phase Next, one frame left; a pair seen late, Tracker::late, in play where it is), the other side as far as the picture tells, and the pairs
 // the screen has shown. False when no pair of `me` was seen in the last reading. The colours in play are those seen
 // so far, then the others (Rules::palette); the frame is counted from the frame of the round in which the first pair
 // was seen (Tracker::roundStart).
@@ -802,7 +817,14 @@ inline bool observeSpawn(const Tracker& t, int me, const juraic::Rules& rules, j
         Player& p = o.player[s];
         (t.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = side.notice;
         p.nextPair = p.moves = side.pairs;
-        if (s == me) {
+        if (s == me && t.late[me]) {
+            // (seen late: in play already, where it was seen)
+            p.field = side.under;
+            p.phase = Phase::Control;
+            p.pair = side.lastSeen.at;
+            p.colors = side.colors;
+            p.moves = side.pairs - 1;
+        } else if (s == me) {
             p.field = side.under;
             p.phase = Phase::Next;
             p.wait = 1;

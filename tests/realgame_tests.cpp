@@ -10,12 +10,14 @@
 //     shows it (ai/observe.h) - the own field and phase, the frame, the pairs, the other side as far as one picture
 //     tells. Pieces of a chain that move keep a field from standing still.
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
+//     Followed with the rules of the game (Follower): where each pair came to rest is found, the pieces reckoned are
+//     those read as the next pair appears, and a notice of more than the chains can have sent is held back.
 //  5. A point of the table measured on the real game (measuredLayout): a piece with its face and shine is read, a
 //     small dot, the background and the mark where the pair appears (red or orange) are not, a piece over that mark is
 //     (red with its shine, green without), pale grey (bright or dim) is garbage, a bright light of the screen of no
 //     colour of a piece is UNSURE. A reading with such a point takes nothing of that side's field.
 #include "../ai/agents.h"
-#include "../play/realgame_read.h"
+#include "../play/realgame_follow.h"
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -192,7 +194,7 @@ static void testTableText() {
 // ---- 2. and 3. rounds drawn and read ------------------------------------------------------------------------------
 
 struct Counts {
-    long frames = 0, resting = 0, pairs = 0, nexts = 0, notices = 0, spawns = 0, observed = 0, otherInAir = 0, garbageShown = 0, movingFrames = 0, unclear = 0;
+    long frames = 0, resting = 0, pairs = 0, nexts = 0, notices = 0, spawns = 0, observed = 0, otherInAir = 0, garbageShown = 0, movingFrames = 0, unclear = 0, moves = 0, placed = 0, checks = 0, misses = 0, held = 0;
 };
 
 // One frame of the round, the buttons of the AIs (null: random buttons).
@@ -222,12 +224,13 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
     ai::Agent* agents[2] = {a, b};
     for (int s = 0; s < 2; ++s)
         if (agents[s]) agents[s]->startRound(s, seed + uint64_t(s));
-    Tracker tracker;
+    Follower follow;
+    const Tracker& tracker = follow.tracker;
     int64_t clock = 1000; // (the frames of the clock do not begin at 0)
     // The screen before the round: both fields empty, the windows standing.
     for (int f = 0; f < 45; ++f) {
         draw(canvas, l, r, true, noise);
-        tracker.step(read(canvas.picture(), l), clock++);
+        follow.step(read(canvas.picture(), l), clock++);
         check(!tracker.spawned[0] && !tracker.spawned[1], "a pair seen before the round");
     }
     check(tracker.fromStart && tracker.knows(0) && tracker.knows(1) && !tracker.knows(2), "the first two pairs are not learnt before the round");
@@ -246,7 +249,7 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
             if (r.player[s].incoming.total() != total[s]) total[s] = r.player[s].incoming.total(), totalSince[s] = clock;
         const Drawn shown = draw(canvas, l, r, false, noise);
         const Reading got = read(canvas.picture(), l);
-        tracker.step(got, clock);
+        follow.step(got, clock);
         ++n.frames;
         for (int s = 0; s < 2; ++s) {
             const Player& p = r.player[s];
@@ -307,7 +310,7 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
             if (!coming) continue;
             ++n.spawns;
             check(tracker.side[s].pairs == p.nextPair + 1, where + "the pairs given are not counted");
-            check(observeSpawn(tracker, s, rules, o), where + "nothing is observed");
+            check(follow.observe(s, rules, o), where + "nothing is observed");
             ai::observe(r, s, mine);
             const Player& me = o.self();
             check(o.me == s && o.frame == r.frame && me.phase == Phase::Next && me.wait == 1 && me.nextPair == p.nextPair, where + "the own phase or the frame is not observed");
@@ -333,6 +336,8 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
         }
         stepRound(r, agents, o, hands, held);
     }
+    n.moves += r.player[0].moves + r.player[1].moves, n.placed += follow.placements;
+    n.checks += follow.checks, n.misses += follow.misses, n.held += follow.held;
 }
 
 static void testRounds() {
@@ -349,11 +354,14 @@ static void testRounds() {
         playAndRead(l, sizes[k][0], sizes[k][1], 41 + uint64_t(k), nullptr, random.get(), 1500, n);
     }
     check(n.spawns > 300 && n.otherInAir > 50 && n.garbageShown > 50 && n.movingFrames > 1000 && n.unclear > 300, "the rounds read show too little");
+    check(n.placed * 10 >= n.moves * 9, "the placements of fewer than nine pairs in ten are found: " + std::to_string(n.placed) + " of " + std::to_string(n.moves));
+    check(n.checks > 200 && n.misses == 0, "the pieces reckoned are not those read as the next pair appears: " + std::to_string(n.misses) + " of " + std::to_string(n.checks));
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     std::cout << "rounds drawn at four sizes and read (" << n.frames << " frames, " << seconds << " s): the pieces at rest " << n.resting << " times, the pair in play " << n.pairs
               << ", the window " << n.nexts << ", the notice " << n.notices << " (" << n.garbageShown << " with garbage); " << n.spawns
               << " new pairs seen in the frame before they can be moved, and observed as the round shows them (the other side's pair in the air "
-              << n.otherInAir << " times); " << n.unclear << " readings of a side under a light, not taken\n";
+              << n.otherInAir << " times); " << n.unclear << " readings of a side under a light, not taken; the placements of " << n.placed << " pairs of "
+              << n.moves << " found, the pieces reckoned as read " << n.checks - n.misses << " times of " << n.checks << ", " << n.held << " notices held back\n";
 }
 
 // ---- 4. small things ---------------------------------------------------------------------------------------------
@@ -449,7 +457,54 @@ static void testUnclearFrames() {
     check(t.side[0].notice == 0, "a notice read for one frame is taken");
     for (int f = 0; f < t.noticeFrames; ++f) t.step(noted, at++);
     check(t.side[0].notice == 720, "a notice read for noticeFrames frames is not taken");
+    // A new pair hidden by a light as it appeared: taken when it is seen after it, moved already; not without the light.
+    Reading empty = clear;
+    for (auto& column : empty.side[1].point)
+        for (int k = 0; k < POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+    Reading moved = empty;
+    moved.side[1].point[3][21] = moved.side[1].point[3][22] = 2, moved.side[1].point[3][23] = 3; // (axis 2 half a cell up in the fourth column, child 3 above it)
+    Reading movedInFog = moved;
+    movedInFog.side[1].point[0][3] = UNSURE, movedInFog.side[1].unsure = 1;
+    for (int light = 0; light < 2; ++light) {
+        Tracker u;
+        for (int f = 0; f < u.roundGap + 5; ++f) u.step(empty, at++);
+        check(u.fromStart && u.knows(0) && u.pairs[0].axis == 2 && u.pairs[0].child == 3, "the first pairs are not learnt before the round");
+        if (light) u.step(movedInFog, at++);
+        u.step(moved, at++);
+        check(u.spawned[1] == (light == 1) && u.late[1] == (light == 1) && u.side[1].pairs == light, light ? "a pair hidden as it appeared is not taken when seen after the light"
+                                                                                                          : "a pair away from where pairs appear is taken for a new one without a light");
+    }
     std::cout << "a reading with a point not sure takes nothing of the field and does not stop what follows; the notice is taken when it has stayed\n";
+}
+
+// The notice against what the chains followed can have sent (Follower): with nothing sent, a notice of a few pieces is
+// taken at once, one of many (a light over it) only when it has read the same for noticeLong frames.
+static void testNoticeCeiling() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {2, 3}, side.next[1] = {4, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Reading coming = empty;
+    coming.side[0].point[SPAWN_X][23] = 2; // (the first pair of 1P where pairs appear)
+    Follower f;
+    int64_t at = 10;
+    for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+    f.step(coming, at++);
+    check(f.tracker.spawned[0] && f.ceiling(1) == f.slack, "the notice of 2P has no ceiling while 1P has sent nothing");
+    Reading lit = coming;
+    lit.side[1].notice = 720;
+    for (int k = 0; k < 10; ++k) f.step(lit, at++);
+    check(f.notice[1] == 0 && f.tracker.side[1].notice == 720, "a notice of more than can have been sent is taken at once");
+    for (int k = 0; k < f.noticeLong; ++k) f.step(lit, at++);
+    check(f.notice[1] == 720 && f.held == 1, "a notice of more than can have been sent is not taken when it stays");
+    Reading few = coming;
+    few.side[1].notice = 2;
+    for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(few, at++);
+    check(f.notice[1] == 2 && f.held == 1, "a notice of less is not taken at once");
+    std::cout << "the notice: more than the chains followed can have sent is held back until it stays\n";
 }
 
 static void testPicture(const std::string& folder) {
@@ -473,6 +528,7 @@ int main(int argc, char** argv) {
         testOneColour();
         testPointRules();
         testUnclearFrames();
+        testNoticeCeiling();
         testPicture(argc > 1 ? argv[1] : ".");
         testRounds();
     } catch (const std::exception& e) {
