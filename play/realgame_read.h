@@ -135,7 +135,7 @@ inline Layout sampleLayout() {
     return l;
 }
 
-// The table of the real game, measured on seven pictures of its offline versus taken by its store's own key for
+// The table of the real game, measured on eleven pictures of its offline versus taken by its store's own key for
 // pictures (saved at 2272 x 1278, measured at 2000 x 1125; the inside of the window was 2240 x 1260, the same shape:
 // the pictures are taken as the window shows them, scaled). Here in the pixels of a picture of 2240 x 1260, 1.12 times
 // those of the pictures measured:
@@ -144,10 +144,14 @@ inline Layout sampleLayout() {
 //    frame above it;
 //  - the colours: the mean of the pixels of strong colour of pieces at rest (red 158 23 24, green 54 185 37, blue 36
 //    122 216, yellow 233 143 21, purple 130 50 188; at the upper point, where the eyes are, darker: blue 22 57 182);
+//    on another stage yellow was lighter (242 194 34 to 246 216 51), a second colour of it;
 //  - at a point of a piece 12 to 97 in a hundred of the pixels had strong colour (fewest at the upper point, where
 //    the eyes are) and 51 or more strong colour or pale grey; at a point of the background none of either; at a point
 //    of the small dots that show where the pair would land (red) 17 to 28 strong colour and 35 at most of both; at a
-//    point of garbage none of strong colour and 37 to 75 pale grey (37 and 45 where it was dim);
+//    point of garbage none of strong colour and 37 to 93 pale grey (37 and 45 where it was dim), its mean grey (red
+//    and blue alike); the upper point of a yellow piece half a cell up, its white face, 2 strong colour and 76 pale,
+//    the pale warm (its red 14 above its blue): a point of few pixels of strong colour whose pale ones are warm is a
+//    piece of the colour of those few;
 //  - the mark of the third column of the twelfth row (where the pair appears) is red, its mean 162 45 45 to 227 64 64
 //    as it turns and the light changes, and once orange (194 152 63 and 204 139 68), without pale grey; the pair as it
 //    appears there shines (36 and 37 in a hundred pale grey), the lower edge of a piece of the pair half a cell up
@@ -157,9 +161,9 @@ inline Layout sampleLayout() {
 //    kinds were in the pictures, each told by the mean colour of small squares (3.5 pixels each way) at points around
 //    the middle of its place: a small ball (1 piece; white 8 pixels above the middle, where every other mark is
 //    darker), a large one (6; white 20 pixels above, a dark grey eye 16 to the right), a red one (30; red at the eye,
-//    pink 20 above) and a star (180; yellow 10 below, red at the eye). The two marks of more (360 and 720) were in
-//    none of the pictures and are not in the table: a notice with them reads less than it shows. (Under a light of
-//    the screen over the field the marks change their colours and are not read.)
+//    pink 20 above), a star (180; yellow 10 below, red at the eye), a moon (360; orange 10 below, pale orange and pink
+//    26 to the sides) and a crown (720; red at the eye, orange below and to the right). (Under a light of the screen
+//    over the field the marks change their colours and are not read.)
 inline Layout measuredLayout() {
     Layout l;
     l.patch = 15.7f, l.markPatch = 3.9f; // (14 and 3.5 pixels of the pictures)
@@ -172,10 +176,12 @@ inline Layout measuredLayout() {
     l.marks = {mark(1, {{0, -8, {249, 249, 249}}}),
                mark(6, {{0, -20, {253, 253, 253}}, {16, 0, {110, 110, 119}}}),
                mark(30, {{16, 0, {203, 15, 15}}, {0, -20, {246, 187, 175}}}),
-               mark(180, {{0, 10, {224, 153, 27}}, {16, 0, {168, 47, 29}}})};
+               mark(180, {{0, 10, {224, 153, 27}}, {16, 0, {168, 47, 29}}}),
+               mark(360, {{0, 10, {228, 136, 14}}, {26, -6, {224, 176, 141}}, {-26, -6, {214, 89, 92}}}),
+               mark(720, {{16, 0, {220, 34, 34}}, {0, 10, {212, 127, 53}}, {26, -6, {219, 125, 45}}})};
     l.colorDistance = 80;
     l.colored = 8, l.cover = 45, l.garbage = 30;
-    l.colors = {{1, {158, 23, 24}}, {2, {54, 185, 37}}, {3, {36, 122, 216}}, {4, {233, 143, 21}}, {5, {130, 50, 188}}};
+    l.colors = {{1, {158, 23, 24}}, {2, {54, 185, 37}}, {3, {36, 122, 216}}, {4, {233, 143, 21}}, {4, {245, 200, 40}}, {5, {130, 50, 188}}};
     const float left[2] = {324.2f, 1461.6f}, nextX[2][2] = {{875.8f, 927.4f}, {1361.9f, 1308.2f}};
     for (int s = 0; s < 2; ++s) {
         SideLayout& d = l.side[s];
@@ -361,7 +367,7 @@ inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, flo
     const float px = x * s.x, py = y * s.y, hx = l.patch * s.x, hy = l.patch * s.y;
     const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
     const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
-    long r = 0, g = 0, b = 0, strong = 0, light = 0, all = 0;
+    long r = 0, g = 0, b = 0, strong = 0, light = 0, all = 0, pr = 0, pb = 0;
     for (int j = y0; j <= y1; ++j) {
         const uint8_t* row = p.pixels + size_t(j) * size_t(p.stride);
         for (int i = x0; i <= x1; ++i) {
@@ -369,11 +375,13 @@ inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, flo
             const int high = std::max(cr, std::max(cg, cb)), low = std::min(cr, std::min(cg, cb));
             ++all;
             if (2 * (high - low) > high && 100 * high > 45 * 255) r += cr, g += cg, b += cb, ++strong;
-            else if (4 * (high - low) < high && 10 * high > 4 * 255) ++light;
+            else if (4 * (high - low) < high && 10 * high > 4 * 255) ++light, pr += cr, pb += cb;
         }
     }
     if (!all) return juraic::EMPTY;
-    if (100 * strong >= long(l.colored) * all) {
+    // (the white face of a piece is warm, garbage is grey)
+    const bool warm = light && (pr - pb) >= 8 * light && strong;
+    if (100 * strong >= long(l.colored) * all || (warm && 100 * (strong + light) >= long(l.cover) * all)) {
         if (100 * (strong + light) < long(l.cover) * all) return juraic::EMPTY;
         const Rgb mean{int(r / strong), int(g / strong), int(b / strong)};
         const juraic::Cell cell = classify(l, mean);
