@@ -79,6 +79,14 @@ int main(int argc, char** argv) {
         check(h(0) == 0 && h(juraic::BTN_CW) == juraic::BTN_CW, "let go and pressed again, the button counts");
         h.begin();
         check(h(0) == 0 && h(juraic::BTN_CCW) == juraic::BTN_CCW, "with nothing held as the game began, the first press counts");
+        // The countdown before a match, in which the game does not take the buttons: what is let go and pressed
+        // there counts as the play begins (pre-input); what is held all through it does not.
+        h.begin();
+        h.watch(juraic::BTN_CW), h.watch(0), h.watch(juraic::BTN_LEFT | juraic::BTN_CW);
+        check(h(juraic::BTN_LEFT | juraic::BTN_CW) == (juraic::BTN_LEFT | juraic::BTN_CW), "let go in the countdown and pressed again in it, the buttons count as the play begins");
+        h.begin();
+        h.watch(juraic::BTN_CW), h.watch(juraic::BTN_CW | juraic::BTN_LEFT);
+        check(h(juraic::BTN_CW | juraic::BTN_LEFT) == juraic::BTN_LEFT, "held from the menu all through the countdown, the button does not count; one pressed in it does");
     }
 
     std::printf(failures ? "%d FAILED\n" : "pad tests passed\n", failures);

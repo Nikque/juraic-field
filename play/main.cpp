@@ -204,10 +204,13 @@ struct App {
     // quickDrop: the setting of the game that is played - this machine's, or in a match over a network the
     // host's (play/netplay.h, travels), so that both have the button or neither.
     uint8_t personButtons(int seat, unsigned held, bool up, bool quickDrop) {
+        const uint8_t b = heldAtStart[seat](heldButtons(held, up, quickDrop));
+        return settings.diagonal ? b : lever[seat](b);
+    }
+    uint8_t heldButtons(unsigned held, bool up, bool quickDrop) const {
         uint8_t b = gameButtons(held);
         if (quickDrop && up) b |= BTN_DROP;
-        b = heldAtStart[seat](b);
-        return settings.diagonal ? b : lever[seat](b);
+        return b;
     }
     // A game begins (toko, a match, a match over a network): the buttons the people hold now count once let go.
     void beginGame() {
@@ -943,6 +946,9 @@ struct App {
             return;
         }
         if (v.state == Versus::Ready) {
+            // (the buttons of the people are not taken in the countdown, but one let go in it counts once pressed again)
+            for (int i = 0; i < 2; ++i)
+                if (!v.agent[i]) heldAtStart[i].watch(heldButtons(actionsOf(v.device[i], input, pads, focused), upHeld(v.device[i], pads, focused), settings.quickDrop != 0));
             if (--v.timer <= 0) v.state = Versus::Play;
             return;
         }
