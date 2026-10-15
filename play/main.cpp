@@ -730,6 +730,7 @@ struct App {
                 // (the AI as in a match against it: its search and its thinking as the settings say, ai/level.h)
                 Versus made;
                 made.seat(1, aiOfLevel(m.level, m.style), settings);
+                if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(made.agent[1].get())) x3->noting = false; // (no replay keeps its notes)
                 std::wstring error;
                 if (!m.startPlaying(std::move(made.agent[1]), error)) say(error);
             }
