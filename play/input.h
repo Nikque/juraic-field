@@ -139,6 +139,9 @@ struct HeldAtStart {
         waiting &= buttons;
         return uint8_t(buttons & ~waiting);
     }
+    // A frame before the game takes the buttons (the countdown before a match): a button let go in it counts once it
+    // is pressed again, there or later.
+    void watch(uint8_t buttons) { waiting &= buttons; }
 };
 
 // Devices for the two players when none was chosen: controllers first.
