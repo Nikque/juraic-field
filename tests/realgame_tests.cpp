@@ -11,7 +11,8 @@
 //     tells. Pieces of a chain that move keep a field from standing still.
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
 //  5. A point of the table measured on the real game (measuredLayout): a piece with its face and shine is read, a
-//     small dot, the background and the red mark where the pair appears are not, pale grey (bright or dim) is garbage.
+//     small dot, the background and the mark where the pair appears (red or orange) are not, a piece over that mark is
+//     (red with its shine, green without), pale grey (bright or dim) is garbage.
 #include "../ai/agents.h"
 #include "../play/realgame_read.h"
 #include <chrono>
@@ -173,8 +174,8 @@ static void testTableText() {
     }
     check(parseLayout("# remark only\n\n  base 1920 1080  # and a remark\n", back, &error) && back.baseWidth == 1920 && back.colors.empty(), "a short table is not read");
     for (const char* bad : {"base 0 100", "color 9 1 2 3", "color 1 1 2", "color 1 1 2 300", "mark 6", "mark 6 1 2 3 4", "field 3 1 2 3 4 5",
-                            "next 1 3 1 2 3 4", "notice 1 5", "pieces 4", "still 0", "base 10 10 10", "share 8 45", "share 8 45 101", "marked 1 7 1 5",
-                            "marked 1 1 14 5", "marked 3 1 1 5"}) {
+                            "next 1 3 1 2 3 4", "notice 1 5", "pieces 4", "still 0", "base 10 10 10", "share 8 45", "share 8 45 101", "marked 1 7 1 5 1 2 3",
+                            "marked 1 1 14 5 1 2 3", "marked 3 1 1 5 1 2 3", "marked 1 1 1 5", "marked 1 1 1 5 1 2"}) {
         check(!parseLayout(std::string("still 2\n") + bad + "\n", back, &error), std::string("a wrong line is read: ") + bad);
         check(error.rfind("line 2:", 0) == 0, std::string("a wrong line is not named: ") + bad + " -> " + error);
     }
@@ -385,7 +386,9 @@ static void testPointRules() {
     check(at(1, 2, green, 15, white, 50) == 2, "the upper part of a piece (its eyes) is not read");
     check(at(0, 0, red, 25, white, 5) == EMPTY, "a small dot of colour is read as a piece");
     check(at(0, 0, Rgb{38, 46, 72}, 100, white, 0) == EMPTY, "the background is read as a piece");
-    check(at(DEATH_X, DEATH_Y, mark, 85, white, 0) == EMPTY && at(DEATH_X, DEATH_Y, red, 60, white, 20) == 1, "the mark where the pair appears is not told from a red piece");
+    check(at(DEATH_X, DEATH_Y, mark, 85, white, 0) == EMPTY && at(DEATH_X, DEATH_Y, Rgb{200, 145, 66}, 85, white, 0) == EMPTY,
+          "the mark where the pair appears is read as a piece");
+    check(at(DEATH_X, DEATH_Y, red, 60, white, 20) == 1 && at(DEATH_X, DEATH_Y, green, 60, white, 0) == 2, "a piece where the mark is is not read");
     check(at(2, 4, red, 70, white, 0) == 1, "two red pieces joined (no white between them) are not read away from the mark");
     check(at(3, 1, white, 60, white, 0) == GARBAGE && at(3, 1, dim, 40, dim, 0) == GARBAGE, "garbage is not read");
     std::cout << "the measured table: pieces, small dots, the background, the mark where the pair appears and garbage read as they should\n";
