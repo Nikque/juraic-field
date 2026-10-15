@@ -10,6 +10,8 @@
 //     shows it (ai/observe.h) - the own field and phase, the frame, the pairs, the other side as far as one picture
 //     tells. Pieces of a chain that move keep a field from standing still.
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
+//  5. A point of the table measured on the real game (measuredLayout): a piece with its face and shine is read, a
+//     small dot, the background and the red mark where the pair appears are not, pale grey (bright or dim) is garbage.
 #include "../ai/agents.h"
 #include "../play/realgame_read.h"
 #include <chrono>
@@ -158,19 +160,25 @@ static bool lyingOn(const PairControl& at, const GameField& g) {
 // ---- 1. the table as text ----------------------------------------------------------------------------------------
 
 static void testTableText() {
-    const Layout l = sampleLayout();
-    const std::string text = formatLayout(l);
     Layout back;
     std::string error;
-    check(parseLayout(text, back, &error), "the table written as text is not read again: " + error);
-    check(back == l && formatLayout(back) == text, "the table read again from its text is another one");
+    for (const Layout& l : {sampleLayout(), measuredLayout()}) {
+        const std::string text = formatLayout(l);
+        check(parseLayout(text, back, &error), "the table written as text is not read again: " + error);
+        check(formatLayout(back) == text, "the table read again from its text is another one");
+    }
+    {
+        const Layout l = sampleLayout();
+        check(parseLayout(formatLayout(l), back) && back == l, "the plain table read again from its text is another one");
+    }
     check(parseLayout("# remark only\n\n  base 1920 1080  # and a remark\n", back, &error) && back.baseWidth == 1920 && back.colors.empty(), "a short table is not read");
     for (const char* bad : {"base 0 100", "color 9 1 2 3", "color 1 1 2", "color 1 1 2 300", "mark 6", "mark 6 1 2 3 4", "field 3 1 2 3 4 5",
-                            "next 1 3 1 2 3 4", "notice 1 5", "pieces 4", "still 0", "base 10 10 10"}) {
+                            "next 1 3 1 2 3 4", "notice 1 5", "pieces 4", "still 0", "base 10 10 10", "share 8 45", "share 8 45 101", "marked 1 7 1 5",
+                            "marked 1 1 14 5", "marked 3 1 1 5"}) {
         check(!parseLayout(std::string("still 2\n") + bad + "\n", back, &error), std::string("a wrong line is read: ") + bad);
         check(error.rfind("line 2:", 0) == 0, std::string("a wrong line is not named: ") + bad + " -> " + error);
     }
-    std::cout << "the table as text: written and read again the same; " << 12 << " wrong lines named\n";
+    std::cout << "the table as text: written and read again the same (the plain one and the measured one); wrong lines named\n";
 }
 
 // ---- 2. and 3. rounds drawn and read ------------------------------------------------------------------------------
@@ -358,6 +366,31 @@ static void testOneColour() {
     std::cout << "a pair of one colour is read the way it was turned; other pieces are not read as the pair\n";
 }
 
+static void testPointRules() {
+    const Layout l = measuredLayout();
+    const SideLayout& d = l.side[1];
+    // A square of the size of the picture the table was measured on, around the lower point of a cell: `colour` over
+    // the given share of it (from its left), `white` over the next share, the rest the background of the field.
+    const auto at = [&](int x, int y, Rgb colour, int share, Rgb white, int whiteShare) {
+        Canvas c(2000, 1125, l);
+        const Spot p = pointSpot(d, x, 2 * y);
+        const float half = l.patch, from = p.x - half, width = 2 * half + 1;
+        c.fill(p.x - 3 * half, p.y - 3 * half, p.x + 3 * half, p.y + 3 * half, Rgb{38, 46, 72});
+        c.fill(from, p.y - half, from + width * float(share) / 100, p.y + half + 1, colour);
+        c.fill(from + width * float(share) / 100, p.y - half, from + width * float(share + whiteShare) / 100, p.y + half + 1, white);
+        return read(c.picture(), l).side[1].point[x][2 * y];
+    };
+    const Rgb red{158, 23, 24}, green{54, 185, 37}, white{240, 240, 245}, dim{140, 140, 150}, mark{200, 56, 54};
+    check(at(0, 0, red, 50, white, 20) == 1 && at(4, 3, green, 60, white, 0) == 2, "a piece with its face and shine is not read");
+    check(at(1, 2, green, 15, white, 50) == 2, "the upper part of a piece (its eyes) is not read");
+    check(at(0, 0, red, 25, white, 5) == EMPTY, "a small dot of colour is read as a piece");
+    check(at(0, 0, Rgb{38, 46, 72}, 100, white, 0) == EMPTY, "the background is read as a piece");
+    check(at(DEATH_X, DEATH_Y, mark, 85, white, 0) == EMPTY && at(DEATH_X, DEATH_Y, red, 60, white, 20) == 1, "the mark where the pair appears is not told from a red piece");
+    check(at(2, 4, red, 70, white, 0) == 1, "two red pieces joined (no white between them) are not read away from the mark");
+    check(at(3, 1, white, 60, white, 0) == GARBAGE && at(3, 1, dim, 40, dim, 0) == GARBAGE, "garbage is not read");
+    std::cout << "the measured table: pieces, small dots, the background, the mark where the pair appears and garbage read as they should\n";
+}
+
 static void testPicture(const std::string& folder) {
     const Layout l = sampleLayout();
     Canvas c(301, 173, l); // (rows of an odd length)
@@ -377,6 +410,7 @@ int main(int argc, char** argv) {
     try {
         testTableText();
         testOneColour();
+        testPointRules();
         testPicture(argc > 1 ? argv[1] : ".");
         testRounds();
     } catch (const std::exception& e) {

@@ -47,9 +47,9 @@ struct RealGameMode {
     static constexpr int CHOOSE_FRAMES = 10 * 60;
     int chooseLeft = 0;
     // The table: the file LAYOUT_FILE in the folder of one's own files when there is one (read when reading begins),
-    // otherwise the one built in, which is not taken from the real game.
+    // otherwise the one built in (realgame::measuredLayout).
     static constexpr const wchar_t* LAYOUT_FILE = L"realgame_layout.txt";
-    realgame::Layout layout = realgame::sampleLayout();
+    realgame::Layout layout = realgame::measuredLayout();
     bool layoutOwn = false;
     std::wstring layoutError; // (the file is there and a line of it is not understood: the table built in is used)
     realgame::Tracker tracker;
@@ -62,7 +62,7 @@ struct RealGameMode {
     // Begins to read the window `w` with the table of `folder` (or the one built in).
     bool startReading(HWND w, const std::filesystem::path& folder, std::wstring& error) {
         stopReading();
-        layout = realgame::sampleLayout(), layoutOwn = false, layoutError.clear();
+        layout = realgame::measuredLayout(), layoutOwn = false, layoutError.clear();
         std::error_code ignored;
         const std::filesystem::path file = folder / LAYOUT_FILE;
         if (std::filesystem::exists(file, ignored)) {

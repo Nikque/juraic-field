@@ -1387,7 +1387,7 @@ struct App {
             const int64_t span = m.firstFrame >= 0 ? m.tracker.frame - m.firstFrame : 0;
             lines.push_back(L"読んだ画面: " + std::to_wstring(m.pictures) + L" 枚" + (span >= 60 ? L"（1 秒に " + std::to_wstring(int((m.pictures - 1) * 60 / span)) + L" 枚）" : L""));
             if (m.framesWithout > 60) lines.push_back(L"画面が来ていません（窓が最小化されていませんか）");
-            lines.push_back(m.layoutOwn ? L"表: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"表: 組み込みの仮の値（実機の画像から作るまで、読んだものは当てになりません）");
+            lines.push_back(m.layoutOwn ? L"表: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"表: 組み込みの値（実機の画像 5 枚から測ったもの。おじゃまの予告はまだ読めません）");
             if (!m.layoutError.empty()) lines.push_back(std::wstring(RealGameMode::LAYOUT_FILE) + L" を読めませんでした: " + m.layoutError);
             lines.push_back(L"前と合わない読み: " + std::to_wstring(m.tracker.doubts) + L" 回" + (m.tracker.fromStart ? L"" : L"（対戦の初めから読んでいません）"));
         }

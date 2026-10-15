@@ -7,11 +7,15 @@
 // inside is BASE_WIDTH x BASE_HEIGHT; a picture of another size is read with the table scaled to it. The table can be
 // written to a text file and read from one (formatLayout, parseLayout), so that it can be made from pictures of the
 // real game without building the program again (tools/realgame_read.cpp reads a saved picture with a table). The
-// table built in (sampleLayout) is not taken from the real game: it stands in until one is.
+// table built in (measuredLayout) was measured on five pictures of the real game's offline versus.
 //
 // A field is read at two points of every cell: a quarter of a cell above its lower edge and a quarter of a cell
 // below its upper edge. A piece at rest covers both points of its cell; the pair in play, which moves in half cells
 // (game/control.h), covers the upper point of one cell and the lower point of the next when it is half a cell up.
+// A point is the square around it: its pixels of strong colour (pieces have faces and shines of white, outlines of
+// dark) tell the colour of a piece, by the colour of the table nearest to their mean, when with the pixels of pale
+// grey or white they cover enough of it (a small dot of colour is no piece); with few of them, many pixels of pale
+// grey are garbage; the background of the field (dark) is neither.
 //
 // Tracker follows the readings frame by frame: the pieces at rest and whether they stand still, the pair in play,
 // the pairs each side has been given and the pairs the windows of the next pairs have shown. observeSpawn makes of
@@ -52,11 +56,18 @@ struct Spot {
     bool operator==(const Spot&) const = default;
 };
 
-// A colour of the table and the piece it stands for (EMPTY for a colour of the background).
+// A colour of the table and the piece it stands for (EMPTY for a colour that is no piece).
 struct ColorRef {
     juraic::Cell cell = juraic::EMPTY;
     Rgb rgb;
     bool operator==(const ColorRef&) const = default;
+};
+// A cell of the field where the screen draws a mark of its own: a point there is a piece of a colour only when `pale`
+// in a hundred of its pixels are pale grey or white (the shine and the face of a piece; the mark has none).
+struct MarkedCell {
+    int x = 0, y = 0;
+    int pale = 0;
+    bool operator==(const MarkedCell&) const = default;
 };
 // One mark of the garbage notice: the colours at points around the middle of its place, and the garbage pieces it
 // stands for.
@@ -77,6 +88,7 @@ struct SideLayout {
     float shownRows = 12;                 // how much of the field the screen shows, in cells from its floor
     Spot next[2][2];                      // the window of the next pairs, [0 next, 1 next-next][0 axis, 1 child]: the middle of the piece
     std::vector<Spot> notice;             // the places of the marks of the garbage notice
+    std::vector<MarkedCell> marked;
     bool operator==(const SideLayout&) const = default;
 };
 
@@ -85,6 +97,9 @@ struct Layout {
     float patch = 4;              // a point is the mean of the square this many base pixels from it each way
     int colorDistance = 60;       // a point within this distance (red, green, blue) of a colour of the table is that colour
     std::vector<ColorRef> colors; // (the nearest counts; a point near none of them is empty)
+    // A point is a piece of a colour when `colored` in a hundred of its pixels have strong colour and `cover` in a hundred
+    // have strong colour or are pale grey; with fewer of strong colour, garbage when `garbage` in a hundred are pale grey.
+    int colored = 8, cover = 45, garbage = 30;
     int markDistance = 60;        // the same for the points of a mark
     std::vector<Mark> marks;
     int stillFrames = 2;          // pieces at rest read the same for this many frames stand still
@@ -94,8 +109,7 @@ struct Layout {
 
 // ---- the table ------------------------------------------------------------------------------------------------
 
-// A table to stand in until one is made from pictures of the real game: the sizes and the places are guesses and the
-// colours plain ones. The tests draw pictures with it.
+// A table of plain colours and places, for pictures drawn by the tests.
 inline Layout sampleLayout() {
     Layout l;
     l.colors = {{1, {230, 60, 60}}, {2, {60, 200, 80}}, {3, {60, 110, 230}}, {4, {240, 210, 60}}, {5, {170, 80, 210}}, {juraic::GARBAGE, {205, 205, 215}}};
@@ -118,17 +132,55 @@ inline Layout sampleLayout() {
     return l;
 }
 
+// The table of the real game, measured on five pictures of its offline versus (taken by its store's own key for
+// pictures, 2000 x 1125, of a window whose inside is 2240 x 1260; here in the pixels of the latter, 1.12 times those
+// of the pictures):
+//  - the fields: the dark inside 412 x 749 pixels of the pictures; the pieces stand in columns 67 apart (the first
+//    5 pixels from its left edge) and rows 62.5 apart from its lower edge, twelve rows; the 13th row is behind the
+//    frame above it;
+//  - the colours: the mean of the pixels of strong colour of pieces at rest (red 158 23 24, green 54 185 37, yellow
+//    233 143 21, purple 130 50 188; the four colours of those matches); blue was in none of them and is a guess;
+//  - at a point of a piece 12 to 97 in a hundred of the pixels had strong colour (fewest at the upper point, where
+//    the eyes are) and 51 or more strong colour or pale grey; at a point of the background none of either; at a point
+//    of the small dots that show where the pair would land (red) 17 to 28 strong colour and 35 at most of both; at a
+//    point of garbage none of strong colour and 37 to 75 pale grey (37 and 45 where it was dim);
+//  - the mark of the third column of the twelfth row (where the pair appears) is red, its mean 162 45 45 to 227 64 64
+//    as it turns and the light changes, without pale grey; red pieces elsewhere had 15 or more in a hundred pale grey
+//    at most points, but 3 where two of them are joined, so it is only at that cell that pale grey is asked for;
+//  - the windows of the next pairs: the middles of the pieces, a little below them (their eyes are above);
+//  - the notice: its marks in a row above the field, over the columns. What each mark is worth is not known yet (the
+//    pictures do not tell): no mark is in the table, and the notice reads 0.
+inline Layout measuredLayout() {
+    Layout l;
+    l.patch = 15.7f; // (14 pixels of the pictures)
+    l.colorDistance = 70;
+    l.colored = 8, l.cover = 45, l.garbage = 30;
+    l.colors = {{1, {158, 23, 24}}, {2, {54, 185, 37}}, {3, {40, 100, 220}}, {4, {233, 143, 21}}, {5, {130, 50, 188}}};
+    const float left[2] = {324.2f, 1461.6f}, nextX[2][2] = {{875.8f, 927.4f}, {1361.9f, 1308.2f}};
+    for (int s = 0; s < 2; ++s) {
+        SideLayout& d = l.side[s];
+        d.left = left[s], d.bottom = 1024.8f, d.cellWidth = 75, d.cellHeight = 70, d.shownRows = 12;
+        d.next[0][1] = {nextX[s][0], 236.3f}, d.next[0][0] = {nextX[s][0], 305.8f};
+        d.next[1][1] = {nextX[s][1], 380.8f}, d.next[1][0] = {nextX[s][1], 436.8f};
+        for (int x = 0; x < juraic::W; ++x) d.notice.push_back({left[s] + (float(x) + 0.5f) * d.cellWidth, 156.8f});
+        d.marked = {{juraic::DEATH_X, juraic::DEATH_Y, 8}};
+    }
+    return l;
+}
+
 // The table as text: one item a line, a word and its numbers; # begins a remark.
 //   base <width> <height>              patch <half side>        still <frames>
-//   distance <colours> <marks>
-//   color <piece> <r> <g> <b>          (piece: 0 background, 1 to 5 the colours, 6 garbage; one line a colour)
+//   distance <colours> <marks>         share <strong colour> <cover> <garbage>      (in a hundred pixels of a point)
+//   color <piece> <r> <g> <b>          (piece: 0 no piece, 1 to 5 the colours, 6 garbage; one line a colour)
 //   mark <pieces> <dx> <dy> <r> <g> <b> [<dx> <dy> <r> <g> <b> ...]
 //   field <side> <left> <bottom> <cell width> <cell height> <rows shown>      (side: 1 or 2)
 //   next <side> <1 next, 2 next-next> <axis x> <axis y> <child x> <child y>
 //   notice <side> <x> <y>              (one line a place, from the first)
+//   marked <side> <column> <row> <pale grey>   (columns 1 to 6, rows 1 to 13 from the floor)
 inline std::string formatLayout(const Layout& l) {
     std::ostringstream o;
-    o << "base " << l.baseWidth << ' ' << l.baseHeight << "\npatch " << l.patch << "\nstill " << l.stillFrames << "\ndistance " << l.colorDistance << ' ' << l.markDistance << '\n';
+    o << "base " << l.baseWidth << ' ' << l.baseHeight << "\npatch " << l.patch << "\nstill " << l.stillFrames << "\ndistance " << l.colorDistance << ' ' << l.markDistance
+      << "\nshare " << l.colored << ' ' << l.cover << ' ' << l.garbage << '\n';
     for (const ColorRef& c : l.colors) o << "color " << int(c.cell) << ' ' << c.rgb.r << ' ' << c.rgb.g << ' ' << c.rgb.b << '\n';
     for (const Mark& m : l.marks) {
         o << "mark " << m.value;
@@ -140,6 +192,7 @@ inline std::string formatLayout(const Layout& l) {
         o << "field " << s + 1 << ' ' << d.left << ' ' << d.bottom << ' ' << d.cellWidth << ' ' << d.cellHeight << ' ' << d.shownRows << '\n';
         for (int k = 0; k < 2; ++k) o << "next " << s + 1 << ' ' << k + 1 << ' ' << d.next[k][0].x << ' ' << d.next[k][0].y << ' ' << d.next[k][1].x << ' ' << d.next[k][1].y << '\n';
         for (const Spot& p : d.notice) o << "notice " << s + 1 << ' ' << p.x << ' ' << p.y << '\n';
+        for (const MarkedCell& m : d.marked) o << "marked " << s + 1 << ' ' << m.x + 1 << ' ' << m.y + 1 << ' ' << m.pale << '\n';
     }
     return o.str();
 }
@@ -168,6 +221,10 @@ inline bool parseLayout(const std::string& text, Layout& out, std::string* error
         else if (word == "patch") ok = bool(words >> l.patch) && l.patch >= 0;
         else if (word == "still") ok = bool(words >> l.stillFrames) && l.stillFrames >= 1;
         else if (word == "distance") ok = bool(words >> l.colorDistance >> l.markDistance) && l.colorDistance >= 0 && l.markDistance >= 0;
+        else if (word == "share") {
+            ok = bool(words >> l.colored >> l.cover >> l.garbage);
+            for (int v : {l.colored, l.cover, l.garbage}) ok = ok && v >= 0 && v <= 100;
+        }
         else if (word == "color") {
             int cell = 0;
             ColorRef c;
@@ -202,6 +259,11 @@ inline bool parseLayout(const std::string& text, Layout& out, std::string* error
             Spot p;
             ok = bool(words >> s >> p.x >> p.y) && side(s);
             if (ok) l.side[s - 1].notice.push_back(p);
+        } else if (word == "marked") {
+            int s = 0;
+            MarkedCell m;
+            ok = bool(words >> s >> m.x >> m.y >> m.pale) && side(s) && m.x >= 1 && m.x <= juraic::W && m.y >= 1 && m.y <= juraic::H && m.pale >= 0 && m.pale <= 100;
+            if (ok) --m.x, --m.y, l.side[s - 1].marked.push_back(m);
         } else {
             return fail("unknown word \"" + word + "\"");
         }
@@ -259,6 +321,34 @@ inline juraic::Cell classify(const Layout& l, const Rgb& c) {
     return cell;
 }
 
+// What the square around (x, y) shows (in base pixels): a piece of a colour, garbage or nothing. Strong colour: at
+// least 45 in a hundred as bright as white and its weakest part at most half its strongest; pale grey: at least 40 in
+// a hundred as bright as white and its weakest part at least three quarters of its strongest. `pale`: of a piece of
+// a colour so many in a hundred pixels must be pale grey (MarkedCell).
+inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, float x, float y, int pale = 0) {
+    const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
+    const float px = x * s.x, py = y * s.y, hx = l.patch * s.x, hy = l.patch * s.y;
+    const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
+    const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
+    long r = 0, g = 0, b = 0, strong = 0, light = 0, all = 0;
+    for (int j = y0; j <= y1; ++j) {
+        const uint8_t* row = p.pixels + size_t(j) * size_t(p.stride);
+        for (int i = x0; i <= x1; ++i) {
+            const int cb = row[4 * i], cg = row[4 * i + 1], cr = row[4 * i + 2];
+            const int high = std::max(cr, std::max(cg, cb)), low = std::min(cr, std::min(cg, cb));
+            ++all;
+            if (2 * (high - low) > high && 100 * high > 45 * 255) r += cr, g += cg, b += cb, ++strong;
+            else if (4 * (high - low) < high && 10 * high > 4 * 255) ++light;
+        }
+    }
+    if (!all) return juraic::EMPTY;
+    if (100 * strong >= long(l.colored) * all) {
+        if (100 * (strong + light) < long(l.cover) * all || 100 * light < long(pale) * all) return juraic::EMPTY;
+        return classify(l, Rgb{int(r / strong), int(g / strong), int(b / strong)});
+    }
+    return 100 * light >= long(l.garbage) * all ? juraic::GARBAGE : juraic::EMPTY;
+}
+
 // The point `k` of column x (2y: the lower point of row y, 2y + 1: its upper point), in base pixels; how high it is in
 // cells from the floor of the field.
 inline float pointHeight(int k) { return float(k / 2) + (k % 2 ? 0.75f : 0.25f); }
@@ -301,11 +391,14 @@ inline Reading read(const Picture& p, const Layout& l) {
         for (int x = 0; x < juraic::W; ++x)
             for (int k = 0; k < POINTS; ++k) {
                 const Spot at = pointSpot(d, x, k);
-                out.point[x][k] = pointHeight(k) > d.shownRows ? HIDDEN : classify(l, sample(p, l, s, at.x, at.y));
+                int pale = 0;
+                for (const MarkedCell& m : d.marked)
+                    if (m.x == x && m.y == k / 2) pale = m.pale;
+                out.point[x][k] = pointHeight(k) > d.shownRows ? HIDDEN : piece(p, l, s, at.x, at.y, pale);
             }
         for (int n = 0; n < 2; ++n) {
-            const juraic::Cell axis = classify(l, sample(p, l, s, d.next[n][0].x, d.next[n][0].y));
-            const juraic::Cell child = classify(l, sample(p, l, s, d.next[n][1].x, d.next[n][1].y));
+            const juraic::Cell axis = piece(p, l, s, d.next[n][0].x, d.next[n][0].y);
+            const juraic::Cell child = piece(p, l, s, d.next[n][1].x, d.next[n][1].y);
             out.next[n] = {axis, child};
             out.nextRead[n] = axis >= 1 && axis <= juraic::MAX_COLORS && child >= 1 && child <= juraic::MAX_COLORS;
         }

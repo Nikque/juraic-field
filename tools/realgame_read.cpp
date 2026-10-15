@@ -1,19 +1,24 @@
 // A saved picture of the real game's window read with a table (play/realgame_read.h): for making the table from
 // pictures of the real game and checking it.
 //
-//   realgame_read <picture.bmp> [--layout FILE] [--points OUT.bmp]
+//   realgame_read <picture> [--layout FILE] [--points OUT.bmp]
 //   realgame_read --write-layout FILE
 //
 // Prints what the picture shows on each side: every point of the field (from the top: a space above what the screen
 // shows, . nothing, 1 to 5 the colours, x garbage; two lines a row, the upper point first), the pieces at rest, the
-// pair in play, the window of the next pairs and the garbage notice. Without --layout the table built in is used,
-// which is not taken from the real game.
-//   --points OUT.bmp     the picture with every point read marked on it, in the colour read there (black where
-//                        nothing is read), to see whether the table fits the picture
+// pair in play, the window of the next pairs and the garbage notice. Without --layout the table built in is used
+// (measuredLayout).
+//   --points OUT.bmp     the picture with every point read marked on it, in the colour read there (grey: garbage,
+//                        black: nothing), to see whether the table fits the picture
 //   --write-layout FILE  writes the table built in as text, to begin a table from
-// Pictures are BMP files of 24 or 32 bits a pixel (those the game saves in the mode of the real game).
+// Pictures: BMP (those the game saves in the mode of the real game), JPEG and PNG (those of the key for pictures of the
+// store the real game is sold in).
 #include "../play/realgame_read.h"
 #include <iostream>
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
+#include "../third_party/stb/stb_image.h"
 
 using namespace play::realgame;
 
@@ -26,7 +31,7 @@ char symbol(juraic::Cell c) {
 // A small square around a point, in the colour of the table read there (black: none), with a white rim.
 void markPoint(std::vector<uint8_t>& pixels, int width, int height, const Layout& l, float x, float y, juraic::Cell cell) {
     const Scale s({nullptr, width, height, width * 4}, l);
-    Rgb inside{};
+    Rgb inside = cell == juraic::GARBAGE ? Rgb{200, 200, 200} : Rgb{};
     for (const ColorRef& c : l.colors)
         if (c.cell == cell && cell != juraic::EMPTY) {
             inside = c.rgb;
@@ -54,21 +59,28 @@ int main(int argc, char** argv) {
         else if (a == "--points" && more) pointsPath = argv[++i];
         else if (a == "--write-layout" && more) {
             std::ofstream out(argv[++i], std::ios::binary);
-            out << "# The table built in: not taken from the real game (play/realgame_read.h formatLayout).\n" << formatLayout(sampleLayout());
+            out << "# The table built in (play/realgame_read.h measuredLayout).\n" << formatLayout(measuredLayout());
             if (!out) return std::cerr << "cannot write " << argv[i] << '\n', 1;
             return 0;
         } else if (!a.empty() && a[0] != '-' && picturePath.empty()) picturePath = a;
-        else return std::cerr << "usage: realgame_read <picture.bmp> [--layout FILE] [--points OUT.bmp] | --write-layout FILE\n", 2;
+        else return std::cerr << "usage: realgame_read <picture> [--layout FILE] [--points OUT.bmp] | --write-layout FILE\n", 2;
     }
-    if (picturePath.empty()) return std::cerr << "usage: realgame_read <picture.bmp> [--layout FILE] [--points OUT.bmp] | --write-layout FILE\n", 2;
-    Layout l = sampleLayout();
+    if (picturePath.empty()) return std::cerr << "usage: realgame_read <picture> [--layout FILE] [--points OUT.bmp] | --write-layout FILE\n", 2;
+    Layout l = measuredLayout();
     if (!layoutPath.empty()) {
         std::string error;
         if (!loadLayout(layoutPath, l, &error)) return std::cerr << layoutPath << ": " << error << '\n', 1;
     }
     std::vector<uint8_t> pixels;
     int width = 0, height = 0;
-    if (!loadBmp(picturePath, pixels, width, height)) return std::cerr << picturePath << ": not a BMP of 24 or 32 bits a pixel\n", 1;
+    if (!loadBmp(picturePath, pixels, width, height)) {
+        int channels = 0;
+        unsigned char* rgba = stbi_load(picturePath.c_str(), &width, &height, &channels, 4);
+        if (!rgba) return std::cerr << picturePath << ": not a picture this tool reads (BMP of 24 or 32 bits a pixel, JPEG, PNG)\n", 1;
+        pixels.assign(rgba, rgba + size_t(width) * size_t(height) * 4);
+        stbi_image_free(rgba);
+        for (size_t i = 0; i < pixels.size(); i += 4) std::swap(pixels[i], pixels[i + 2]); // (to blue, green, red)
+    }
     const Picture picture{pixels.data(), width, height, width * 4};
     const Reading r = read(picture, l);
     std::cout << picturePath << ": " << width << " x " << height << " (the table is for " << l.baseWidth << " x " << l.baseHeight << ")\n";
