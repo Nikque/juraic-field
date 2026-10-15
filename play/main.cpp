@@ -672,9 +672,23 @@ struct App {
         }
     }
 #ifdef _WIN32
-    // The screen of the mode that plays the real game's 2P: the AI and its level (play/realgame_win.h).
+    // The screen of the mode that plays the real game's 2P: the AI and its level, and the reading of the real game's
+    // screen (play/realgame_win.h).
     void updateRealGame() {
         RealGameMode& m = realGame;
+        m.pump();
+        if (m.reading == RealGameMode::Reading::Choosing) chooseRealGame();
+        if (m.reading == RealGameMode::Reading::On && !IsWindow(m.capture.window())) m.stopReading(), say(L"読んでいた窓が閉じられました");
+        std::vector<uint8_t> pixels;
+        int w = 0, h = 0;
+        if (m.savedPicture(pixels, w, h)) {
+            // (in the folder of one's own files, for making the table: tools/realgame_read.cpp reads them)
+            const std::filesystem::path name = replayPath(L"realgame").filename().replace_extension(L".bmp");
+            std::error_code ignored;
+            std::filesystem::create_directories(userDirectory / L"realgame", ignored);
+            const bool saved = realgame::saveBmp(userDirectory / L"realgame" / name, {pixels.data(), w, h, w * 4});
+            say(saved ? L"実機の画面を保存しました: realgame\\" + name.wstring() : L"実機の画面を保存できませんでした");
+        }
         const int count = RealGameMode::ROWS;
         if (heldStep(NAV_UP, 6, 6)) m.row = (m.row + count - 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
         if (heldStep(NAV_DOWN, 6, 6)) m.row = (m.row + 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
@@ -682,9 +696,38 @@ struct App {
         const bool right = heldStep(NAV_RIGHT, 4, 2, &heard), left = heldStep(NAV_LEFT, 4, 2, &heard);
         const int change = (right ? 1 : 0) - (left ? 1 : 0);
         if (change && m.change(change) && heard) audio.play(SND_ROTATE);
-        if (nav(NAV_BACK) || (nav(NAV_OK) && m.row == RealGameMode::ROW_BACK)) {
+        const bool ok = nav(NAV_OK); // (read once in a frame: a key is down in it only the first time it is asked)
+        if (ok && m.row == RealGameMode::ROW_READ) {
             audio.play(SND_SELECT);
+            if (m.reading == RealGameMode::Reading::Off) m.reading = RealGameMode::Reading::Choosing, m.chooseLeft = RealGameMode::CHOOSE_FRAMES, chosenFront = nullptr, chosenFor = 0;
+            else m.stopReading();
+        }
+        if (pressed('S') && m.reading == RealGameMode::Reading::On) m.keepNext();
+        if (nav(NAV_BACK) || (ok && m.row == RealGameMode::ROW_BACK)) {
+            audio.play(SND_SELECT);
+            m.stopReading();
             screen = Screen::Menu;
+        }
+    }
+    // The real game's window is chosen: the window the person brings to the front and keeps there for half a second
+    // (this window is not brought back by itself). Not the desktop, a bar of tools nor a window smaller than 320 x 180.
+    HWND chosenFront = nullptr;
+    int chosenFor = 0;
+    void chooseRealGame() {
+        RealGameMode& m = realGame;
+        const HWND front = GetForegroundWindow();
+        RECT inside{};
+        const bool fits = front && front != window && front == GetAncestor(front, GA_ROOT) && front != GetShellWindow() && IsWindowVisible(front) &&
+                          !(GetWindowLongPtrW(front, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) && GetClientRect(front, &inside) && inside.right >= 320 && inside.bottom >= 180;
+        chosenFor = fits && front == chosenFront ? chosenFor + 1 : 0;
+        chosenFront = fits ? front : nullptr;
+        if (chosenFor >= 30) {
+            std::wstring error;
+            if (m.startReading(front, userDirectory, error)) say(L"前に出た窓を読み始めました");
+            else say(error);
+        } else if (--m.chooseLeft <= 0) {
+            m.reading = RealGameMode::Reading::Off;
+            say(L"窓が選ばれませんでした");
         }
     }
 #endif
@@ -1317,23 +1360,73 @@ struct App {
 #ifdef _WIN32
     void drawRealGame() {
         const RealGameMode& m = realGame;
-        gfx.text(L"実機の 2P を Juraic が操作", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
+        gfx.text(L"実機の 2P を Juraic が操作", 0, 30, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         const unsigned tint = levelColor(m.level);
-        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", L"戻る"};
-        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level), L""};
+        const int seconds = (m.chooseLeft + 59) / 60;
+        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", m.reading == RealGameMode::Reading::Off ? L"読み始める" : L"読むのを止める", L"戻る"};
+        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level),
+                                                         m.reading == RealGameMode::Reading::On ? L"読んでいます" : m.reading == RealGameMode::Reading::Choosing ? L"窓を選んでいます" : L"",
+                                                         L""};
         for (int i = 0; i < RealGameMode::ROWS; ++i) {
-            const float y = 150 + float(i) * 56;
+            const float y = 110 + float(i) * 50;
             const bool on = i == m.row;
-            if (on) gfx.round(rectF(260, y - 6, 1020, y + 40), 8, rgb(84, 104, 190));
-            gfx.text(rows[i], 284, y, 300, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
-            gfx.text(values[i], 600, y, 400, 34, 1, i == RealGameMode::ROW_LEVEL ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 1);
+            if (on) gfx.round(rectF(40, y - 6, 640, y + 38), 8, rgb(84, 104, 190));
+            gfx.text(rows[i], 64, y, 260, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
+            gfx.text(values[i], 320, y, 300, 34, 1, i == RealGameMode::ROW_LEVEL ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 1);
         }
-        const wchar_t* notes[] = {L"同じ PC で動かしている実機の、オフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなたです）。",
-                                  L"オンラインの対戦では使えません。",
+        // What is known of the reading.
+        std::vector<std::wstring> lines;
+        if (m.reading == RealGameMode::Reading::Off) {
+            lines.push_back(L"「読み始める」で、10 秒の間に実機の窓をクリックして前に出してください。");
+            lines.push_back(L"前に出た窓の画面を読みます（実機にキーやボタンは送りません）。");
+        } else if (m.reading == RealGameMode::Reading::Choosing) {
+            lines.push_back(L"実機の窓をクリックして前に出してください（あと " + std::to_wstring(seconds) + L" 秒）。");
+        } else {
+            lines.push_back(L"読んでいる窓の中身: " + std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) + L"（表の基準 " + std::to_wstring(m.layout.baseWidth) + L" × " +
+                            std::to_wstring(m.layout.baseHeight) + L"）");
+            const int64_t span = m.firstFrame >= 0 ? m.tracker.frame - m.firstFrame : 0;
+            lines.push_back(L"読んだ画面: " + std::to_wstring(m.pictures) + L" 枚" + (span >= 60 ? L"（1 秒に " + std::to_wstring(int((m.pictures - 1) * 60 / span)) + L" 枚）" : L""));
+            if (m.framesWithout > 60) lines.push_back(L"画面が来ていません（窓が最小化されていませんか）");
+            lines.push_back(m.layoutOwn ? L"表: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"表: 組み込みの仮の値（実機の画像から作るまで、読んだものは当てになりません）");
+            if (!m.layoutError.empty()) lines.push_back(std::wstring(RealGameMode::LAYOUT_FILE) + L" を読めませんでした: " + m.layoutError);
+            lines.push_back(L"前と合わない読み: " + std::to_wstring(m.tracker.doubts) + L" 回" + (m.tracker.fromStart ? L"" : L"（対戦の初めから読んでいません）"));
+        }
+        for (size_t i = 0; i < lines.size(); ++i) gfx.text(lines[i], 44, 330 + float(i) * 28, 620, 26, 0, rgb(200, 206, 226));
+        // The two sides as they are read: the pieces at rest, the pair in play, the window of the next pairs, the notice.
+        const float cell = 22;
+        for (int s = 0; s < 2; ++s) {
+            const realgame::SideTrack& t = m.tracker.side[s];
+            const float x0 = 700 + float(s) * 290, bottom = 120 + 13 * cell;
+            gfx.text(s ? L"2P（Juraic）" : L"1P", x0, 80, W * cell, 26, 0, rgb(220, 226, 240), 0);
+            gfx.fill(rectF(x0, bottom - 13 * cell, x0 + W * cell, bottom - 12 * cell), rgb(26, 28, 40));
+            gfx.fill(rectF(x0, bottom - 12 * cell, x0 + W * cell, bottom), rgb(36, 40, 60));
+            if (m.reading != RealGameMode::Reading::On) continue;
+            const auto at = [&](int x, float height) { return std::pair<float, float>(x0 + (float(x) + 0.5f) * cell, bottom - height * cell); };
+            for (int x = 0; x < W; ++x)
+                for (int y = 0; y < H; ++y)
+                    if (const Cell c = t.resting.f.get(x, y)) gfx.piece(c, at(x, float(y) + 0.5f).first, at(x, float(y) + 0.5f).second, 1, 1, cell);
+            const realgame::PairSeen& pair = t.pair.seen ? t.pair : t.lastSeen;
+            if (t.inHand && pair.seen) {
+                const float lift = pair.at.upper ? 1.f : 0.5f;
+                const auto a = at(pair.at.x, float(pair.at.y) + lift), c = at(pair.at.childX(), float(pair.at.childY()) + lift);
+                if (t.colors.child && pair.at.childY() < H) gfx.piece(t.colors.child, c.first, c.second, t.pair.seen ? 1.f : 0.5f, 1, cell);
+                if (t.colors.axis) gfx.piece(t.colors.axis, a.first, a.second, t.pair.seen ? 1.f : 0.5f, 1, cell);
+            }
+            for (int n = 0; n < 2; ++n)
+                if (t.nextRead[n]) {
+                    const float nx = x0 + W * cell + 22, ny = 140 + float(n) * 64;
+                    gfx.piece(t.next[n].child, nx, ny, 1, 1, cell * 0.9f);
+                    gfx.piece(t.next[n].axis, nx, ny + cell * 0.9f, 1, 1, cell * 0.9f);
+                }
+            gfx.text(L"おじゃま " + std::to_wstring(t.notice), x0, bottom + 8, W * cell + 50, 24, 0, rgb(220, 226, 240), -1);
+            gfx.text(m.tracker.still(s) ? L"止まっている" : L"動いている", x0, bottom + 34, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
+            gfx.text(L"組 " + std::to_wstring(t.pairs), x0, bottom + 60, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
+        }
+        const wchar_t* notes[] = {L"同じ PC で動かしている実機の、オフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなたです）。オンラインの対戦では使えません。",
                                   L"AI とレベルは、開くたびに設定の「AI（2P 側）」「AI のレベル（2P 側）」から始まります（ここで変えても設定は変わりません）。",
-                                  L"実機の画面を読む所と、実機のボタンを押す所は、まだできていません。"};
-        for (int i = 0; i < 4; ++i) gfx.text(notes[i], 0, 452 + float(i) * 30, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
-        gfx.text(L"↑↓ で選ぶ　←→ で変える　Esc で戻る", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
+                                  L"今は実機の画面を読んで表示するだけです。実機のボタンを押す所は、まだできていません。"};
+        for (int i = 0; i < 3; ++i) gfx.text(notes[i], 0, 532 + float(i) * 28, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
+        gfx.text(L"↑↓ で選ぶ　←→ で変える　Enter で決定　S で今の実機の画面を保存　Esc で戻る", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
     }
 #endif
     void drawLobby() {
