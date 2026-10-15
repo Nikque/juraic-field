@@ -46,6 +46,17 @@ public:
     static bool rawWanted(uint16_t vendor, uint16_t product, const std::vector<Id>& bySdl) {
         return std::find(bySdl.begin(), bySdl.end(), Id{vendor, product}) == bySdl.end();
     }
+    // Is a pad SDL has opened read through SDL: not when XInput reads it already. A program that makes a pad of Sony or
+    // Nintendo an Xbox pad (the input of a store of games, a driver) leaves the pad itself to SDL as well, and it was
+    // read twice, as two pads - one pad playing both seats of a match, and the two readings apart (a DualShock 4: SDL
+    // gave a direction held for seconds that XInput did not). Windows then lists the pad with the layout of an Xbox pad
+    // (`xboxKinds`: the kinds of pad Windows.Gaming.Input lists so). It is in XInput when XInput has a pad for each of
+    // them (`xinputPads` at least `xboxPads`); otherwise Windows lists a pad of that kind that no XInput number reads, and
+    // SDL reads it.
+    static bool sdlWanted(Id pad, const std::vector<Id>& xboxKinds, int xboxPads, int xinputPads) {
+        const bool listedAsXbox = std::find(xboxKinds.begin(), xboxKinds.end(), pad) != xboxKinds.end();
+        return !listedAsXbox || xinputPads < xboxPads;
+    }
 #ifdef JURAIC_PADS_SDL
     // The hints SDL is started with: of its drivers only those of the pads of Sony and Nintendo (Xbox pads stay with
     // XInput, every other pad with Windows.Gaming.Input), and the timer of Windows left as it is (SDL would set it to
@@ -75,6 +86,7 @@ private:
     using Switch = winrt::Windows::Gaming::Input::GameControllerSwitchPosition;
     std::vector<Raw> list;
     std::vector<Id> listIds; // (of list)
+    std::vector<Id> xboxKinds; // the kinds of the controllers Windows lists with the layout of an Xbox pad (XInput reads those)
     int refresh = 0;
     bool failed = false;
     std::vector<uint64_t> state; // Xbox pads first, then the others, then those SDL reads
@@ -84,8 +96,9 @@ private:
     std::map<SDL_JoystickID, SDL_Gamepad*> sdlPads;
     std::vector<Id> sdlIds; // (of sdlPads)
 
-    // Opens the pads SDL has found and closes those that are gone.
-    void updateSdl() {
+    // Opens the pads SDL has found and closes those that are gone, and those XInput reads already (sdlWanted: SDL does not
+    // even open them, as opening a pad of Sony or Nintendo changes the reports it sends).
+    void updateSdl(int xinputPads) {
         if (sdlFailed) return;
         if (!sdlStarted) {
             sdlStarted = true;
@@ -103,6 +116,7 @@ private:
         SDL_JoystickID* ids = SDL_GetJoysticks(&count);
         std::map<SDL_JoystickID, bool> present;
         for (int i = 0; i < count; ++i) {
+            if (!sdlWanted({SDL_GetJoystickVendorForID(ids[i]), SDL_GetJoystickProductForID(ids[i])}, xboxKinds, int(xboxKinds.size()), xinputPads)) continue;
             present[ids[i]] = true;
             if (!sdlPads.count(ids[i]) && SDL_IsGamepad(ids[i]))
                 if (SDL_Gamepad* g = SDL_OpenGamepad(ids[i])) sdlPads[ids[i]] = g;
@@ -190,15 +204,12 @@ public:
         state.clear();
         xbox.clear();
         bySdl.clear();
-#ifdef JURAIC_PADS_SDL
-        updateSdl();
-        const std::vector<Id>& sdlKinds = sdlIds;
-#else
-        const std::vector<Id> sdlKinds;
-#endif
+        [[maybe_unused]] int xinputPads = 0; // (the pad skipped included: Windows lists it too)
         for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
             uint64_t bits;
-            if (int(i) != skipXInput && readXInput(i, bits)) state.push_back(bits), xbox.push_back(true), bySdl.push_back(false);
+            if (!readXInput(i, bits)) continue;
+            ++xinputPads;
+            if (int(i) != skipXInput) state.push_back(bits), xbox.push_back(true), bySdl.push_back(false);
         }
         try {
             if (!failed && --refresh < 0) {
@@ -206,10 +217,23 @@ public:
                 refresh = 30;
                 list.clear();
                 listIds.clear();
-                for (const Raw& raw : Raw::RawGameControllers())
-                    if (!Gamepad::FromGameController(raw)) // Xbox layout: XInput has it
-                        list.push_back(raw), listIds.push_back({raw.HardwareVendorId(), raw.HardwareProductId()});
+                xboxKinds.clear();
+                for (const Raw& raw : Raw::RawGameControllers()) {
+                    const Id kind{raw.HardwareVendorId(), raw.HardwareProductId()};
+                    if (Gamepad::FromGameController(raw)) xboxKinds.push_back(kind); // Xbox layout: XInput has it
+                    else list.push_back(raw), listIds.push_back(kind);
+                }
             }
+        } catch (const winrt::hresult_error&) {
+            failed = true; // no support for other controllers on this system
+        }
+#ifdef JURAIC_PADS_SDL
+        updateSdl(xinputPads);
+        const std::vector<Id>& sdlKinds = sdlIds;
+#else
+        const std::vector<Id> sdlKinds;
+#endif
+        try {
             for (size_t i = 0; !failed && i < list.size(); ++i)
                 if (rawWanted(listIds[i].vendor, listIds[i].product, sdlKinds)) state.push_back(readRaw(list[i])), xbox.push_back(false), bySdl.push_back(false);
         } catch (const winrt::hresult_error&) {
