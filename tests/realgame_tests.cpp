@@ -175,7 +175,7 @@ static void testTableText() {
     check(parseLayout("# remark only\n\n  base 1920 1080  # and a remark\n", back, &error) && back.baseWidth == 1920 && back.colors.empty(), "a short table is not read");
     for (const char* bad : {"base 0 100", "color 9 1 2 3", "color 1 1 2", "color 1 1 2 300", "mark 6", "mark 6 1 2 3 4", "field 3 1 2 3 4 5",
                             "next 1 3 1 2 3 4", "notice 1 5", "pieces 4", "still 0", "base 10 10 10", "share 8 45", "share 8 45 101", "marked 1 7 1 5 1 2 3",
-                            "marked 1 1 14 5 1 2 3", "marked 3 1 1 5 1 2 3", "marked 1 1 1 5", "marked 1 1 1 5 1 2"}) {
+                            "marked 1 1 14 5 1 2 3", "marked 3 1 1 5 1 2 3", "marked 1 1 1 5", "marked 1 1 1 5 1 2", "markpatch -1"}) {
         check(!parseLayout(std::string("still 2\n") + bad + "\n", back, &error), std::string("a wrong line is read: ") + bad);
         check(error.rfind("line 2:", 0) == 0, std::string("a wrong line is not named: ") + bad + " -> " + error);
     }

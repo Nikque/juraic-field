@@ -96,7 +96,8 @@ struct SideLayout {
 
 struct Layout {
     int baseWidth = BASE_WIDTH, baseHeight = BASE_HEIGHT;
-    float patch = 4;              // a point is the mean of the square this many base pixels from it each way
+    float patch = 4;              // a point is the square this many base pixels from it each way
+    float markPatch = 4;          // ... a point of a mark of the notice
     int colorDistance = 60;       // a point within this distance (red, green, blue) of a colour of the table is that colour
     std::vector<ColorRef> colors; // (the nearest counts; a point near none of them is empty)
     // A point is a piece of a colour when `colored` in a hundred of its pixels have strong colour and `cover` in a hundred
@@ -152,11 +153,26 @@ inline Layout sampleLayout() {
 //    appears there shines (36 and 37 in a hundred pale grey), the lower edge of a piece of the pair half a cell up
 //    there had none;
 //  - the windows of the next pairs: the middles of the pieces, a little below them (their eyes are above);
-//  - the notice: its marks in a row above the field, over the columns. What each mark is worth is not known yet (the
-//    pictures do not tell): no mark is in the table, and the notice reads 0.
+//  - the notice: its marks in a row above the field, over the columns, their middles 135 pixels from the top. Four
+//    kinds were in the pictures, each told by the mean colour of small squares (3.5 pixels each way) at points around
+//    the middle of its place: a small ball (1 piece; white 8 pixels above the middle, where every other mark is
+//    darker), a large one (6; white 20 pixels above, a dark grey eye 16 to the right), a red one (30; red at the eye,
+//    pink 20 above) and a star (180; yellow 10 below, red at the eye). The two marks of more (360 and 720) were in
+//    none of the pictures and are not in the table: a notice with them reads less than it shows. (Under a light of
+//    the screen over the field the marks change their colours and are not read.)
 inline Layout measuredLayout() {
     Layout l;
-    l.patch = 15.7f; // (14 pixels of the pictures)
+    l.patch = 15.7f, l.markPatch = 3.9f; // (14 and 3.5 pixels of the pictures)
+    l.markDistance = 45;
+    // (the points of the marks, in pixels of the pictures from the middle of the place, as they were measured)
+    const auto mark = [](int value, std::vector<Probe> probes) {
+        for (Probe& q : probes) q.dx *= 1.12f, q.dy *= 1.12f;
+        return Mark{value, probes};
+    };
+    l.marks = {mark(1, {{0, -8, {249, 249, 249}}}),
+               mark(6, {{0, -20, {253, 253, 253}}, {16, 0, {110, 110, 119}}}),
+               mark(30, {{16, 0, {203, 15, 15}}, {0, -20, {246, 187, 175}}}),
+               mark(180, {{0, 10, {224, 153, 27}}, {16, 0, {168, 47, 29}}})};
     l.colorDistance = 80;
     l.colored = 8, l.cover = 45, l.garbage = 30;
     l.colors = {{1, {158, 23, 24}}, {2, {54, 185, 37}}, {3, {36, 122, 216}}, {4, {233, 143, 21}}, {5, {130, 50, 188}}};
@@ -166,14 +182,14 @@ inline Layout measuredLayout() {
         d.left = left[s], d.bottom = 1024.8f, d.cellWidth = 75, d.cellHeight = 70, d.shownRows = 12;
         d.next[0][1] = {nextX[s][0], 236.3f}, d.next[0][0] = {nextX[s][0], 305.8f};
         d.next[1][1] = {nextX[s][1], 380.8f}, d.next[1][0] = {nextX[s][1], 436.8f};
-        for (int x = 0; x < juraic::W; ++x) d.notice.push_back({left[s] + (float(x) + 0.5f) * d.cellWidth, 156.8f});
+        for (int x = 0; x < juraic::W; ++x) d.notice.push_back({left[s] + (float(x) + 0.5f) * d.cellWidth, 151.2f});
         d.marked = {{juraic::DEATH_X, juraic::DEATH_Y, 8, {{165, 45, 45}, {190, 55, 48}, {215, 60, 56}, {227, 64, 64}, {200, 145, 66}}}};
     }
     return l;
 }
 
 // The table as text: one item a line, a word and its numbers; # begins a remark.
-//   base <width> <height>              patch <half side>        still <frames>
+//   base <width> <height>              patch <half side>        markpatch <half side>        still <frames>
 //   distance <colours> <marks>         share <strong colour> <cover> <garbage>      (in a hundred pixels of a point)
 //   color <piece> <r> <g> <b>          (piece: 0 no piece, 1 to 5 the colours, 6 garbage; one line a colour)
 //   mark <pieces> <dx> <dy> <r> <g> <b> [<dx> <dy> <r> <g> <b> ...]
@@ -183,7 +199,7 @@ inline Layout measuredLayout() {
 //   marked <side> <column> <row> <pale grey> <r> <g> <b> [<r> <g> <b> ...]   (columns 1 to 6, rows 1 to 13 from the floor)
 inline std::string formatLayout(const Layout& l) {
     std::ostringstream o;
-    o << "base " << l.baseWidth << ' ' << l.baseHeight << "\npatch " << l.patch << "\nstill " << l.stillFrames << "\ndistance " << l.colorDistance << ' ' << l.markDistance
+    o << "base " << l.baseWidth << ' ' << l.baseHeight << "\npatch " << l.patch << "\nmarkpatch " << l.markPatch << "\nstill " << l.stillFrames << "\ndistance " << l.colorDistance << ' ' << l.markDistance
       << "\nshare " << l.colored << ' ' << l.cover << ' ' << l.garbage << '\n';
     for (const ColorRef& c : l.colors) o << "color " << int(c.cell) << ' ' << c.rgb.r << ' ' << c.rgb.g << ' ' << c.rgb.b << '\n';
     for (const Mark& m : l.marks) {
@@ -227,6 +243,7 @@ inline bool parseLayout(const std::string& text, Layout& out, std::string* error
         bool ok = true;
         if (word == "base") ok = bool(words >> l.baseWidth >> l.baseHeight) && l.baseWidth > 0 && l.baseHeight > 0;
         else if (word == "patch") ok = bool(words >> l.patch) && l.patch >= 0;
+        else if (word == "markpatch") ok = bool(words >> l.markPatch) && l.markPatch >= 0;
         else if (word == "still") ok = bool(words >> l.stillFrames) && l.stillFrames >= 1;
         else if (word == "distance") ok = bool(words >> l.colorDistance >> l.markDistance) && l.colorDistance >= 0 && l.markDistance >= 0;
         else if (word == "share") {
@@ -308,10 +325,10 @@ struct Scale {
     Scale(const Picture& p, const Layout& l) : x(float(p.width) / float(l.baseWidth)), y(float(p.height) / float(l.baseHeight)) {}
 };
 
-// The mean colour of the square around (x, y), in base pixels.
-inline Rgb sample(const Picture& p, const Layout& l, const Scale& s, float x, float y) {
+// The mean colour of the square `half` base pixels each way around (x, y), in base pixels.
+inline Rgb sample(const Picture& p, const Scale& s, float x, float y, float half) {
     const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
-    const float px = x * s.x, py = y * s.y, hx = l.patch * s.x, hy = l.patch * s.y;
+    const float px = x * s.x, py = y * s.y, hx = half * s.x, hy = half * s.y;
     const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
     const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
     long r = 0, g = 0, b = 0, n = 0;
@@ -392,12 +409,18 @@ inline int readNotice(const Picture& p, const Layout& l, const Scale& s, const S
     int total = 0;
     const int limit = l.markDistance * l.markDistance;
     for (const Spot& at : d.notice) {
-        // (of the marks whose every point is near, the one of most points: one of them may be part of another)
+        // (of the marks whose every point is near, the one of most points - one of them may be part of another -, and
+        //  of those the nearest)
         const Mark* found = nullptr;
+        long foundAway = 0;
         for (const Mark& m : l.marks) {
             bool near = true;
-            for (const Probe& q : m.probes) near = near && distance2(sample(p, l, s, at.x + q.dx, at.y + q.dy), q.rgb) <= limit;
-            if (near && (!found || m.probes.size() > found->probes.size())) found = &m;
+            long away = 0;
+            for (const Probe& q : m.probes) {
+                const int apart = distance2(sample(p, s, at.x + q.dx, at.y + q.dy, l.markPatch), q.rgb);
+                near = near && apart <= limit, away += apart;
+            }
+            if (near && (!found || m.probes.size() > found->probes.size() || (m.probes.size() == found->probes.size() && away < foundAway))) found = &m, foundAway = away;
         }
         if (found) total += found->value;
     }
