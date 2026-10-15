@@ -1,5 +1,6 @@
 // The controllers of the Windows game (play/pad.h, play/input.h): which pads SDL reads, that a pad read by SDL is not read a
-// second time as a raw controller of Windows, and that a button held as a game begins waits to be let go. With --live: what
+// second time as a raw controller of Windows nor a pad XInput reads a second time through SDL, and that a button held as a
+// game begins waits to be let go. With --live: what
 // every connected pad gives, for ten seconds.
 #define NOMINMAX // (as play/main.cpp: pad.h uses std::min)
 #include "../play/input.h"
@@ -54,6 +55,18 @@ int main(int argc, char** argv) {
     check(Pads::rawWanted(0x0F0D, 0x00C1, bySdl), "a HORIPAD is read raw as before");
     check(Pads::rawWanted(0x054C, 0x0CE6, bySdl), "a pad SDL has not opened is read raw as before");
     check(Pads::rawWanted(0x057E, 0x2009, {}), "with SDL reading nothing, every raw controller is read as before");
+
+    // A pad of Sony or Nintendo that XInput reads already (made an Xbox pad by another program) is not read a second time
+    // through SDL: as in the record of a DualShock 4 read twice, Windows listing it with the layout of an Xbox pad and
+    // XInput having one pad.
+    {
+        const Pads::Id ds4{0x054C, 0x05C4}, pro{0x057E, 0x2009}, xbox{0x045E, 0x02EA};
+        check(!Pads::sdlWanted(ds4, {ds4}, 1, 1), "a DualShock 4 that XInput reads is read through SDL as well");
+        check(!Pads::sdlWanted(ds4, {xbox, ds4}, 2, 2), "with an Xbox pad as well, a DualShock 4 that XInput reads is read through SDL");
+        check(Pads::sdlWanted(ds4, {}, 1, 1), "a DualShock 4 Windows does not list as an Xbox pad is not read through SDL");
+        check(Pads::sdlWanted(ds4, {xbox, ds4}, 2, 1), "a DualShock 4 no XInput number reads is not read through SDL");
+        check(Pads::sdlWanted(pro, {ds4}, 1, 1), "a Pro Controller is not read through SDL when another kind is in XInput");
+    }
 
     // The buttons held as a game begins (on a controller the button that chose it in the menu is a rotation): none of
     // them counts until it has been let go.
