@@ -7,8 +7,8 @@
 // And the reading of the real game's screen: the pictures of the window the person chooses (play/realgame_capture_win.h)
 // read with the table (play/realgame_read.h) and followed frame after frame with the rules of the game
 // (play/realgame_follow.h). And the play: the AI plays 2P (play/realgame_drive.h) through a pad of the driver ViGEmBus
-// (play/realgame_pad_win.h), plugged in while it plays or while the person presses it by hand to pick it for 2P in the
-// real game's menus.
+// (play/realgame_pad_win.h), plugged in when the AI first plays or the person first presses it by hand to pick it for 2P
+// in the real game's menus, and kept plugged in until the mode is left.
 #include "../ai/level.h"
 #include "realgame_capture_win.h"
 #include "realgame_drive.h"
@@ -20,7 +20,7 @@
 namespace play {
 
 struct RealGameMode {
-    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_LAG, ROW_TURN, ROW_HAND, ROW_BACK, ROWS };
+    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_LAG, ROW_TURN, ROW_PRESS, ROW_BACK, ROWS };
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
@@ -32,7 +32,7 @@ struct RealGameMode {
 
     void open(int settingsStyle, int settingsLevel) {
         row = ROW_STYLE;
-        stopPlaying(), stopHand();
+        stopPlaying(), stopPress();
         style = settingsStyle ? 1 : 0;
         level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LEVELS ? juraic::ai::LEVELS : settingsLevel;
         stopReading();
@@ -44,6 +44,7 @@ struct RealGameMode {
         else if (row == ROW_LEVEL) level = ((level - 1 + by) % juraic::ai::LEVELS + juraic::ai::LEVELS) % juraic::ai::LEVELS + 1;
         else if (row == ROW_LAG) lag = ((lag + by) % (MAX_LAG + 1) + MAX_LAG + 1) % (MAX_LAG + 1), driver.lag = lag;
         else if (row == ROW_TURN) pad.aTurnsRight = !pad.aTurnsRight;
+        else if (row == ROW_PRESS) pressButton = ((pressButton + by) % PRESS_BUTTONS + PRESS_BUTTONS) % PRESS_BUTTONS;
         else return false;
         return true;
     }
@@ -57,7 +58,16 @@ struct RealGameMode {
     VirtualPad pad;
     realgame::Driver driver;
     bool playing = false; // the AI plays 2P
-    bool byHand = false;  // the keys of this program press the pad (the real game's menus)
+
+    // A press of a button of the pad, asked for to pick it for 2P in the real game's menus (there a pad becomes 2P by a
+    // press of its own): PRESS_WAIT frames after it is asked, the button is held PRESS_HOLD frames. In the wait the
+    // person brings the real game's window to the front: Steam, which takes in the pad as a controller of its own, gives
+    // the real game its buttons only while that window is in front. No key of this program presses the pad.
+    static constexpr int PRESS_WAIT = 5 * 60, PRESS_HOLD = 6, PRESS_BUTTONS = 3;
+    static constexpr USHORT PRESS_BUTTON_BITS[PRESS_BUTTONS] = {XUSB_GAMEPAD_A, XUSB_GAMEPAD_B, XUSB_GAMEPAD_START};
+    static constexpr const wchar_t* PRESS_BUTTON_NAMES[PRESS_BUTTONS] = {L"A", L"B", L"Start"};
+    int pressButton = 0; // (of PRESS_BUTTON_BITS)
+    int pressLeft = -1;  // frames until the button is let go; above PRESS_HOLD: still waiting. -1: no press asked
 
     // The AI `agent` begins to play 2P. False, with the reason in `error`, when it cannot.
     bool startPlaying(std::unique_ptr<juraic::ai::Agent> agent, std::wstring& error) {
@@ -73,22 +83,36 @@ struct RealGameMode {
         driver.stop();
         driver.agent.reset();
         pad.press(0);
-        if (!byHand) pad.stop();
     }
-    bool startHand(std::wstring& error) {
+    // A press asked for (the pad plugged in if it is not). False, with the reason in `error`, when the pad cannot be.
+    bool pressLater(std::wstring& error) {
         if (!pad.running() && !pad.start(error)) return false;
-        byHand = true;
+        pressLeft = PRESS_WAIT + PRESS_HOLD;
         return true;
     }
-    void stopHand() {
-        byHand = false;
-        pad.hold(0);
-        if (!playing) pad.stop();
+    bool pressing() const { return pressLeft >= 0; }
+    // The seconds of the wait before the press (0 while the button is held).
+    int pressSeconds() const { return pressLeft > PRESS_HOLD ? (pressLeft - PRESS_HOLD + 59) / 60 : 0; }
+    void stopPress() {
+        if (pressLeft >= 0) pad.hold(0);
+        pressLeft = -1;
     }
-    // Every frame of the game while the AI plays: the buttons for the frame `now` of the clock (frames of 1/60 s of
-    // QueryPerformanceCounter, as the times of the pictures).
+    // The mode is left: everything stops and the pad is pulled out. Until then the pad stays plugged in once it is
+    // (stopPlaying and stopPress only let its buttons go): a pad pulled out and plugged in again is a new pad to the
+    // real game, which no longer has it as the pad of 2P.
+    void leave() {
+        stopReading(), stopPlaying(), stopPress();
+        pad.stop();
+    }
+    // Every frame of the game: the press asked for, or while the AI plays the buttons for the frame `now` of the clock
+    // (frames of 1/60 s of QueryPerformanceCounter, as the times of the pictures).
     void drive(int64_t now) {
-        if (playing && !byHand) pad.press(driver.tick(follow, now));
+        if (pressLeft >= 0) {
+            --pressLeft;
+            pad.hold(pressLeft >= 0 && pressLeft < PRESS_HOLD ? PRESS_BUTTON_BITS[pressButton] : USHORT(0));
+            return;
+        }
+        if (playing) pad.press(driver.tick(follow, now));
     }
 
     // ---- the reading of the real game's screen ----

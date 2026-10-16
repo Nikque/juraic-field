@@ -692,26 +692,12 @@ struct App {
             const bool saved = realgame::saveBmp(userDirectory / L"realgame" / name, {pixels.data(), w, h, w * 4});
             say(saved ? L"実機の画面を保存しました: realgame\\" + name.wstring() : L"実機の画面を保存できませんでした");
         }
-        // The AI plays 2P: the buttons of this frame (by the clock of the pictures), and its own pad is not read here.
+        // The pad: the press asked for, or while the AI plays 2P the buttons of this frame (by the clock of the pictures);
+        // its own pad is not read here.
         LARGE_INTEGER counter, frequency;
         QueryPerformanceCounter(&counter), QueryPerformanceFrequency(&frequency);
         m.drive((counter.QuadPart / frequency.QuadPart) * 60 + (counter.QuadPart % frequency.QuadPart) * 60 / frequency.QuadPart);
         pads.skipXInput = m.pad.running() ? m.pad.xinputSlot() : -1;
-        if (m.byHand) {
-            // (the keys press the pad: to pick it for 2P in the real game's menus; Esc ends it)
-            unsigned b = 0;
-            if (down(VK_UP)) b |= XUSB_GAMEPAD_DPAD_UP;
-            if (down(VK_DOWN)) b |= XUSB_GAMEPAD_DPAD_DOWN;
-            if (down(VK_LEFT)) b |= XUSB_GAMEPAD_DPAD_LEFT;
-            if (down(VK_RIGHT)) b |= XUSB_GAMEPAD_DPAD_RIGHT;
-            if (down('Z')) b |= XUSB_GAMEPAD_A;
-            if (down('X')) b |= XUSB_GAMEPAD_B;
-            if (down(VK_RETURN)) b |= XUSB_GAMEPAD_START;
-            if (down(VK_BACK)) b |= XUSB_GAMEPAD_BACK;
-            m.pad.hold(USHORT(b));
-            if (pressed(VK_ESCAPE)) m.stopHand(), audio.play(SND_SELECT), forgetKeys();
-            return;
-        }
         const int count = RealGameMode::ROWS;
         if (heldStep(NAV_UP, 6, 6)) m.row = (m.row + count - 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
         if (heldStep(NAV_DOWN, 6, 6)) m.row = (m.row + 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
@@ -738,16 +724,16 @@ struct App {
                 if (!m.startPlaying(std::move(made.agent[1]), error)) say(error);
             }
         }
-        if (ok && m.row == RealGameMode::ROW_HAND) {
+        if (ok && m.row == RealGameMode::ROW_PRESS) {
             audio.play(SND_SELECT);
             std::wstring error;
-            if (m.startHand(error)) forgetKeys();
-            else say(error);
+            if (m.pressing()) m.stopPress();
+            else if (!m.pressLater(error)) say(error);
         }
         if (pressed('S') && m.reading == RealGameMode::Reading::On) m.keepNext();
         if (nav(NAV_BACK) || (ok && m.row == RealGameMode::ROW_BACK)) {
             audio.play(SND_SELECT);
-            m.stopReading(), m.stopPlaying(), m.stopHand();
+            m.leave();
             pads.skipXInput = -1;
             screen = Screen::Menu;
         }
@@ -1411,13 +1397,15 @@ struct App {
         const int seconds = (m.chooseLeft + 59) / 60;
         const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", m.reading == RealGameMode::Reading::Off ? L"読み始める" : L"読むのを止める",
                                                        m.playing ? L"2P の操作を止める" : L"2P を操作する", L"遅れ", L"回転ボタン",
-                                                       L"パッドを手で押す", L"戻る"};
+                                                       m.pressing() ? L"押すのを止める" : L"2P のボタンを押す", L"戻る"};
         const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level),
                                                          m.reading == RealGameMode::Reading::On ? L"読んでいます" : m.reading == RealGameMode::Reading::Choosing ? L"窓を選んでいます" : L"",
                                                          m.playing ? L"操作しています" : L"",
                                                          std::to_wstring(m.lag) + L" フレーム",
                                                          m.pad.aTurnsRight ? L"A で右回転、B で左回転" : L"A で左回転、B で右回転",
-                                                         m.byHand ? L"押しています（Esc で終わり）" : L"",
+                                                         m.pressing() ? (m.pressSeconds() ? L"あと " + std::to_wstring(m.pressSeconds()) + L" 秒で " : std::wstring(L"今 ")) +
+                                                                            RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] + L" を押します"
+                                                                      : L"5 秒後に " + std::wstring(RealGameMode::PRESS_BUTTON_NAMES[m.pressButton]) + L" を 1 回",
                                                          L""};
         for (int i = 0; i < RealGameMode::ROWS; ++i) {
             const float y = 88 + float(i) * 38;
@@ -1445,6 +1433,9 @@ struct App {
             lines.push_back(L"置いた所が分かった組: " + std::to_wstring(m.follow.placements) + L"　止めた予告: " + std::to_wstring(m.follow.held) + L" 回");
             lines.push_back(L"計算した盤面と画面の照らし合わせ: " + std::to_wstring(m.follow.checks) + L" 回中 " + std::to_wstring(m.follow.misses) + L" 回合わない");
         }
+        if (m.pressing() && m.pressSeconds())
+            lines.push_back(L"あと " + std::to_wstring(m.pressSeconds()) + L" 秒で 2P の仮想のパッドが " + RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] +
+                            L" を押します。実機の窓をクリックして前に出してください。");
         if (m.pad.running())
             lines.push_back(L"仮想のパッド: 差し込み中（XInput " + std::to_wstring(m.pad.xinputSlot() + 1) + L" 番）" +
                             (m.playing ? L"　操作した組: " + std::to_wstring(m.driver.played) + L"　画面で位置を直した回数: " + std::to_wstring(m.driver.corrected) : L""));
@@ -1485,7 +1476,7 @@ struct App {
         }
         const wchar_t* notes[] = {L"同じ PC の実機のオフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなた。オンラインの対戦では使えません）。",
                                   L"AI とレベルは開くたびに設定の 2P 側から始まります。仮想のパッドには ViGEmBus のドライバーが要ります。",
-                                  L"「パッドを手で押す」で実機の 2P に仮想のパッドを選んでから、「2P を操作する」を選んでください。"};
+                                  L"「2P のボタンを押す」の後 5 秒の間に実機を前に出すと、仮想のパッドがボタンを押します（実機の 2P に選ぶため）。それから「2P を操作する」へ。"};
         for (int i = 0; i < 3; ++i) gfx.text(notes[i], 0, 592 + float(i) * 18, CANVAS_W, 18, 0, rgb(150, 158, 186), 0);
         gfx.text(L"↑↓ で選ぶ　←→ で変える　Enter で決定　S で今の実機の画面を保存　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
     }

@@ -1,7 +1,7 @@
 #pragma once
 // The mode in which Juraic plays 2P of the real game (play/realgame_win.h), the Windows build: the pad Juraic presses
 // the real game's buttons with. An Xbox 360 pad of the driver ViGEmBus (installed by the person; this program carries
-// only its client, ViGEmClient, third_party/), plugged in while the mode plays and pulled out when it stops or the
+// only its client, ViGEmClient, third_party/), plugged in by the mode and pulled out when the mode is left or the
 // program ends. This program does not read it as a pad of its own (Pads::skipXInput).
 #include "../game/control.h"
 #include <windows.h>
