@@ -99,11 +99,16 @@ public:
 
     // The pair in play is not where the buttons this agent gave would have brought it (an agent that plays a game
     // through another program, whose buttons reach that game late or not at all): the way to the placement chosen is
-    // planned again from where `o` shows the pair. No way left: the pair goes down where it is.
+    // planned again from where `o` shows the pair. No way left to it: the pair goes to the placement nearest to it that
+    // it can still reach (as a choice that came after the pair had fallen behind a column); none: down where it is.
     void steer(const Observation& o) {
         if (o.self().phase != Phase::Control || late || target < 0) return;
         step = 0;
-        if (!planner.plan(o.self().field, o.self().pair, placement(target), o.timing, o.rules.speedPercent, path)) path.buttons.clear();
+        const Player& p = o.self();
+        if (planner.plan(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) return;
+        const int best = nearest(o, p.pair, target);
+        if (best >= 0 && planner.plan(p.field, p.pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best;
+        else path.buttons.clear();
     }
     // The placement the pair in play is brought to (-1: none yet).
     int targetPlacement() const { return target; }
@@ -367,8 +372,15 @@ private:
             return;
         }
         // The pair cannot get there any more: the choice came when it had fallen behind a column.
-        // It goes to the placement it can still reach whose two pieces come down nearest to the
-        // columns chosen; of equal ones the one with the smaller number.
+        const int best = nearest(o, pair, id);
+        if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best;
+        else path.buttons.clear();
+    }
+    // The placement `pair` can still reach whose two pieces come down nearest to the columns of placement `id`; of equal
+    // ones the one with the smaller number. -1: none.
+    int nearest(const Observation& o, const PairControl& pair, int id) {
+        const Player& p = o.self();
+        const unsigned legal = legalPlacements(p.field);
         const Placement want = placement(id);
         int best = -1, bestApart = 0;
         for (int other = 0; other < PLACEMENTS; ++other) {
@@ -379,8 +391,7 @@ private:
             InputPath there;
             if (planner.plan(p.field, pair, t, o.timing, o.rules.speedPercent, there)) best = other, bestApart = apart;
         }
-        if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best;
-        else path.buttons.clear();
+        return best;
     }
 
     InputPlanner planner;
