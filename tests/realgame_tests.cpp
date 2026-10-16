@@ -659,6 +659,27 @@ static void testDriver() {
     // The lag the driver begins with is not the pad's: it takes the lag it measures.
     DriveCounts learnt;
     for (const int padLag : {4, 6}) driveRound(80 + uint64_t(padLag), padLag, false, 2500, learnt, nullptr, nullptr, 2);
+    // The lag begun with a frame more than the pad's (as on the real game: 6 for 5): the pictures show the pair a frame
+    // ahead of the engine, which takes the lag from that at once and puts no pair elsewhere for it.
+    DriveCounts over;
+    for (int k = 0; k < 2; ++k) driveRound(84 + uint64_t(k), 5, false, 2500, over, nullptr, nullptr, 6);
+    check(over.lagTaken == 2 && over.corrected <= 10 && over.hits * 10 >= over.locks * 9,
+          "beginning with a lag a frame more than the pad's, pairs are put elsewhere for it (" + std::to_string(over.corrected) + " times), or the lag is not taken (" +
+              std::to_string(over.lagTaken) + " of 2 rounds), or pairs are not brought where the AI chose (" + std::to_string(over.hits) + " of " + std::to_string(over.locks) + ")");
+    // What a picture tells of the way the turns go (the case of the record of the real game: the engine had the pair in
+    // the first column, child right; the picture showed it in the second, child left - a lag not yet taken, not a turn
+    // the other way round).
+    {
+        PairControl had, seen;
+        had.x = 0, had.y = 11, had.upper = true, had.dir = RIGHT;
+        seen.x = 1, seen.y = 11, seen.upper = false, seen.dir = LEFT;
+        check(Driver::turnShown(had, seen) == 0, "a pair found elsewhere, its child on the other side, is taken for a turn the other way round");
+        seen = had, seen.dir = LEFT;
+        check(Driver::turnShown(had, seen) == -1, "a pair where the engine had it, its child on the other side, is not taken for a turn the other way round");
+        seen = had;
+        check(Driver::turnShown(had, seen) == 1, "a pair as the engine had it is not taken for a turn as sent");
+    }
+    check(learnt.turnsFound == 0, "a pair found elsewhere through a lag not yet taken is taken for turns the other way round (" + std::to_string(learnt.turnsFound) + " of 2 rounds)");
     check(learnt.lagTaken == 2 && learnt.locks >= 40 && learnt.hits * 10 >= learnt.locks * 9,
           "beginning with a lag of 2 through a pad 4 or 6 frames late, the driver does not take the lag measured (" + std::to_string(learnt.lagTaken) + " of 2 rounds) or does not bring the pairs where the AI chose (" +
               std::to_string(learnt.hits) + " of " + std::to_string(learnt.locks) + ")");
@@ -707,16 +728,27 @@ static void testMenus() {
     }
     MenuPresser presser;
     int presses = 0, first = -1;
-    for (int f = 0; f < 3 * MenuPresser::GAP + 5; ++f)
+    for (int f = 0; f < MenuPresser::STEADY + 3 * (MenuPresser::GAP + 1); ++f)
         if (presser.step(Menu::PlayersWaiting)) presses += 1, first = first < 0 ? f : first;
-    check(first == 0 && presses == 4, "on the screen of the players with 2P to be taken, A is not pressed every GAP pictures (" + std::to_string(presses) + ")");
+    check(first == MenuPresser::STEADY - 1 && presses == 4,
+          "on the screen of the players with 2P to be taken, A is not pressed once it has read so STEADY times, and every GAP pictures after (" + std::to_string(presses) + ")");
     MenuPresser idle;
     int none = 0;
     for (const Menu menu : {Menu::None, Menu::Players, Menu::Decided})
         for (int f = 0; f < 100; ++f) none += idle.step(menu);
     check(none == 0, "A is pressed where 2P has nothing to do");
     MenuPresser characters;
-    check(characters.step(Menu::Characters) && !characters.step(Menu::Characters), "on the screen of the characters with 2P to decide, A is not pressed, or pressed again at once");
+    int when = -1;
+    for (int f = 0; f < MenuPresser::STEADY + 3 && when < 0; ++f)
+        if (characters.step(Menu::Characters)) when = f;
+    check(when == MenuPresser::STEADY - 1 && !characters.step(Menu::Characters), "on the screen of the characters with 2P to decide, A is not pressed, or pressed again at once");
+    // (the screen moving on after 2P decided read once as 2P to decide - seen on the real game: no press)
+    MenuPresser leaving;
+    int stray = 0;
+    for (int f = 0; f < 30; ++f) stray += leaving.step(Menu::Decided);
+    stray += leaving.step(Menu::Characters);
+    for (int f = 0; f < 30; ++f) stray += leaving.step(Menu::None);
+    check(stray == 0, "a screen read once as a menu where 2P has to is pressed");
     std::cout << "the menus of the real game read by their points at three sizes; A pressed only where 2P has to\n";
 }
 

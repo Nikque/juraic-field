@@ -119,8 +119,25 @@ private:
     int spawnX = juraic::SPAWN_X;
     bool measured = true;
     int noted = -2; // the placement last noted (notes)
+    // A picture that shows the pair where the engine has it a frame or two later (or earlier): the lag is that many
+    // frames less (more) than the driver's. Seen LAG_HINTS pictures in a row, the lag and the frames of the engine are
+    // moved by it at once (nothing is put right for it: putting the pair where the picture shows it and playing the
+    // frames since again made the buttons in flight count twice - seen on the real game, begun with 6 for 5).
+    static constexpr int LAG_HINTS = 2;
+    int lagHint = 0, lagHints = 0;
     int opposite = 0; // pictures in a row that showed a pair turned the opposite way of the engine's
 
+public:
+    // What a picture of a pair the engine had turned (`had`, not UP) tells of the way the game turns: 1 as the engine
+    // turned it, -1 the opposite way - its axis where the engine had it, the child on the other side -, 0 nothing (a pair
+    // found elsewhere as well is a button taken late or early, not a turn the other way: seen so on the real game).
+    static int turnShown(const juraic::PairControl& had, const juraic::PairControl& seen) {
+        const bool sameAxis = had.x == seen.x && had.y == seen.y && had.upper == seen.upper;
+        if (!sameAxis) return 0;
+        return seen.dir == had.dir ? 1 : seen.dir == (had.dir + 2) % 4 ? -1 : 0;
+    }
+
+private:
     // The buttons held as they go to the pad: the two turns the other way round when the game turns so.
     uint8_t sent(uint8_t b) const {
         if (!turnsSwapped) return b;
@@ -129,6 +146,13 @@ private:
 
     void note(int64_t at, const std::string& line) {
         if (notes) notes->emplace_back(at, line);
+    }
+    // Two places of a pair of colours `c` cover the same cells (a pair of one colour either way round).
+    static bool samePlace(const juraic::PairControl& a, const juraic::PairControl& b, juraic::Pair c) {
+        int ax, ah, cx, ch, sx, sh, tx, th;
+        pairHalves(a, ax, ah, cx, ch);
+        pairHalves(b, sx, sh, tx, th);
+        return (ax == sx && ah == sh && cx == tx && ch == th) || (c.axis == c.child && ax == tx && ah == th && cx == sx && ch == sh);
     }
     static std::string placementText(int id) {
         if (id < 0) return "nothing";
@@ -241,20 +265,35 @@ private:
         if (i == past.size() || past[i].state.phase != juraic::Phase::Control) return;
         juraic::PairControl& had = past[i].state.pair;
         const juraic::PairControl& seen = side.pair.at;
-        int ax, ah, cx, ch, sx, sh, tx, th;
-        pairHalves(had, ax, ah, cx, ch);
-        pairHalves(seen, sx, sh, tx, th);
         const juraic::Pair c = past[i].state.colors;
-        const bool sameCells = (ax == sx && ah == sh && cx == tx && ch == th) || (c.axis == c.child && ax == tx && ah == th && cx == sx && ch == sh);
+        const bool sameCells = samePlace(had, seen, c);
         // (a pair of two colours turned: the way it shows against the engine's)
         if (c.axis != c.child && had.dir != juraic::UP) {
-            if (sameCells) opposite = 0;
-            else if (seen.dir == (had.dir + 2) % 4 && ++opposite >= TURNS_OPPOSITE) {
+            const int way = turnShown(had, seen);
+            if (way > 0) opposite = 0;
+            else if (way < 0 && ++opposite >= TURNS_OPPOSITE) {
                 turnsSwapped = !turnsSwapped, opposite = 0;
                 note(t.frame, std::string("the turns are taken the other way round: the buttons of the two turns are now sent ") + (turnsSwapped ? "swapped" : "as they are"));
             }
         }
-        if (sameCells) return;
+        if (sameCells) {
+            lagHint = lagHints = 0;
+            return;
+        }
+        for (const int by : {1, -1, 2, -2}) {
+            size_t j = 0;
+            while (j < past.size() && past[j].frame != t.frame + by) ++j;
+            if (j == past.size() || past[j].state.phase != juraic::Phase::Control || !samePlace(past[j].state.pair, seen, c)) continue;
+            lagHints = by == lagHint ? lagHints + 1 : 1, lagHint = by;
+            if (lagHints >= LAG_HINTS && lag - by >= 0) {
+                note(t.frame, "the lag taken from the pictures: " + std::to_string(lag - by) + " frames (was " + std::to_string(lag) + ")");
+                lag -= by, next -= by;
+                for (Past& p : past) p.frame -= by;
+                lagHint = lagHints = 0;
+            }
+            return;
+        }
+        lagHint = lagHints = 0;
         ++corrected;
         note(t.frame, "2P pair " + std::to_string(pairsSeen) + " put right: the engine had " + controlText(had) + ", the picture shows " + controlText(seen));
         had.x = seen.x, had.y = seen.y, had.dir = seen.dir, had.upper = seen.upper;

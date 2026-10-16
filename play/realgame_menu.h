@@ -69,24 +69,29 @@ inline Menu readMenu(const Picture& p, const MenuLayout& m) {
 }
 
 // When the pad of 2P presses A in the menus, picture after picture: on the screen of the players while its row is to be
-// taken, on the screen of the characters until 2P is decided (a character, then a way of play); after a press, GAP
-// pictures pass before the next (the screen takes the press and moves on).
+// taken, on the screen of the characters until 2P is decided (a character, then a way of play) - once the screen has
+// read so STEADY pictures in a row (a screen moving on reads as another for a picture: seen on the real game, where
+// the screen after the characters read once as 2P to decide); after a press, GAP pictures pass before the next (the
+// screen takes the press and moves on).
 class MenuPresser {
 public:
     static constexpr int GAP = 40;
+    static constexpr int STEADY = 8;
     int presses = 0;
     bool step(Menu m) {
+        steady = m == last ? steady + 1 : 1, last = m;
         if (wait > 0) {
             --wait;
             return false;
         }
-        if (m != Menu::PlayersWaiting && m != Menu::Characters) return false;
+        if ((m != Menu::PlayersWaiting && m != Menu::Characters) || steady < STEADY) return false;
         wait = GAP, ++presses;
         return true;
     }
 
 private:
-    int wait = 0;
+    int wait = 0, steady = 0;
+    Menu last = Menu::None;
 };
 
 inline const char* menuName(Menu m) {
