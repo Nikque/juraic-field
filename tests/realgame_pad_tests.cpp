@@ -89,6 +89,10 @@ static void testReading() {
         const bool started = m.startReading(w, folder, "a window made by the test", error);
         if (!started) std::wprintf(L"the capture did not start: %ls\n", error.c_str());
         check(started, "a window is not read");
+        // (the window found again by its program, as the real game's is found when the screen of the mode opens)
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        check(_wcsicmp(play::windowProgram(w).c_str(), self) == 0 && play::findProgramWindow(self) == w, "a window is not found by its program");
         pumpFor(w, 1500);
         int64_t pictures = 0;
         bool open = false;

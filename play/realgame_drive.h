@@ -125,6 +125,10 @@ private:
     // frames since again made the buttons in flight count twice - seen on the real game, begun with 6 for 5).
     static constexpr int LAG_HINTS = 2;
     int lagHint = 0, lagHints = 0;
+    // The real game shows a turn some frames after it takes it (the pair the way it was, or not to be read, meanwhile:
+    // seen in its record, a move with it shown at once): a picture of the pair where the engine has it, turned the way
+    // the engine had it up to TURN_SHOWN frames before, puts nothing right.
+    static constexpr int TURN_SHOWN = 3;
     int opposite = 0; // pictures in a row that showed a pair turned the opposite way of the engine's
 
 public:
@@ -280,7 +284,14 @@ private:
             lagHint = lagHints = 0;
             return;
         }
+        // (a turn not shown yet)
+        if (had.x == seen.x && had.y == seen.y && had.upper == seen.upper)
+            for (size_t j = i; j-- > 0 && past[j].frame >= t.frame - TURN_SHOWN;)
+                if (past[j].state.phase == juraic::Phase::Control && past[j].state.pair.dir == seen.dir) return;
+        // (a picture ahead of the engine tells of the lag; one behind it only when the pair is in another column: a turn
+        //  alone is shown late by itself)
         for (const int by : {1, -1, 2, -2}) {
+            if (by < 0 && had.x == seen.x) continue; // (behind the engine in its turn alone: a turn shown late)
             size_t j = 0;
             while (j < past.size() && past[j].frame != t.frame + by) ++j;
             if (j == past.size() || past[j].state.phase != juraic::Phase::Control || !samePlace(past[j].state.pair, seen, c)) continue;
@@ -290,6 +301,7 @@ private:
                 lag -= by, next -= by;
                 for (Past& p : past) p.frame -= by;
                 lagHint = lagHints = 0;
+                lags.clear(); // (measured again from now on: the lags before were measured against the other one)
             }
             return;
         }

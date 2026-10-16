@@ -28,6 +28,43 @@
 
 namespace play {
 
+// The program (its image file) of the process of a window; empty when it cannot be had.
+inline std::wstring windowProgram(HWND w) {
+    DWORD id = 0;
+    GetWindowThreadProcessId(w, &id);
+    const HANDLE process = id ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, id) : nullptr;
+    if (!process) return {};
+    wchar_t path[MAX_PATH * 2];
+    DWORD size = DWORD(std::size(path));
+    const bool got = QueryFullProcessImageNameW(process, 0, path, &size) != 0;
+    CloseHandle(process);
+    return got ? std::wstring(path, size) : std::wstring();
+}
+// A window that may be the real game's: shown, of the top, no bar of tools, at least 320 x 180 inside.
+inline bool gameLikeWindow(HWND w, RECT& inside) {
+    return w && w == GetAncestor(w, GA_ROOT) && w != GetShellWindow() && IsWindowVisible(w) && !IsIconic(w) && !(GetWindowLongPtrW(w, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) &&
+           GetClientRect(w, &inside) && inside.right >= 320 && inside.bottom >= 180;
+}
+// The window of the program `program` that may be the real game's, the largest inside (nullptr: none).
+inline HWND findProgramWindow(const std::wstring& program) {
+    struct Search {
+        const std::wstring* program;
+        HWND found = nullptr;
+        long area = 0;
+    } s{&program};
+    EnumWindows(
+        [](HWND w, LPARAM data) -> BOOL {
+            auto& s = *reinterpret_cast<Search*>(data);
+            RECT inside{};
+            if (!gameLikeWindow(w, inside) || _wcsicmp(windowProgram(w).c_str(), s.program->c_str()) != 0) return TRUE;
+            const long area = long(inside.right) * long(inside.bottom);
+            if (area > s.area) s.found = w, s.area = area;
+            return TRUE;
+        },
+        LPARAM(&s));
+    return s.found;
+}
+
 struct RealGameMode {
     enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_PRESS, ROW_BACK, ROWS };
     int row = ROW_STYLE;
@@ -57,6 +94,7 @@ struct RealGameMode {
 
     void open(int settingsStyle, int settingsLevel) {
         row = ROW_STYLE;
+        autoRead = true, notTheGame = nullptr;
         stopPlaying(), stopPress();
         style = settingsStyle ? 1 : 0;
         level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LEVELS ? juraic::ai::LEVELS : settingsLevel;
@@ -184,6 +222,17 @@ struct RealGameMode {
     // is the one read); On: its pictures are read.
     enum class Reading { Off, Choosing, On };
     Reading reading = Reading::Off;
+    // The real game's window is found by this program as the screen of the mode opens (autoRead): the window of the
+    // program read last time (WINDOW_FILE in the folder of one's own files), otherwise the window the person brings to
+    // the front, of the shape of the real game's (16:9). A window read is the real game's once a menu of it or a round
+    // has been read (confirmed: its program is kept in WINDOW_FILE); one in which neither is read for NOT_THE_GAME frames
+    // is let go, and another is looked for.
+    static constexpr const wchar_t* WINDOW_FILE = L"realgame_window.txt";
+    static constexpr int NOT_THE_GAME = 20 * 60;
+    bool autoRead = true;
+    bool confirmed = false;
+    int64_t readSince = 0; // (the frame of the clock reading began in)
+    HWND notTheGame = nullptr;
     static constexpr int CHOOSE_FRAMES = 10 * 60;
     int chooseLeft = 0;
     // The table: the file LAYOUT_FILE in the folder of one's own files when there is one (read when reading begins),

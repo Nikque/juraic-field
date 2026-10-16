@@ -680,6 +680,7 @@ struct App {
     void updateRealGame() {
         RealGameMode& m = realGame;
         m.pump();
+        if (!selfTest && m.autoRead) findRealGame();
         if (m.reading == RealGameMode::Reading::Choosing) chooseRealGame();
         if (m.reading == RealGameMode::Reading::On && !IsWindow(m.capture.window())) m.stopReading(), say(L"読んでいた窓が閉じられました");
         std::vector<uint8_t> pixels;
@@ -705,9 +706,10 @@ struct App {
         if (change && m.change(change) && heard) audio.play(SND_ROTATE);
         const bool ok = nav(NAV_OK); // (read once in a frame: a key is down in it only the first time it is asked)
         if (ok && m.row == RealGameMode::ROW_READ) {
+            // (reading is begun by itself; this row stops it, and begins it again)
             audio.play(SND_SELECT);
-            if (m.reading == RealGameMode::Reading::Off) m.reading = RealGameMode::Reading::Choosing, m.chooseLeft = RealGameMode::CHOOSE_FRAMES, chosenFront = nullptr, chosenFor = 0;
-            else m.stopReading();
+            if (m.reading == RealGameMode::Reading::Off) m.autoRead = true, m.notTheGame = nullptr;
+            else m.autoRead = false, m.stopReading();
         }
         if (ok && m.row == RealGameMode::ROW_PLAY) {
             audio.play(SND_SELECT);
@@ -738,33 +740,69 @@ struct App {
         std::wstring error;
         if (!m.startPlaying(std::move(made.agent[1]), error)) say(error);
     }
-    // The real game's window is chosen: the window the person brings to the front and keeps there for half a second
-    // (this window is not brought back by itself). Not the desktop, a bar of tools nor a window smaller than 320 x 180.
+    // The real game's window found by itself (RealGameMode::autoRead): the window of the program kept, at once; otherwise
+    // the window brought to the front is chosen (chooseRealGame). A window read is confirmed or let go.
+    void findRealGame() {
+        RealGameMode& m = realGame;
+        if (m.reading == RealGameMode::Reading::Off) {
+            std::wifstream kept(userDirectory / RealGameMode::WINDOW_FILE);
+            std::wstring program;
+            std::getline(kept, program);
+            const HWND w = program.empty() ? nullptr : findProgramWindow(program);
+            if (w && w != m.notTheGame) {
+                beginReading(w);
+                return;
+            }
+            m.reading = RealGameMode::Reading::Choosing, chosenFront = nullptr, chosenFor = 0;
+            return;
+        }
+        if (m.reading != RealGameMode::Reading::On || m.confirmed) return;
+        bool seen = false;
+        {
+            const RealGameMode::Hold hold(m.state);
+            seen = m.menu != realgame::Menu::None || m.tracker.rounds > 0;
+        }
+        if (seen) {
+            m.confirmed = true;
+            std::wofstream keep(userDirectory / RealGameMode::WINDOW_FILE);
+            keep << windowProgram(m.capture.window()) << L"\n";
+        } else if (RealGameMode::clockFrame() - m.readSince > RealGameMode::NOT_THE_GAME) {
+            m.notTheGame = m.capture.window();
+            m.stopReading();
+            say(L"読んでいた窓に実機の画面が見えないので、別の窓を探します");
+        }
+    }
+    // The window brought to the front and kept there for half a second (this window is not brought back by itself);
+    // found by itself, it has the shape of the real game's window (16:9) and is not one let go.
     HWND chosenFront = nullptr;
     int chosenFor = 0;
     void chooseRealGame() {
         RealGameMode& m = realGame;
         const HWND front = GetForegroundWindow();
         RECT inside{};
-        const bool fits = front && front != window && front == GetAncestor(front, GA_ROOT) && front != GetShellWindow() && IsWindowVisible(front) &&
-                          !(GetWindowLongPtrW(front, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) && GetClientRect(front, &inside) && inside.right >= 320 && inside.bottom >= 180;
+        const bool shaped = gameLikeWindow(front, inside) && std::abs(float(inside.bottom) / float(inside.right) - 9.f / 16.f) < 0.02f;
+        const bool fits = front != window && (m.autoRead ? shaped && front != m.notTheGame : gameLikeWindow(front, inside));
         chosenFor = fits && front == chosenFront ? chosenFor + 1 : 0;
         chosenFront = fits ? front : nullptr;
-        if (chosenFor >= 30) {
-            std::wstring error;
-            // (the head of the record: this build, the AI, the window read)
-            const std::string about = std::string("Juraic Field, built ") + __DATE__ + " " + __TIME__ + "\nAI " + (m.style ? "x3q" : "x3") + ", level " + std::to_string(m.level) +
-                                      "\nthe window read: " + std::to_string(inside.right) + " x " + std::to_string(inside.bottom) + " inside";
-            if (m.startReading(front, userDirectory, about, error)) {
-                say(!m.padError.empty() ? m.padError : m.recordError.empty() ? L"前に出た窓を読み始めました" : m.recordError);
-                // (from the menus on: 2P is picked there by its pad, and the AI plays the pairs of 2P when they come)
-                if (m.padError.empty()) startRealGameAI();
-            } else {
-                say(error);
-            }
-        } else if (--m.chooseLeft <= 0) {
+        if (chosenFor >= 30) beginReading(front);
+        else if (!m.autoRead && --m.chooseLeft <= 0) m.reading = RealGameMode::Reading::Off, say(L"窓が選ばれませんでした");
+    }
+    void beginReading(HWND w) {
+        RealGameMode& m = realGame;
+        RECT inside{};
+        GetClientRect(w, &inside);
+        std::wstring error;
+        // (the head of the record: this build, the AI, the window read)
+        const std::string about = std::string("Juraic Field, built ") + __DATE__ + " " + __TIME__ + "\nAI " + (m.style ? "x3q" : "x3") + ", level " + std::to_string(m.level) +
+                                  "\nthe window read: " + std::to_string(inside.right) + " x " + std::to_string(inside.bottom) + " inside";
+        if (m.startReading(w, userDirectory, about, error)) {
+            m.confirmed = false, m.readSince = RealGameMode::clockFrame();
+            say(!m.padError.empty() ? m.padError : m.recordError.empty() ? L"実機の窓を読み始めました" : m.recordError);
+            // (from the menus on: 2P is picked there by its pad, and the AI plays the pairs of 2P when they come)
+            if (m.padError.empty()) startRealGameAI();
+        } else {
             m.reading = RealGameMode::Reading::Off;
-            say(L"窓が選ばれませんでした");
+            say(error);
         }
     }
 #endif
@@ -1424,10 +1462,11 @@ struct App {
         // What is known of the reading.
         std::vector<std::wstring> lines;
         if (m.reading == RealGameMode::Reading::Off) {
-            lines.push_back(L"「読み始める」で、10 秒の間に実機の窓をクリックして前に出してください。");
-            lines.push_back(L"前に出た窓の画面を読みます。実機のボタンは、仮想のパッドでだけ押します。");
+            lines.push_back(L"読んでいません。「読み始める」で、実機の窓をまた探します。");
+            lines.push_back(L"実機のボタンは、仮想のパッドでだけ押します。");
         } else if (m.reading == RealGameMode::Reading::Choosing) {
-            lines.push_back(L"実機の窓をクリックして前に出してください（あと " + std::to_wstring(seconds) + L" 秒）。");
+            lines.push_back(m.autoRead ? std::wstring(L"実機の窓を探しています。実機の窓をクリックして前に出すと、それを読みます（次からは自分で見つけます）。")
+                                       : L"実機の窓をクリックして前に出してください（あと " + std::to_wstring(seconds) + L" 秒）。");
         } else {
             lines.push_back(L"読んでいる窓の中身: " + std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) + L"（表の基準 " + std::to_wstring(m.layout.baseWidth) + L" × " +
                             std::to_wstring(m.layout.baseHeight) + L"）");
@@ -1491,7 +1530,7 @@ struct App {
             gfx.text(L"組 " + std::to_wstring(t.pairs), x0, bottom + 60, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
         }
         const wchar_t* notes[] = {L"同じ PC の実機のオフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなた。オンラインの対戦では使えません）。",
-                                  L"にんずうセレクトの前に「読み始める」を選ぶと、2P の欄・キャラクター・操作の種類は Juraic が自分で選び、対戦が始まると 2P を操作します。",
+                                  L"この画面を開くと Juraic が実機の窓を読み始め、2P の欄・キャラクター・操作の種類を選び、対戦が始まると 2P を操作します。",
                                   L"AI とレベルは開くたびに設定の 2P 側から始まります。仮想のパッドには ViGEmBus のドライバーが要ります。"};
         for (int i = 0; i < 3; ++i) gfx.text(notes[i], 0, 592 + float(i) * 18, CANVAS_W, 18, 0, rgb(150, 158, 186), 0);
         gfx.text(L"↑↓ で選ぶ　←→ で変える　Enter で決定　S で今の実機の画面を保存　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);

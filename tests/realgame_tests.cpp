@@ -590,9 +590,10 @@ struct DriveCounts {
 
 // A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
 // frame sooner or later). startLag: the lag the driver begins with (-1: the pad's). swapped: the pad turns the other way
-// round from what the driver sends (as a real game whose buttons are the other way round).
+// round from what the driver sends (as a real game whose buttons are the other way round). turnShownLate: a pair turned
+// is drawn the way it was for that many frames more (as the real game shows a turn: seen in its record).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
-                       std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false) {
+                       std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -617,8 +618,17 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     const int64_t first = clock;
     ai::Observation o;
     int target = -1, played = 0; // (the engine of the Driver plays `lag` frames ahead of the round: the target of the pair it played last)
+    int oldFor = 0;
+    uint8_t oldDir = 0;
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
-        draw(canvas, l, r, false, noise);
+        if (oldFor > 0) {
+            Round shown = r;
+            shown.player[1].pair.dir = oldDir;
+            draw(canvas, l, shown, false, noise);
+            --oldFor;
+        } else {
+            draw(canvas, l, r, false, noise);
+        }
         follow.step(read(canvas.picture(), l), clock);
         sent[size_t(clock - first)] = d.tick(follow, clock);
         if (d.played != played) played = d.played, target = -1;
@@ -634,7 +644,9 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         buttons[1] = from >= first ? sent[size_t(from - first)] : 0;
         if (swapped) buttons[1] = uint8_t((buttons[1] & ~(BTN_CW | BTN_CCW)) | (buttons[1] & BTN_CW ? BTN_CCW : 0) | (buttons[1] & BTN_CCW ? BTN_CW : 0));
         PlayerEvents e[2];
+        const uint8_t dirBefore = r.player[1].pair.dir;
         r.step(buttons, e);
+        if (turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = turnShownLate;
         // (a pair the AI found no placement for - the field full - is not counted)
         if (e[1].locked && target >= 0) n.locks += 1, n.hits += placementId(r.player[1].pair.placement()) == target;
         ++n.frames;
@@ -666,6 +678,19 @@ static void testDriver() {
     check(over.lagTaken == 2 && over.corrected <= 10 && over.hits * 10 >= over.locks * 9,
           "beginning with a lag a frame more than the pad's, pairs are put elsewhere for it (" + std::to_string(over.corrected) + " times), or the lag is not taken (" +
               std::to_string(over.lagTaken) + " of 2 rounds), or pairs are not brought where the AI chose (" + std::to_string(over.hits) + " of " + std::to_string(over.locks) + ")");
+    // A turn shown two frames late (as the real game shows it): pictures of the pair the way it was are no pair elsewhere.
+    DriveCounts late;
+    for (int k = 0; k < 2; ++k) driveRound(96 + uint64_t(k), 5, false, 2500, late, nullptr, nullptr, -1, false, 2);
+    check(late.turnsFound == 0 && late.corrected <= 10 && late.hits * 10 >= late.locks * 9,
+          "with turns shown two frames late, pairs are put elsewhere (" + std::to_string(late.corrected) + " times), the turns are taken the other way round (" +
+              std::to_string(late.turnsFound) + "), or pairs are not brought where the AI chose (" + std::to_string(late.hits) + " of " + std::to_string(late.locks) + ")");
+    // A machine under load, all of it at once: a pad now and then a frame early or late, turns shown two frames late, the
+    // lag begun a frame more than the pad's.
+    DriveCounts heavy;
+    for (int k = 0; k < 2; ++k) driveRound(98 + uint64_t(k), 5, true, 2500, heavy, nullptr, nullptr, 6, false, 2);
+    check(heavy.turnsFound == 0 && heavy.hits * 10 >= heavy.locks * 9,
+          "on a machine under load the turns are taken the other way round (" + std::to_string(heavy.turnsFound) + "), or pairs are not brought where the AI chose (" +
+              std::to_string(heavy.hits) + " of " + std::to_string(heavy.locks) + ")");
     // What a picture tells of the way the turns go (the case of the record of the real game: the engine had the pair in
     // the first column, child right; the picture showed it in the second, child left - a lag not yet taken, not a turn
     // the other way round).
