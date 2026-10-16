@@ -752,7 +752,10 @@ struct App {
         chosenFront = fits ? front : nullptr;
         if (chosenFor >= 30) {
             std::wstring error;
-            if (m.startReading(front, userDirectory, error)) say(L"前に出た窓を読み始めました");
+            // (the head of the record: this build, the AI, the window read)
+            const std::string about = std::string("Juraic Field, built ") + __DATE__ + " " + __TIME__ + "\nAI " + (m.style ? "x3q" : "x3") + ", level " + std::to_string(m.level) +
+                                      "\nthe window read: " + std::to_string(inside.right) + " x " + std::to_string(inside.bottom) + " inside";
+            if (m.startReading(front, userDirectory, about, error)) say(m.recordError.empty() ? L"前に出た窓を読み始めました" : m.recordError);
             else say(error);
         } else if (--m.chooseLeft <= 0) {
             m.reading = RealGameMode::Reading::Off;
@@ -1436,6 +1439,8 @@ struct App {
         if (m.pressing() && m.pressSeconds())
             lines.push_back(L"あと " + std::to_wstring(m.pressSeconds()) + L" 秒で 2P の仮想のパッドが " + RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] +
                             L" を押します。実機の窓をクリックして前に出してください。");
+        if (m.record.isOpen())
+            lines.push_back(L"記録: " + m.record.folder().wstring() + L"（画像 " + std::to_wstring(m.record.picturesTaken()) + L" 枚）");
         if (m.pad.running())
             lines.push_back(L"仮想のパッド: 差し込み中（XInput " + std::to_wstring(m.pad.xinputSlot() + 1) + L" 番）" +
                             (m.playing ? L"　操作した組: " + std::to_wstring(m.driver.played) + L"　画面で位置を直した回数: " + std::to_wstring(m.driver.corrected) : L""));

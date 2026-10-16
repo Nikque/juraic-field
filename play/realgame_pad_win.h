@@ -54,6 +54,8 @@ public:
         client = nullptr, pad = nullptr, added = false, slot = -1;
     }
     bool running() const { return added; }
+    // The buttons the pad holds now (XUSB_GAMEPAD_*).
+    USHORT heldButtons() const { return last == 0xFFFF ? 0 : last; }
     // The number XInput gives the pad (-1: not known).
     int xinputSlot() const { return slot; }
 

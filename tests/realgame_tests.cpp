@@ -13,6 +13,10 @@
 //     `lag` frames after they are sent: every pair goes where the AI chose; with a pad that is now and then a frame
 //     early or late, the pair is found elsewhere at times, put right and still brought where the AI chose. The lag
 //     measured from the screen is that of the pad.
+//  6. The record of a reading (play/realgame_log.h): the readings and the buttons written are read back the same, the
+//     lines of events.txt are there, pictures are kept every PICTURE_EVERY frames and when asked for (at most one in
+//     PICTURE_GAP frames, MAX_PICTURES in all) and written as they were; the driver noting what it does sends the same
+//     buttons as without, and notes each pair begun, the placement chosen, a pair put right and the lag measured.
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
 //     Followed with the rules of the game (Follower): where each pair came to rest is found, the pieces reckoned are
 //     those read as the next pair appears, and a notice of more than the chains can have sent is held back.
@@ -27,8 +31,10 @@
 #endif
 #include "../ai/agents.h"
 #include "../play/realgame_drive.h"
+#include "../play/realgame_log.h"
 #include <chrono>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -520,7 +526,8 @@ struct DriveCounts {
     long frames = 0, locks = 0, hits = 0, corrected = 0, played = 0, lagRight = 0, lagRounds = 0;
 };
 
-static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n) {
+static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
+                       std::vector<uint8_t>* sentOut = nullptr) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -534,6 +541,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     Follower follow;
     Driver d;
     d.lag = lag, d.rules = rules, d.agent = ai::makeAgent("x3", narrow);
+    d.notes = notes;
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
@@ -567,6 +575,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     }
     n.corrected += d.corrected, n.played += d.played;
     n.lagRounds += 1, n.lagRight += d.measuredLag() == lag;
+    if (sentOut) *sentOut = sent;
 }
 
 static void testDriver() {
@@ -583,6 +592,94 @@ static void testDriver() {
     std::cout << "the AI playing 2P through the screen and a pad: late as said, " << exact.hits << " pairs of " << exact.locks
               << " where it chose and none found elsewhere, the lag measured as it was; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
               << shaky.locks << " went where it chose\n";
+}
+
+// ---- 6. the record of a reading -----------------------------------------------------------------------------------
+
+static bool hasNote(const std::vector<std::pair<int64_t, std::string>>& notes, const std::string& part) {
+    for (const auto& [at, line] : notes)
+        if (line.find(part) != std::string::npos) return true;
+    return false;
+}
+
+static void testRecord(const std::string& folder) {
+    const std::filesystem::path dir = std::filesystem::path(folder) / "realgame-record-test";
+    std::filesystem::remove_all(dir);
+    Rng rng(11);
+    Reading a, b;
+    for (int s = 0; s < 2; ++s)
+        for (int x = 0; x < W; ++x)
+            for (int k = 0; k < play::realgame::POINTS; ++k) a.side[s].point[x][k] = Cell(rng.below(9)), b.side[s].point[x][k] = Cell(rng.below(9));
+    a.side[1].notice = 17, a.side[0].next[1] = {3, 4}, a.side[0].nextRead[1] = true, b.side[0].unsure = 5;
+    const Layout l = sampleLayout();
+    Canvas pic(40, 24, l);
+    for (uint8_t& v : pic.pixels) v = uint8_t(rng.below(256));
+    for (size_t i = 3; i < pic.pixels.size(); i += 4) pic.pixels[i] = 255; // (a picture of a window is opaque; BMP keeps no opacity)
+    {
+        Record r;
+        check(r.open(dir, "the head\nof the record"), "the record is not made");
+        r.reading(a, 1000, 2240, 1260);
+        r.pad({1000, BTN_LEFT | BTN_CW, 0x1004, 1});
+        r.reading(b, 1001, 2240, 1260);
+        r.event(1001, "a line");
+        // Pictures: frame 1000 kept (none before), 1010 not (too soon), 1020 asked for and kept, 1030 asked for and not
+        // (too soon after 1020), then 1000 + PICTURE_EVERY kept.
+        check(r.offer(pic.picture(), 1000) && !r.offer(pic.picture(), 1010), "the pictures at any time are not kept every PICTURE_EVERY frames");
+        r.ask("miss");
+        check(r.offer(pic.picture(), 1020), "the picture asked for is not kept");
+        r.ask("doubt");
+        check(!r.offer(pic.picture(), 1030), "a picture asked for is kept sooner than PICTURE_GAP frames after the last");
+        check(r.offer(pic.picture(), 1000 + Record::PICTURE_EVERY), "the picture at any time is not kept after PICTURE_EVERY frames");
+        r.close();
+    }
+    RecordReader in;
+    check(in.open(dir / "readings.bin"), "readings.bin is not read back");
+    Reading back;
+    int64_t frame = 0;
+    int w = 0, h = 0;
+    PadRecord p;
+    const auto same = [](const Reading& x, const Reading& y) { return std::memcmp(&x.side[0], &y.side[0], sizeof(SideRead)) == 0 && std::memcmp(&x.side[1], &y.side[1], sizeof(SideRead)) == 0; };
+    check(in.next(back, frame, w, h, p) == RECORD_READING && frame == 1000 && w == 2240 && h == 1260 && same(back, a), "the first reading is read back otherwise");
+    check(in.next(back, frame, w, h, p) == RECORD_PAD && p.frame == 1000 && p.buttons == (BTN_LEFT | BTN_CW) && p.pad == 0x1004 && p.by == 1, "the buttons are read back otherwise");
+    check(in.next(back, frame, w, h, p) == RECORD_READING && frame == 1001 && same(back, b), "the second reading is read back otherwise");
+    check(in.next(back, frame, w, h, p) == 0, "readings.bin has more than was written");
+    in.close();
+    std::ifstream events(dir / "events.txt", std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(events)), std::istreambuf_iterator<char>());
+    events.close();
+    check(text.rfind("the head\nof the record\n", 0) == 0 && text.find("1001 a line\n") != std::string::npos, "events.txt does not have the head and the line");
+    for (const std::string& name : std::vector<std::string>{"1000.bmp", "1020-miss.bmp", std::to_string(1000 + Record::PICTURE_EVERY) + ".bmp"}) {
+        std::vector<uint8_t> pixels;
+        check(loadBmp(dir / name, pixels, w, h) && w == pic.width && h == pic.height && pixels == pic.pixels, "the picture " + name + " is not written as it was");
+        check(text.find("picture " + name) != std::string::npos, "events.txt does not name the picture " + name);
+    }
+    check(!std::filesystem::exists(dir / "1010.bmp") && !std::filesystem::exists(dir / "1030-doubt.bmp"), "a picture is kept that was not wanted");
+    // At most MAX_PICTURES.
+    {
+        Record r;
+        check(r.open(dir / "many", ""), "the record is not made");
+        int taken = 0;
+        for (int i = 0; i < Record::MAX_PICTURES + 20; ++i) {
+            taken += r.offer(pic.picture(), int64_t(i) * Record::PICTURE_EVERY);
+            std::this_thread::sleep_for(std::chrono::milliseconds(3)); // (time for the writer: none dropped as four behind)
+        }
+        r.close();
+        int files = 0;
+        for (const auto& e : std::filesystem::directory_iterator(dir / "many")) files += e.path().extension() == ".bmp";
+        check(taken == Record::MAX_PICTURES && files == Record::MAX_PICTURES, "not MAX_PICTURES pictures are kept: " + std::to_string(taken) + ", " + std::to_string(files) + " written");
+    }
+    std::filesystem::remove_all(dir);
+    // The driver noting what it does: the same buttons, and the notes.
+    DriveCounts plain, noted, shakyNoted;
+    std::vector<uint8_t> sentPlain, sentNoted;
+    std::vector<std::pair<int64_t, std::string>> notes, shakyNotes;
+    driveRound(62, 2, false, 1500, plain, nullptr, &sentPlain);
+    driveRound(62, 2, false, 1500, noted, &notes, &sentNoted);
+    check(sentPlain == sentNoted && plain.hits == noted.hits, "the driver noting what it does sends other buttons");
+    check(hasNote(notes, " begun") && hasNote(notes, "brought to column") && hasNote(notes, "lag measured: 2 frames"), "the driver does not note the pairs begun, the placements or the lag");
+    driveRound(71, 2, true, 1500, shakyNoted, &shakyNotes);
+    check(shakyNoted.corrected == 0 || hasNote(shakyNotes, "put right: the engine had"), "the driver does not note a pair put right");
+    std::cout << "the record of a reading: read back the same, pictures kept as they should be; the driver noting sends the same buttons (" << notes.size() << " notes)\n";
 }
 
 static void testPicture(const std::string& folder) {
@@ -609,6 +706,7 @@ int main(int argc, char** argv) {
         testNoticeCeiling();
         testDriver();
         testPicture(argc > 1 ? argv[1] : ".");
+        testRecord(argc > 1 ? argv[1] : ".");
         testRounds();
     } catch (const std::exception& e) {
         std::cerr << "FAILED: " << e.what() << '\n';

@@ -13,9 +13,14 @@
 #include "realgame_capture_win.h"
 #include "realgame_drive.h"
 #include "realgame_follow.h"
+#include "realgame_log.h"
 #include "realgame_pad_win.h"
+#include <ctime>
 #include <deque>
 #include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace play {
 
@@ -66,6 +71,7 @@ struct RealGameMode {
     static constexpr int PRESS_WAIT = 5 * 60, PRESS_HOLD = 6, PRESS_BUTTONS = 3;
     static constexpr USHORT PRESS_BUTTON_BITS[PRESS_BUTTONS] = {XUSB_GAMEPAD_A, XUSB_GAMEPAD_B, XUSB_GAMEPAD_START};
     static constexpr const wchar_t* PRESS_BUTTON_NAMES[PRESS_BUTTONS] = {L"A", L"B", L"Start"};
+    static constexpr const char* PRESS_RECORD_NAMES[PRESS_BUTTONS] = {"A", "B", "Start"};
     int pressButton = 0; // (of PRESS_BUTTON_BITS)
     int pressLeft = -1;  // frames until the button is let go; above PRESS_HOLD: still waiting. -1: no press asked
 
@@ -75,10 +81,13 @@ struct RealGameMode {
         if (!pad.running() && !pad.start(error)) return false;
         driver = realgame::Driver{};
         driver.lag = lag, driver.agent = std::move(agent);
+        driver.notes = &notes;
         playing = true;
+        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + ", A turns " + (pad.aTurnsRight ? "right" : "left"));
         return true;
     }
     void stopPlaying() {
+        if (playing) record.event(tracker.frame, "the AI stops");
         playing = false;
         driver.stop();
         driver.agent.reset();
@@ -88,6 +97,7 @@ struct RealGameMode {
     bool pressLater(std::wstring& error) {
         if (!pad.running() && !pad.start(error)) return false;
         pressLeft = PRESS_WAIT + PRESS_HOLD;
+        record.event(tracker.frame, std::string("a press of ") + PRESS_RECORD_NAMES[pressButton] + " asked for");
         return true;
     }
     bool pressing() const { return pressLeft >= 0; }
@@ -107,12 +117,25 @@ struct RealGameMode {
     // Every frame of the game: the press asked for, or while the AI plays the buttons for the frame `now` of the clock
     // (frames of 1/60 s of QueryPerformanceCounter, as the times of the pictures).
     void drive(int64_t now) {
+        realgame::PadRecord held{now, 0, 0, 0};
         if (pressLeft >= 0) {
             --pressLeft;
             pad.hold(pressLeft >= 0 && pressLeft < PRESS_HOLD ? PRESS_BUTTON_BITS[pressButton] : USHORT(0));
-            return;
+            held.by = 2;
+        } else if (playing) {
+            const int corrected = driver.corrected;
+            held.buttons = driver.tick(follow, now);
+            pad.press(held.buttons);
+            held.by = 1;
+            for (const auto& [at, line] : notes) record.event(at, line);
+            notes.clear();
+            if (driver.corrected != corrected) record.ask("put-right");
         }
-        if (playing) pad.press(driver.tick(follow, now));
+        if (record.isOpen() && pad.running()) {
+            held.pad = pad.heldButtons();
+            record.pad(held);
+        }
+        record.flush();
     }
 
     // ---- the reading of the real game's screen ----
@@ -136,8 +159,12 @@ struct RealGameMode {
     int64_t firstFrame = -1;    // the frame of the clock of the first of them
     int framesWithout = 0;      // frames of the game since a picture last came
 
-    // Begins to read the window `w` with the table of `folder` (or the one built in).
-    bool startReading(HWND w, const std::filesystem::path& folder, std::wstring& error) {
+    // The record of the reading (play/realgame_log.h): in the folder of one's own files, realgame\<date and time>.
+    realgame::Record record;
+    std::wstring recordError; // (it could not be made: the reading goes on without it)
+
+    // Begins to read the window `w` with the table of `folder` (or the one built in); `about` begins the record.
+    bool startReading(HWND w, const std::filesystem::path& folder, const std::string& about, std::wstring& error) {
         stopReading();
         layout = realgame::measuredLayout(), layoutOwn = false, layoutError.clear();
         std::error_code ignored;
@@ -151,13 +178,29 @@ struct RealGameMode {
         follow.reset();
         follow.tracker.stillFrames = layout.stillFrames;
         const realgame::Layout table = layout; // (the capture's own copy: it reads on its thread)
+        recordError.clear();
+        const std::time_t now = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now);
+        char stamp[32];
+        std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
+        std::string header = about;
+        if (!header.empty() && header.back() != '\n') header += '\n';
+        header += std::string("table: ") + (layoutOwn ? "the file realgame_layout.txt" : "built in") + ", " + std::to_string(layout.baseWidth) + " x " +
+                  std::to_string(layout.baseHeight) + "\n";
+        header += "lag " + std::to_string(lag) + ", A turns " + (pad.aTurnsRight ? "right" : "left") + ", the press " + PRESS_RECORD_NAMES[pressButton] + "\n";
+        header += "each line: the frame of the clock (1/60 s), then what happened\n";
+        if (!record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作れませんでした（" + (folder / L"realgame").wstring() + L"）";
+        notes.clear();
         const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table); }, error);
         reading = started ? Reading::On : Reading::Off;
+        if (!started) record.close();
         return started;
     }
     void stopReading() {
         if (playing) stopPlaying();
         capture.stop();
+        record.close(); // (after the capture: its thread offers the record pictures)
         reading = Reading::Off;
         std::lock_guard<std::mutex> hold(lock);
         taken.clear();
@@ -175,9 +218,15 @@ struct RealGameMode {
         framesWithout = now.empty() ? framesWithout + 1 : 0;
         for (const Taken& t : now) {
             if (firstFrame < 0) firstFrame = t.frame;
+            if (record.isOpen()) {
+                record.reading(t.reading, t.frame, t.width, t.height);
+                if (t.width != width || t.height != height) record.event(t.frame, "picture size " + std::to_string(t.width) + " x " + std::to_string(t.height));
+            }
+            const Counts before = counts();
             follow.step(t.reading, t.frame);
             width = t.width, height = t.height;
             ++pictures;
+            if (record.isOpen()) noteStep(before, t.frame);
         }
     }
 
@@ -205,6 +254,47 @@ private:
         int64_t frame;
         int width, height;
     };
+    std::vector<std::pair<int64_t, std::string>> notes; // of the driver, until they go into the record
+
+    // What the record is told after each reading: what it changed of these.
+    struct Counts {
+        int rounds, doubts, placements, checks, misses, held, pairs[2], followed[2], notice[2];
+        juraic::GameField reckoned[2]; // the pieces at rest as the game made them, before the reading
+        bool known[2];
+    };
+    Counts counts() const {
+        Counts c{tracker.rounds, tracker.doubts, follow.placements, follow.checks, follow.misses, follow.held, {}, {}, {}, {}, {}};
+        for (int s = 0; s < 2; ++s)
+            c.pairs[s] = tracker.side[s].pairs, c.followed[s] = follow.model[s].followed, c.notice[s] = follow.notice[s],
+            c.reckoned[s] = follow.model[s].core.field, c.known[s] = follow.model[s].known;
+        return c;
+    }
+    static std::string pairText(juraic::Pair p) { return std::to_string(p.axis) + std::to_string(p.child); }
+    void noteStep(const Counts& b, int64_t at) {
+        static const char* turns[] = {"up", "right", "down", "left"};
+        if (tracker.rounds != b.rounds) record.event(at, "a round begins (both fields empty)");
+        if (tracker.doubts != b.doubts) record.event(at, "a reading did not fit what was read before (" + std::to_string(tracker.doubts) + " so far)"), record.ask("doubt");
+        for (int s = 0; s < 2; ++s) {
+            const char* who = s ? "2P" : "1P";
+            const realgame::SideTrack& t = tracker.side[s];
+            if (tracker.spawned[s]) {
+                std::string line = std::string(who) + " pair " + std::to_string(t.pairs) + " appears" + (tracker.late[s] ? " (seen late)" : "") + ", colours " + pairText(t.colors) + ", next";
+                for (int n = 0; n < 2; ++n) line += t.nextRead[n] ? " " + pairText(t.next[n]) : std::string(" ?");
+                record.event(at, line);
+            }
+            if (follow.model[s].followed != b.followed[s]) {
+                const realgame::SideModel& m = follow.model[s];
+                record.event(at, std::string(who) + " pair " + std::to_string(m.followed + 1) + " placed: column " + std::to_string(m.placed.x + 1) + ", child " + turns[m.placed.dir] +
+                                     (m.chains ? ", a chain of " + std::to_string(m.chains) : ""));
+            }
+            if (follow.notice[s] != b.notice[s]) record.event(at, std::string(who) + " notice " + std::to_string(follow.notice[s]));
+            // (a check fails as a new pair appears: the pieces it appeared over against the game's)
+            if (follow.misses != b.misses && tracker.spawned[s] && b.known[s])
+                record.event(at, std::string(who) + " pieces at rest not as the game made them; the game:\n" + realgame::fieldText(b.reckoned[s]) + "    the screen:\n" + realgame::fieldText(t.under)),
+                    record.ask("miss");
+        }
+        if (follow.held != b.held) record.event(at, "a notice held back (more than the chains can have sent)");
+    }
     std::mutex lock; // what the capture's thread hands over
     std::deque<Taken> taken;
     bool saveWanted = false, savedReady = false;
@@ -214,6 +304,7 @@ private:
     // On the capture's thread: a picture read; the frame from the time it was shown (frames of 1/60 s).
     void took(const realgame::Picture& p, int64_t time, const realgame::Layout& table) {
         Taken t{realgame::read(p, table), (time * 60 + 5000000) / 10000000, p.width, p.height};
+        record.offer(p, t.frame);
         std::lock_guard<std::mutex> hold(lock);
         if (taken.size() >= 600) taken.pop_front(); // (no one takes them: the oldest go)
         taken.push_back(std::move(t));

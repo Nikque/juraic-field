@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <deque>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace play::realgame {
@@ -32,6 +34,10 @@ public:
     int played = 0;                           // pairs played
     int corrected = 0;                        // pictures that showed the pair elsewhere than the engine had it
     std::vector<int> lags;                    // the lags measured, the last first ones dropped (at most 15)
+    // When set: what the driver does, as lines with the frame of the clock they are of (the record of a reading,
+    // play/realgame_log.h) - each pair begun, the placement it is brought to, a pair put where the picture shows it,
+    // a lag measured.
+    std::vector<std::pair<int64_t, std::string>>* notes = nullptr;
 
     // The middle of the lags measured; -1: none yet.
     int measuredLag() const {
@@ -72,6 +78,10 @@ public:
             return held = 0;
         }
         correct(f);
+        if (notes) {
+            const int aim = target();
+            if (aim != noted) noted = aim, note(now, "2P pair " + std::to_string(pairsSeen) + ": brought to " + placementText(aim));
+        }
         const int64_t at = now + lag;
         // (frames of the game whose buttons were sent before: they took what was held)
         while (active && next < at) play(f, false);
@@ -100,6 +110,21 @@ private:
     int movedFrom = 0;    // ... and the column the pair was then seen in
     int spawnX = juraic::SPAWN_X;
     bool measured = true;
+    int noted = -2; // the placement last noted (notes)
+
+    void note(int64_t at, const std::string& line) {
+        if (notes) notes->emplace_back(at, line);
+    }
+    static std::string placementText(int id) {
+        if (id < 0) return "nothing";
+        static const char* turns[] = {"up", "right", "down", "left"};
+        const juraic::Placement p = juraic::placement(id);
+        return "column " + std::to_string(p.x + 1) + ", child " + turns[p.dir];
+    }
+    static std::string controlText(const juraic::PairControl& p) {
+        static const char* turns[] = {"up", "right", "down", "left"};
+        return "column " + std::to_string(p.x + 1) + " row " + std::to_string(p.y + 1) + (p.upper ? " (half up)" : "") + " child " + turns[p.dir];
+    }
 
     int64_t roundFrame(const Tracker& t, int64_t at) const { return t.roundStart >= 0 && at >= t.roundStart ? at - t.roundStart : 0; }
 
@@ -125,6 +150,9 @@ private:
         movedAt = -1, measured = side.late, spawnX = side.lastSeen.at.x;
         active = true;
         ++played;
+        noted = -2;
+        note(t.frame, "2P pair " + std::to_string(side.pairs) + " begun" + (side.late ? " (seen late)" : "") + ": seen in frame " +
+                          std::to_string(side.spawnedAt) + ", the engine from frame " + std::to_string(next) + ", lag " + std::to_string(lag));
         bool same = true;
         // (the frames from the picture to now have passed: the agent decides them, the game took what was held)
         const int64_t at = t.frame + lag; // (at least the frames the picture is behind)
@@ -171,6 +199,7 @@ private:
         if (side.pair.at.x == movedFrom) return;
         measured = true;
         lags.push_back(int(t.frame - movedAt));
+        note(t.frame, "lag measured: " + std::to_string(t.frame - movedAt) + " frames");
         if (lags.size() > 15) lags.erase(lags.begin());
     }
 
@@ -200,6 +229,7 @@ private:
         const bool sameCells = (ax == sx && ah == sh && cx == tx && ch == th) || (c.axis == c.child && ax == tx && ah == th && cx == sx && ch == sh);
         if (sameCells) return;
         ++corrected;
+        note(t.frame, "2P pair " + std::to_string(pairsSeen) + " put right: the engine had " + controlText(had) + ", the picture shows " + controlText(seen));
         had.x = seen.x, had.y = seen.y, had.dir = seen.dir, had.upper = seen.upper;
         had.grounded = false, had.moveWait = 0;
         // (the frames since played again with the buttons they took)
