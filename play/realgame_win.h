@@ -153,6 +153,13 @@ struct RealGameMode {
         record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with");
         return true;
     }
+    // The AI changed on the screen while it plays: `agent` plays 2P from the next pair on.
+    void replaceAgent(std::unique_ptr<juraic::ai::Agent> agent) {
+        const Hold hold(state);
+        if (!playing) return;
+        driver.replaceAgent(std::move(agent));
+        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level));
+    }
     void stopPlaying() {
         const Hold hold(state);
         if (playing) record.event(tracker.frame, "the AI stops");

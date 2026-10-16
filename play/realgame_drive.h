@@ -19,6 +19,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -47,6 +48,11 @@ public:
     // a lag measured.
     std::vector<std::pair<int64_t, std::string>>* notes = nullptr;
 
+    // Another AI to play from the next pair on (the level changed while the AI plays): it takes over when no pair is in
+    // play, the one before let go on a thread of its own (it waits for a search it may have begun, as long as its
+    // level lets it think: the pad is not to wait for that).
+    void replaceAgent(std::unique_ptr<juraic::ai::Agent> next) { nextAgent = std::move(next); }
+
     // The middle of the lags measured; -1: none yet.
     int measuredLag() const {
         if (lags.empty()) return -1;
@@ -70,6 +76,12 @@ public:
     uint8_t tick(const Follower& f, int64_t now) {
         const Tracker& t = f.tracker;
         const SideTrack& side = t.side[me];
+        if (nextAgent && !active) {
+            if (agent) std::thread([before = std::move(agent)]() mutable { before.reset(); }).detach();
+            agent = std::move(nextAgent);
+            agent->startRound(me, seed++);
+            noted = -2;
+        }
         if (!agent) return held = 0;
         if (t.rounds != round || side.pairs < pairsSeen) {
             round = t.rounds, pairsSeen = 0;
@@ -97,7 +109,7 @@ public:
         while (active && next < at) play(f, false);
         if (active && next == at) {
             play(f, true);
-            if ((held & (juraic::BTN_LEFT | juraic::BTN_RIGHT)) && movedAt < 0) movedAt = now, movedFrom = spawnX;
+            if ((held & (juraic::BTN_LEFT | juraic::BTN_RIGHT)) && movedAt < 0) movedAt = now;
         }
         return sent(held);
     }
@@ -117,8 +129,7 @@ private:
     int round = -1, pairsSeen = 0;
     int64_t checked = -1;
     int64_t movedAt = -1; // the frame of the clock a move to the side was first sent for the pair in play (-1: none)
-    int movedFrom = 0;    // ... and the column the pair was then seen in
-    int spawnX = juraic::SPAWN_X;
+    int spawnX = juraic::SPAWN_X; // the column the pair was seen in first
     bool measured = true;
     int noted = -2; // the placement last noted (notes)
     // A picture that shows the pair where the engine has it a frame or two later (or earlier): the lag is that many
@@ -142,6 +153,7 @@ private:
     // itself (seen on the real game: 100 frames for one pair; on a pad that is a frame early or late now and then, 47
     // pairs of 57 were brought where the AI chose without it, 57 of 63 with it).
     bool untilLocked = false;
+    std::unique_ptr<juraic::ai::Agent> nextAgent; // (replaceAgent)
     juraic::Rng noGarbage{1, 1}; // (settlePlayer lets garbage fall by it: there is none in the engine)
 
 public:
@@ -207,7 +219,7 @@ private:
         next = side.spawnedAt + (side.late ? 0 : 1);
         past.clear();
         checked = -1;
-        movedAt = -1, measured = side.late, spawnX = side.lastSeen.at.x;
+        movedAt = -1, measured = side.late, spawnX = side.lastSeen.at.x, unmovedAt = -1;
         active = true, following = false, untilLocked = false;
         ++played;
         noted = -2;
@@ -274,13 +286,26 @@ private:
         agent->frame(o);
     }
 
-    // The first picture that shows the pair moved to the side after a move was sent: the lag (frames of the clock).
+    // The first picture that shows the pair moved to the side after a move was sent: the lag (frames of the clock) -
+    // when a picture of the pair not moved came at most UNMOVED_GAP frames before it. (The real game's pair is not to be
+    // read while it turns: a move sent with two turns was first seen moved 12 frames later, 5 or 6 the lag; the lag
+    // taken from such was 11, and the pair put right 40 times.)
+    static constexpr int UNMOVED_GAP = 2;
+    int64_t unmovedAt = -1; // the last picture of the pair in the column it was seen in first
     void measure(const Follower& f) {
         const Tracker& t = f.tracker;
         const SideTrack& side = t.side[me];
-        if (measured || movedAt < 0 || !side.pair.seen || t.frame <= movedAt) return;
-        if (side.pair.at.x == movedFrom) return;
+        if (measured || !side.pair.seen) return;
+        if (side.pair.at.x == spawnX) {
+            unmovedAt = t.frame;
+            return;
+        }
+        if (movedAt < 0 || t.frame <= movedAt) return;
         measured = true;
+        if (t.frame - unmovedAt > UNMOVED_GAP) {
+            note(t.frame, "lag not measured: the pair was not seen for " + std::to_string(t.frame - unmovedAt - 1) + " frames before it was seen moved");
+            return;
+        }
         lags.push_back(int(t.frame - movedAt));
         note(t.frame, "lag measured: " + std::to_string(t.frame - movedAt) + " frames");
         if (lags.size() > 15) lags.erase(lags.begin());

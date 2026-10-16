@@ -36,6 +36,7 @@
 #include "../play/realgame_drive.h"
 #include "../play/realgame_log.h"
 #include "../play/realgame_menu.h"
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <iterator>
@@ -591,10 +592,13 @@ struct DriveCounts {
 // A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
 // frame sooner or later). startLag: the lag the driver begins with (-1: the pad's). swapped: the pad turns the other way
 // round from what the driver sends (as a real game whose buttons are the other way round). turnShownLate: a pair turned
-// is drawn the way it was for that many frames more (as the real game shows a turn: seen in its record).
+// is drawn the way it was for that many frames more (as the real game shows a turn: seen in its record). later: the
+// AI given to the driver in frame laterAt of the round. hidden: a pair turned is not drawn for that many frames (the
+// real game's pair is not to be read while it turns: seen in its record, 9 frames for two turns).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
-                       std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0) {
+                       std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
+                       int laterAt = 0, int hidden = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -620,12 +624,13 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     const int64_t first = clock;
     ai::Observation o;
     int target = -1, played = 0; // (the engine of the Driver plays `lag` frames ahead of the round: the target of the pair it played last)
-    int oldFor = 0;
+    int oldFor = 0, hideFor = 0;
     uint8_t oldDir = 0;
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
-        if (oldFor > 0) {
+        if (oldFor > 0 || hideFor > 0) {
             Round shown = r;
-            shown.player[1].pair.dir = oldDir, --oldFor;
+            if (oldFor > 0) shown.player[1].pair.dir = oldDir, --oldFor;
+            if (hideFor > 0 && shown.player[1].phase == Phase::Control) shown.player[1].phase = Phase::Split, --hideFor;
             draw(canvas, l, shown, false, noise);
         } else {
             draw(canvas, l, r, false, noise);
@@ -636,6 +641,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
             canvas.fill(s.left, s.bottom - 2 * s.cellHeight, s.left + s.cellWidth, s.bottom - s.cellHeight, LIGHT);
         }
         follow.step(read(canvas.picture(), l), clock);
+        if (later && f == laterAt) d.replaceAgent(std::move(later)); // (another AI chosen on the screen of the mode)
         sent[size_t(clock - first)] = d.tick(follow, clock);
         if (d.played != played) played = d.played, target = -1;
         if (d.target() >= 0) target = d.target();
@@ -653,6 +659,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         const uint8_t dirBefore = r.player[1].pair.dir;
         r.step(buttons, e);
         if (turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = turnShownLate;
+        if (hidden && e[1].control.rotated && r.player[1].phase == Phase::Control) hideFor = hidden;
         // (a pair the AI found no placement for - the field full - is not counted)
         if (e[1].locked && target >= 0) n.locks += 1, n.hits += placementId(r.player[1].pair.placement()) == target;
         ++n.frames;
@@ -674,6 +681,16 @@ struct EarlyAgent : ai::PlacementAgent {
         for (int id = 0; id < PLACEMENTS; ++id)
             if (legal >> id & 1) return id;
         return 0;
+    }
+};
+
+// X3 that counts its choices.
+struct CountedX3 : ai::X3Agent {
+    std::atomic<int>* chosen;
+    CountedX3(const ai::Params& p, std::atomic<int>* count) : ai::X3Agent(p), chosen(count) {}
+    int choose(const ai::Observation& o, Pair pair, unsigned legal) override {
+        ++*chosen;
+        return ai::X3Agent::choose(o, pair, legal);
     }
 };
 
@@ -738,6 +755,35 @@ static void testDriver() {
         check(right.locks >= 20 && ahead.locks >= 20 && perAhead <= perRight * 1.15 && ahead.corrected <= 10 && ahead.hits * 10 >= ahead.locks * 9,
               "with the engine ahead of the game, a pair takes " + std::to_string(int(perAhead)) + " frames, with the lag right " + std::to_string(int(perRight)) + ", put elsewhere " +
                   std::to_string(ahead.corrected) + " times, brought where the AI chose " + std::to_string(ahead.hits) + " of " + std::to_string(ahead.locks));
+    }
+    // The AI or its level changed on the screen of the mode while the AI plays (it plays from the moment the window of
+    // the real game is read: changed after that, the level the AI began with went on playing - seen on the real game,
+    // the record of a match said level 1 for 36 chosen): the new AI plays from the next pair on.
+    {
+        ai::Params narrow;
+        narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+        std::atomic<int> before{0}, after{0};
+        DriveCounts n;
+        driveRound(107, 5, false, 2500, n, nullptr, nullptr, -1, false, 0, std::make_unique<CountedX3>(narrow, &before), false, 0,
+                   std::make_unique<CountedX3>(narrow, &after), 1200);
+        check(before > 0 && after >= 10 && n.hits * 10 >= n.locks * 9,
+              "the AI given while the AI plays does not play (" + std::to_string(after.load()) + " choices; the one before " + std::to_string(before.load()) +
+                  "), or pairs are not brought where the AI chose (" + std::to_string(n.hits) + " of " + std::to_string(n.locks) + ")");
+    }
+    // A pair not to be read while it turns (as on the real game: 9 frames for two turns, a move sent with them): the
+    // first picture that shows it moved may come long after the move was taken, which is no measure of the lag (its
+    // record: 12 frames measured for 5 or 6, the lag taken 11, the pair put right 40 times). A move is measured only from
+    // a picture that follows one of the pair not moved.
+    {
+        DriveCounts n;
+        std::vector<std::pair<int64_t, std::string>> notes;
+        for (int k = 0; k < 2; ++k) driveRound(108 + uint64_t(k), 5, false, 2500, n, &notes, nullptr, -1, false, 0, nullptr, false, 0, nullptr, 0, 8);
+        int off = 0, measured = 0;
+        for (const auto& [at, line] : notes)
+            if (line.rfind("lag measured: ", 0) == 0) ++measured, off += std::abs(std::atoi(line.c_str() + 14) - 5) > 1;
+        check(measured >= 10 && off == 0 && n.lagTaken == 2 && n.hits * 10 >= n.locks * 9,
+              "with the pair not to be read as it turns, " + std::to_string(off) + " lags of " + std::to_string(measured) + " measured far from the pad's, the lag kept in " +
+                  std::to_string(n.lagTaken) + " rounds of 2, " + std::to_string(n.hits) + " pairs of " + std::to_string(n.locks) + " brought where the AI chose");
     }
     // A machine under load, all of it at once: a pad now and then a frame early or late, turns shown two frames late, the
     // lag begun a frame more than the pad's.

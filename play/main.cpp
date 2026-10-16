@@ -703,7 +703,11 @@ struct App {
         bool heard = false;
         const bool right = heldStep(NAV_RIGHT, 4, 2, &heard), left = heldStep(NAV_LEFT, 4, 2, &heard);
         const int change = (right ? 1 : 0) - (left ? 1 : 0);
-        if (change && m.change(change) && heard) audio.play(SND_ROTATE);
+        if (change && m.change(change)) {
+            if (heard) audio.play(SND_ROTATE);
+            // (the AI plays as soon as the window is read: changed now, it plays so from its next pair on)
+            if ((m.row == RealGameMode::ROW_STYLE || m.row == RealGameMode::ROW_LEVEL) && m.playing) startRealGameAI();
+        }
         const bool ok = nav(NAV_OK); // (read once in a frame: a key is down in it only the first time it is asked)
         if (ok && m.row == RealGameMode::ROW_READ) {
             // (reading is begun by itself; this row stops it, and begins it again)
@@ -731,12 +735,14 @@ struct App {
         }
     }
     // The AI begins to play 2P of the real game: as in a match against it, its search and its thinking as the settings
-    // say (ai/level.h). (It waits for the pairs of 2P: in the menus nothing is pressed but what they need.)
+    // say (ai/level.h). (It waits for the pairs of 2P: in the menus nothing is pressed but what they need.) Playing
+    // already, the AI of the level and style now chosen takes over from the next pair on.
     void startRealGameAI() {
         RealGameMode& m = realGame;
         Versus made;
         made.seat(1, aiOfLevel(m.level, m.style), settings);
         if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(made.agent[1].get())) x3->noting = false; // (no replay keeps its notes)
+        if (m.playing) return m.replaceAgent(std::move(made.agent[1]));
         std::wstring error;
         if (!m.startPlaying(std::move(made.agent[1]), error)) say(error);
     }
