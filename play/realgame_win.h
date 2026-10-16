@@ -113,9 +113,12 @@ struct RealGameMode {
 
     // ---- the play ----
     // The frames from a button of the pad to the picture of the real game that shows it taken, which the AI begins with
-    // (Driver::lag): measured through Steam on the real game, 6. The driver then takes the lag it measures, and finds
-    // from the screen which way the turns go (Driver::turnsSwapped); A is sent for a turn to the right.
+    // (Driver::lag): measured through Steam on the real game, 6. The way of the two turns it begins with
+    // (Driver::turnsSwapped): the other way round, B sent for a turn to the right - so the real game turned its pair in
+    // all six of its records through Steam and the virtual pad. The driver then takes the lag and the way of the turns
+    // that fit the pictures (Driver::fit).
     int lag = 6;
+    bool turnsSwapped = true;
     VirtualPad pad;
     realgame::Driver driver;
     bool playing = false; // the AI plays 2P
@@ -147,10 +150,10 @@ struct RealGameMode {
         if (reading != Reading::On) return error = L"先に「読み始める」で実機の窓を選んでください", false;
         if (!pad.running() && !pad.start(error)) return false;
         driver = realgame::Driver{};
-        driver.lag = lag, driver.agent = std::move(agent);
+        driver.lag = lag, driver.turnsSwapped = turnsSwapped, driver.agent = std::move(agent);
         driver.notes = &notes;
         playing = true;
-        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with");
+        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are"));
         return true;
     }
     // The AI changed on the screen while it plays: `agent` plays 2P from the next pair on.

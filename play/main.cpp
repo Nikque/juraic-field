@@ -1503,7 +1503,7 @@ struct App {
         if (m.playing)
             lines.push_back(L"遅れ: " + std::to_wstring(m.driver.lag) + L" フレーム（" +
                             (m.driver.lags.empty() ? std::wstring(L"まだ測れていません") : L"画面から " + std::to_wstring(m.driver.lags.size()) + L" 回測った") + L"）　回転: " +
-                            (m.driver.turnsSwapped ? L"逆向きと分かったので入れ替えています" : L"そのまま"));
+                            (m.driver.turnsSwapped ? L"二つの回転を入れ替えて送っています" : L"そのまま送っています"));
         for (size_t i = 0; i < lines.size(); ++i) gfx.text(lines[i], 44, 400 + float(i) * 20, 620, 20, 0, rgb(200, 206, 226));
         // The two sides as they are read: the pieces at rest, the pair in play, the window of the next pairs, the notice.
         const float cell = 22;
