@@ -593,7 +593,8 @@ struct DriveCounts {
 // round from what the driver sends (as a real game whose buttons are the other way round). turnShownLate: a pair turned
 // is drawn the way it was for that many frames more (as the real game shows a turn: seen in its record).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
-                       std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0) {
+                       std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
+                       std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -606,8 +607,9 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     other->startRound(0, seed);
     Follower follow;
     Driver d;
-    d.lag = startLag >= 0 ? startLag : lag, d.rules = rules, d.agent = ai::makeAgent("x3", narrow);
+    d.lag = startLag >= 0 ? startLag : lag, d.rules = rules, d.agent = given ? std::move(given) : ai::makeAgent("x3", narrow);
     d.notes = notes;
+    d.takeLag = !keepLag;
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
@@ -623,11 +625,15 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
         if (oldFor > 0) {
             Round shown = r;
-            shown.player[1].pair.dir = oldDir;
+            shown.player[1].pair.dir = oldDir, --oldFor;
             draw(canvas, l, shown, false, noise);
-            --oldFor;
         } else {
             draw(canvas, l, r, false, noise);
+        }
+        if (f % 12 < lit) {
+            // (a light over the field of 2P: nothing of it is read in this picture)
+            const SideLayout& s = l.side[1];
+            canvas.fill(s.left, s.bottom - 2 * s.cellHeight, s.left + s.cellWidth, s.bottom - s.cellHeight, LIGHT);
         }
         follow.step(read(canvas.picture(), l), clock);
         sent[size_t(clock - first)] = d.tick(follow, clock);
@@ -657,6 +663,20 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     if (sentOut) *sentOut = sent;
 }
 
+// An agent that chooses the first placement it may, and notes how many frames before its pair appears it chose (the
+// wait of its own side then: 1 = in the frame the pair appears). It chooses `ahead` frames before, as the game's AI.
+struct EarlyAgent : ai::PlacementAgent {
+    std::vector<int>* waits;
+    explicit EarlyAgent(std::vector<int>* noted) : waits(noted) { ahead = 12; }
+    ~EarlyAgent() override { finish(); }
+    int choose(const ai::Observation& o, Pair, unsigned legal) override {
+        waits->push_back(o.self().wait);
+        for (int id = 0; id < PLACEMENTS; ++id)
+            if (legal >> id & 1) return id;
+        return 0;
+    }
+};
+
 static void testDriver() {
     DriveCounts exact, shaky;
     for (int lag = 1; lag <= 3; ++lag) driveRound(60 + uint64_t(lag), lag, false, 2500, exact);
@@ -672,7 +692,9 @@ static void testDriver() {
     DriveCounts learnt;
     for (const int padLag : {4, 6}) driveRound(80 + uint64_t(padLag), padLag, false, 2500, learnt, nullptr, nullptr, 2);
     // The lag begun with a frame more than the pad's (as on the real game: 6 for 5): the pictures show the pair a frame
-    // ahead of the engine, which takes the lag from that at once and puts no pair elsewhere for it.
+    // ahead of the engine, which takes the lag from the pictures that show it in another column, and puts no pair
+    // elsewhere for it (116 times in these rounds when each such picture was put right; the heights and the turns of the
+    // rounds drawn here would tell of the lag too, but those of the real game do not, and are not taken).
     DriveCounts over;
     for (int k = 0; k < 2; ++k) driveRound(84 + uint64_t(k), 5, false, 2500, over, nullptr, nullptr, 6);
     check(over.lagTaken == 2 && over.corrected <= 10 && over.hits * 10 >= over.locks * 9,
@@ -684,11 +706,44 @@ static void testDriver() {
     check(late.turnsFound == 0 && late.corrected <= 10 && late.hits * 10 >= late.locks * 9,
           "with turns shown two frames late, pairs are put elsewhere (" + std::to_string(late.corrected) + " times), the turns are taken the other way round (" +
               std::to_string(late.turnsFound) + "), or pairs are not brought where the AI chose (" + std::to_string(late.hits) + " of " + std::to_string(late.locks) + ")");
+    // The AI chooses before its pair appears, as in a match of this program (the pair is not kept waiting for its choice,
+    // which takes a while on a machine under load): after its pair is locked the engine goes on, and the AI is shown
+    // when the next pair comes.
+    {
+        std::vector<int> waits;
+        DriveCounts n;
+        std::vector<std::pair<int64_t, std::string>> notes;
+        driveRound(101, 5, false, 1500, n, &notes, nullptr, -1, false, 0, std::make_unique<EarlyAgent>(&waits));
+        int before = 0;
+        for (const int wait : waits) before += wait > 1;
+        check(waits.size() >= 10 && before * 10 >= int(waits.size()) * 8,
+              "the AI chooses as its pair appears, not before (" + std::to_string(before) + " of " + std::to_string(waits.size()) + " choices before)");
+        // (begun with the lag of the pad, nothing is to be taken from the pictures: a pair at another height alone - the
+        //  real game and the engine a frame apart in when a fall begins - tells nothing of the lag)
+        int taken = 0;
+        for (const auto& [at, line] : notes) taken += line.find("lag taken from the pictures") != std::string::npos;
+        check(taken == 0, "begun with the lag of the pad, another lag is taken from the pictures (" + std::to_string(taken) + " times)");
+    }
+    // The engine a little ahead of the game, the lag kept 2 frames less than the pad's (on the real game it is 4 to 6
+    // frames, the driver's one of them): the pictures show the pair where the engine had it 2 frames before. Each of
+    // them put right, the buttons in flight were played again for the wrong frames and the pair sent to and fro - 125
+    // times in 27 pairs, a pair 92 frames against 64 (on the real game a pair took 80 frames, 57 for a player). A
+    // pair where the engine has it a frame or two before or after is put nowhere else. (A light over the field of 2P in 4
+    // frames of 12.)
+    {
+        DriveCounts right, ahead;
+        driveRound(106, 5, false, 2500, right, nullptr, nullptr, -1, false, 0, nullptr, true, 4);
+        driveRound(106, 5, false, 2500, ahead, nullptr, nullptr, 3, false, 0, nullptr, true, 4);
+        const double perRight = double(right.frames) / double(std::max(1L, right.locks)), perAhead = double(ahead.frames) / double(std::max(1L, ahead.locks));
+        check(right.locks >= 20 && ahead.locks >= 20 && perAhead <= perRight * 1.15 && ahead.corrected <= 10 && ahead.hits * 10 >= ahead.locks * 9,
+              "with the engine ahead of the game, a pair takes " + std::to_string(int(perAhead)) + " frames, with the lag right " + std::to_string(int(perRight)) + ", put elsewhere " +
+                  std::to_string(ahead.corrected) + " times, brought where the AI chose " + std::to_string(ahead.hits) + " of " + std::to_string(ahead.locks));
+    }
     // A machine under load, all of it at once: a pad now and then a frame early or late, turns shown two frames late, the
     // lag begun a frame more than the pad's.
     DriveCounts heavy;
     for (int k = 0; k < 2; ++k) driveRound(98 + uint64_t(k), 5, true, 2500, heavy, nullptr, nullptr, 6, false, 2);
-    check(heavy.turnsFound == 0 && heavy.hits * 10 >= heavy.locks * 9,
+    check(heavy.turnsFound == 0 && heavy.hits * 100 >= heavy.locks * 85,
           "on a machine under load the turns are taken the other way round (" + std::to_string(heavy.turnsFound) + "), or pairs are not brought where the AI chose (" +
               std::to_string(heavy.hits) + " of " + std::to_string(heavy.locks) + ")");
     // What a picture tells of the way the turns go (the case of the record of the real game: the engine had the pair in

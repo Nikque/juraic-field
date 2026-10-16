@@ -83,6 +83,8 @@ public:
         measure(f);
         if (!active) {
             wait(f, now);
+            if (untilLocked && side.inHand && side.pairs == pairsSeen) return held = juraic::BTN_DOWN;
+            untilLocked = false;
             return held = 0;
         }
         correct(f);
@@ -130,6 +132,17 @@ private:
     // the engine had it up to TURN_SHOWN frames before, puts nothing right.
     static constexpr int TURN_SHOWN = 3;
     int opposite = 0; // pictures in a row that showed a pair turned the opposite way of the engine's
+    // After its pair is locked the engine goes on without buttons (its chain, then the wait for the next pair), so that
+    // the AI is shown when the next pair comes and chooses before it appears, as in a match of this program - not as it
+    // appears, the pair waiting for the choice (long on a machine under load). It stops two frames before the pair it
+    // foresees (the pair may come later: garbage the engine does not know of falls first).
+    bool following = false;
+    // The engine has the pair locked: until the screen shows it so (the pair no longer in hand) the down button is held.
+    // The engine ahead of the game, or its pictures not to be read just then, the pair let go of it fell on slowly by
+    // itself (seen on the real game: 100 frames for one pair; on a pad that is a frame early or late now and then, 47
+    // pairs of 57 were brought where the AI chose without it, 57 of 63 with it).
+    bool untilLocked = false;
+    juraic::Rng noGarbage{1, 1}; // (settlePlayer lets garbage fall by it: there is none in the engine)
 
 public:
     // What a picture of a pair the engine had turned (`had`, not UP) tells of the way the game turns: 1 as the engine
@@ -195,7 +208,7 @@ private:
         past.clear();
         checked = -1;
         movedAt = -1, measured = side.late, spawnX = side.lastSeen.at.x;
-        active = true;
+        active = true, following = false, untilLocked = false;
         ++played;
         noted = -2;
         note(t.frame, "2P pair " + std::to_string(side.pairs) + " begun" + (side.late ? " (seen late)" : "") + ": seen in frame " +
@@ -219,7 +232,7 @@ private:
         past.push_back({next, own, held});
         if (past.size() > 240) past.pop_front();
         ++next;
-        if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) stop();
+        if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) stop(), following = true, untilLocked = true;
         return wanted == held;
     }
 
@@ -227,6 +240,29 @@ private:
     // asks for is pressed.
     void wait(const Follower& f, int64_t now) {
         const Tracker& t = f.tracker;
+        if (following) {
+            const int64_t at = now + lag;
+            while (next < at && !(own.phase == juraic::Phase::Next && own.wait <= 2) && !own.field.dead()) {
+                juraic::Incoming nobody;
+                juraic::PlayerEvents e = juraic::advancePlayer(own, nobody, 0, tsumo, rules, t.timing, roundFrame(t, next));
+                juraic::settlePlayer(own, rules, t.timing, noGarbage, e); // (the garbage it does not know of: none)
+                ++next;
+            }
+            if (own.phase == juraic::Phase::Next || own.phase == juraic::Phase::Control) {
+                if (own.phase == juraic::Phase::Control) following = false; // (it appeared in the engine after all: as below)
+                else {
+                    juraic::ai::Observation o;
+                    f.observeAt(me, rules, own, now, o);
+                    agent->frame(o);
+                    return;
+                }
+            } else {
+                juraic::ai::Observation o;
+                f.observeAt(me, rules, own, now, o);
+                agent->frame(o);
+                return;
+            }
+        }
         if (t.roundStart < 0 || now <= t.roundStart) return;
         juraic::Player waiting;
         waiting.field = f.model[me].known ? f.model[me].core.field : t.side[me].resting;
@@ -288,13 +324,17 @@ private:
         if (had.x == seen.x && had.y == seen.y && had.upper == seen.upper)
             for (size_t j = i; j-- > 0 && past[j].frame >= t.frame - TURN_SHOWN;)
                 if (past[j].state.phase == juraic::Phase::Control && past[j].state.pair.dir == seen.dir) return;
-        // (a picture ahead of the engine tells of the lag; one behind it only when the pair is in another column: a turn
-        //  alone is shown late by itself)
+        // (a pair where the engine has it a frame or two later or earlier is put nowhere else: the lag of the game is off
+        //  by a frame or two now and then - on the real game 4 to 6 frames - and putting it right played the buttons in
+        //  flight again for the wrong frames, the pair sent to and fro: with the lag 2 frames off, 125 times in 27 pairs.
+        //  Only a pair in another column tells of the lag: the real game shows a turn late by itself, and begins the fall
+        //  of a pair just appeared a frame or two sooner than the engine - its record: a pair at another height alone was
+        //  taken for a lag 2 frames less, and the lag fell from 6 to 3)
         for (const int by : {1, -1, 2, -2}) {
-            if (by < 0 && had.x == seen.x) continue; // (behind the engine in its turn alone: a turn shown late)
             size_t j = 0;
             while (j < past.size() && past[j].frame != t.frame + by) ++j;
             if (j == past.size() || past[j].state.phase != juraic::Phase::Control || !samePlace(past[j].state.pair, seen, c)) continue;
+            if (had.x == seen.x || !takeLag) return;
             lagHints = by == lagHint ? lagHints + 1 : 1, lagHint = by;
             if (lagHints >= LAG_HINTS && lag - by >= 0) {
                 note(t.frame, "the lag taken from the pictures: " + std::to_string(lag - by) + " frames (was " + std::to_string(lag) + ")");

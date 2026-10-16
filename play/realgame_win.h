@@ -385,6 +385,10 @@ private:
         }
     }
     void playLoop() {
+        // (above the threads of this program's drawing and of the AI's search: on a machine under load the pad was set a
+        //  frame late in 7% of the frames of a record of the real game, twice in one frame in as many - the pictures
+        //  themselves came in each frame)
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
         for (;;) {
             std::deque<Taken> now;
             {
