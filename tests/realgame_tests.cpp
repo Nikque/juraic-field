@@ -17,6 +17,9 @@
 //     lines of events.txt are there, pictures are kept every PICTURE_EVERY frames and when asked for (at most one in
 //     PICTURE_GAP frames, MAX_PICTURES in all) and written as they were; the driver noting what it does sends the same
 //     buttons as without, and notes each pair begun, the placement chosen, a pair put right and the lag measured.
+//  7. The real game's menus (play/realgame_menu.h): the screens of the players and of the characters and their states
+//     told by the colours of their points at any size of the picture, nothing else taken for them; the pad of 2P
+//     presses A while the row of 2P is to be taken or 2P is to decide, MenuPresser::GAP pictures apart.
 //  4. A pair of one colour is read the way it was turned before; a picture saved and read again is the same.
 //     Followed with the rules of the game (Follower): where each pair came to rest is found, the pieces reckoned are
 //     those read as the next pair appears, and a notice of more than the chains can have sent is held back.
@@ -32,6 +35,7 @@
 #include "../ai/agents.h"
 #include "../play/realgame_drive.h"
 #include "../play/realgame_log.h"
+#include "../play/realgame_menu.h"
 #include <chrono>
 #include <iostream>
 #include <iterator>
@@ -492,6 +496,62 @@ static void testUnclearFrames() {
     std::cout << "a reading with a point not sure takes nothing of the field and does not stop what follows; the notice is taken when it has stayed\n";
 }
 
+// What the real game showed (its record of 2026-10-16): a pair just appeared, moved at once, its axis read as another
+// colour in one picture - it is still the pair in hand, not a new one. And the window of the next pairs moves for some
+// frames as a pair appears, reading as other pairs on its way: the pairs after a new one are learnt from the window once
+// it stands still.
+static void testPairsSeenOnce() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {1, 5}, side.next[1] = {3, 1};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    int64_t at = 5000;
+    Tracker t;
+    for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+    check(t.knows(0) && t.knows(1) && t.pairs[0].axis == 1 && t.pairs[1].axis == 3, "the first pairs are not learnt before the round");
+    // The first pair of 1P appears (axis 1 half a cell up where pairs appear, its child above the screen) as the window
+    // moves on: on its way it reads as 3 1 / 4 4, then stands still at 3 1 / 2 2.
+    Reading coming = window(empty, {3, 4}, {4, 4});
+    coming.side[0].point[SPAWN_X][23] = 1;
+    coming.side[1] = empty.side[1];
+    t.step(coming, at++);
+    check(t.spawned[0] && t.side[0].pairs == 1, "the first pair is not seen");
+    Reading wrong = window(coming, {3, 1}, {2, 2}); // (the axis read in one picture as the colour of the pair that comes next)
+    wrong.side[0].point[SPAWN_X][23] = 3;
+    t.step(wrong, at++);
+    Reading moved = window(empty, {3, 1}, {2, 2});
+    moved.side[0].point[SPAWN_X - 1][23] = 1;
+    for (int f = 0; f < 3; ++f) t.step(moved, at++);
+    check(t.side[0].pairs == 1, "a pair in hand read as another colour in one picture is taken for a new pair (" + std::to_string(t.side[0].pairs) + " pairs)");
+    check(t.knows(1) && t.knows(2) && t.pairs[1].axis == 3 && t.pairs[1].child == 1 && t.pairs[2].axis == 2 && t.pairs[2].child == 2 && t.doubts == 0,
+          "the pairs after the new one are learnt from the window on its way (" + std::to_string(t.doubts) + " readings did not fit)");
+    // Between two rounds both fields stand empty, a point read as a piece in one picture of it (a light): the next round
+    // is seen begin all the same.
+    Tracker u;
+    for (int f = 0; f < u.roundGap + 5; ++f) u.step(empty, at++);
+    Reading played = empty;
+    played.side[0].point[0][0] = played.side[0].point[0][1] = played.side[1].point[2][0] = played.side[1].point[2][1] = 4;
+    Reading first = empty;
+    first.side[0].point[SPAWN_X][23] = 1; // (the round has a pair: a round ends only after one)
+    u.step(first, at++);
+    for (int f = 0; f < 40; ++f) u.step(played, at++);
+    const int rounds = u.rounds;
+    Reading stray = empty;
+    stray.side[0].point[4][9] = 2;
+    for (int f = 0; f < u.roundGap / 2; ++f) u.step(empty, at++);
+    u.step(stray, at++);
+    for (int f = 0; f < u.roundGap / 2 + 5; ++f) u.step(empty, at++);
+    check(u.rounds == rounds + 1, "a point read as a piece in one picture between two rounds hides the round that begins");
+    std::cout << "a pair read as another colour in one picture is the same pair; the window of the next pairs is read once it stands still; a round is seen begin through a point read wrong in one picture\n";
+}
+
 // The notice against what the chains followed can have sent (Follower): with nothing sent, a notice of a few pieces is
 // taken at once, one of many (a light over it) only when it has read the same for noticeLong frames.
 static void testNoticeCeiling() {
@@ -524,10 +584,15 @@ static void testNoticeCeiling() {
 
 struct DriveCounts {
     long frames = 0, locks = 0, hits = 0, corrected = 0, played = 0, lagRight = 0, lagRounds = 0;
+    long lagTaken = 0;  // rounds that ended with the driver using the lag of the pad
+    long turnsFound = 0; // rounds that ended with the driver turning the other way round (the pad turns so)
 };
 
+// A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
+// frame sooner or later). startLag: the lag the driver begins with (-1: the pad's). swapped: the pad turns the other way
+// round from what the driver sends (as a real game whose buttons are the other way round).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
-                       std::vector<uint8_t>* sentOut = nullptr) {
+                       std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -540,7 +605,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     other->startRound(0, seed);
     Follower follow;
     Driver d;
-    d.lag = lag, d.rules = rules, d.agent = ai::makeAgent("x3", narrow);
+    d.lag = startLag >= 0 ? startLag : lag, d.rules = rules, d.agent = ai::makeAgent("x3", narrow);
     d.notes = notes;
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
@@ -567,6 +632,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         ai::observe(r, 0, o);
         buttons[0] = other->frame(o);
         buttons[1] = from >= first ? sent[size_t(from - first)] : 0;
+        if (swapped) buttons[1] = uint8_t((buttons[1] & ~(BTN_CW | BTN_CCW)) | (buttons[1] & BTN_CW ? BTN_CCW : 0) | (buttons[1] & BTN_CCW ? BTN_CW : 0));
         PlayerEvents e[2];
         r.step(buttons, e);
         // (a pair the AI found no placement for - the field full - is not counted)
@@ -575,6 +641,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     }
     n.corrected += d.corrected, n.played += d.played;
     n.lagRounds += 1, n.lagRight += d.measuredLag() == lag;
+    n.lagTaken += d.lag == lag, n.turnsFound += d.turnsSwapped;
     if (sentOut) *sentOut = sent;
 }
 
@@ -589,9 +656,68 @@ static void testDriver() {
     check(shaky.locks >= 60 && shaky.corrected > 0 && shaky.hits * 10 >= shaky.locks * 9,
           "through a shaky pad, pairs are not put right: " + std::to_string(shaky.hits) + " of " + std::to_string(shaky.locks) + " where the AI chose, " +
               std::to_string(shaky.corrected) + " found elsewhere");
+    // The lag the driver begins with is not the pad's: it takes the lag it measures.
+    DriveCounts learnt;
+    for (const int padLag : {4, 6}) driveRound(80 + uint64_t(padLag), padLag, false, 2500, learnt, nullptr, nullptr, 2);
+    check(learnt.lagTaken == 2 && learnt.locks >= 40 && learnt.hits * 10 >= learnt.locks * 9,
+          "beginning with a lag of 2 through a pad 4 or 6 frames late, the driver does not take the lag measured (" + std::to_string(learnt.lagTaken) + " of 2 rounds) or does not bring the pairs where the AI chose (" +
+              std::to_string(learnt.hits) + " of " + std::to_string(learnt.locks) + ")");
+    // The pad turns the other way round from what the driver sends: it finds so from the screen and sends the other button.
+    DriveCounts swapped;
+    for (int k = 0; k < 2; ++k) driveRound(90 + uint64_t(k), 3, false, 2500, swapped, nullptr, nullptr, -1, true);
+    check(swapped.turnsFound == 2 && swapped.locks >= 40 && swapped.hits * 10 >= swapped.locks * 9,
+          "through a pad that turns the other way round, the driver does not find so (" + std::to_string(swapped.turnsFound) + " of 2 rounds) or does not bring the pairs where the AI chose (" +
+              std::to_string(swapped.hits) + " of " + std::to_string(swapped.locks) + ")");
+    check(exact.turnsFound == 0 && shaky.turnsFound == 0, "through a pad that turns as sent, the driver takes it to turn the other way round");
     std::cout << "the AI playing 2P through the screen and a pad: late as said, " << exact.hits << " pairs of " << exact.locks
               << " where it chose and none found elsewhere, the lag measured as it was; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
               << shaky.locks << " went where it chose\n";
+}
+
+// ---- 7. the menus of the real game --------------------------------------------------------------------------------
+
+static void testMenus() {
+    const MenuLayout m = measuredMenus();
+    const Layout l = sampleLayout();
+    // (each point painted as a square of 11 x 11 pixels in its colour, the rest grey)
+    const auto paint = [](std::vector<uint8_t>& px, int w, int h, const std::vector<MenuPoint>& points, int shift) {
+        for (const MenuPoint& q : points) {
+            const int cx = int(q.x * float(w)), cy = int(q.y * float(h));
+            for (int y = cy - 5; y <= cy + 5; ++y)
+                for (int x = cx - 5; x <= cx + 5; ++x) {
+                    uint8_t* p = &px[(size_t(y) * size_t(w) + size_t(x)) * 4];
+                    p[0] = uint8_t(std::min(255, q.rgb.b + shift)), p[1] = uint8_t(q.rgb.g), p[2] = uint8_t(q.rgb.r), p[3] = 255;
+                }
+        }
+    };
+    for (const auto& [w, h] : std::vector<std::pair<int, int>>{{2272, 1278}, {2240, 1260}, {1280, 720}}) {
+        const auto read = [&](std::initializer_list<const std::vector<MenuPoint>*> parts, int shift = 0) {
+            Canvas c(w, h, l);
+            for (size_t i = 0; i < c.pixels.size(); i += 4) c.pixels[i] = c.pixels[i + 1] = c.pixels[i + 2] = 90, c.pixels[i + 3] = 255;
+            for (const auto* part : parts) paint(c.pixels, w, h, *part, shift);
+            return readMenu(c.picture(), m);
+        };
+        const std::string size = std::to_string(w) + "x" + std::to_string(h);
+        check(read({}) == Menu::None, size + ": a grey picture is taken for a menu");
+        check(read({&m.players}) == Menu::Players && read({&m.players, &m.waiting}) == Menu::PlayersWaiting, size + ": the screen of the players is not read");
+        check(read({&m.players, &m.waiting, &m.padded}) == Menu::Players, size + ": the row of 2P taken by a pad is taken to be still to take");
+        check(read({&m.characters}) == Menu::Characters && read({&m.characters, &m.decided}) == Menu::Decided, size + ": the screen of the characters is not read");
+        check(read({&m.players, &m.waiting}, 80) == Menu::None, size + ": a screen of other colours is taken for the screen of the players");
+        check(read({&m.waiting}) == Menu::None && read({&m.decided}) == Menu::None, size + ": a part of a screen alone is taken for the screen");
+    }
+    MenuPresser presser;
+    int presses = 0, first = -1;
+    for (int f = 0; f < 3 * MenuPresser::GAP + 5; ++f)
+        if (presser.step(Menu::PlayersWaiting)) presses += 1, first = first < 0 ? f : first;
+    check(first == 0 && presses == 4, "on the screen of the players with 2P to be taken, A is not pressed every GAP pictures (" + std::to_string(presses) + ")");
+    MenuPresser idle;
+    int none = 0;
+    for (const Menu menu : {Menu::None, Menu::Players, Menu::Decided})
+        for (int f = 0; f < 100; ++f) none += idle.step(menu);
+    check(none == 0, "A is pressed where 2P has nothing to do");
+    MenuPresser characters;
+    check(characters.step(Menu::Characters) && !characters.step(Menu::Characters), "on the screen of the characters with 2P to decide, A is not pressed, or pressed again at once");
+    std::cout << "the menus of the real game read by their points at three sizes; A pressed only where 2P has to\n";
 }
 
 // ---- 6. the record of a reading -----------------------------------------------------------------------------------
@@ -704,9 +830,11 @@ int main(int argc, char** argv) {
         testPointRules();
         testUnclearFrames();
         testNoticeCeiling();
+        testPairsSeenOnce();
         testDriver();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
+        testMenus();
         testRounds();
     } catch (const std::exception& e) {
         std::cerr << "FAILED: " << e.what() << '\n';

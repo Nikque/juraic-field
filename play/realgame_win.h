@@ -14,10 +14,14 @@
 #include "realgame_drive.h"
 #include "realgame_follow.h"
 #include "realgame_log.h"
+#include "realgame_menu.h"
 #include "realgame_pad_win.h"
+#include <atomic>
+#include <condition_variable>
 #include <ctime>
 #include <deque>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,7 +29,7 @@
 namespace play {
 
 struct RealGameMode {
-    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_LAG, ROW_TURN, ROW_PRESS, ROW_BACK, ROWS };
+    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_PRESS, ROW_BACK, ROWS };
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
@@ -33,7 +37,23 @@ struct RealGameMode {
     RealGameMode() = default;
     RealGameMode(const RealGameMode&) = delete;
     RealGameMode& operator=(const RealGameMode&) = delete;
-    ~RealGameMode() { capture.stop(), pad.stop(); } // (before the members the capture's thread hands its pictures to are gone)
+    // (before the members the threads of the capture and of the play use are gone)
+    ~RealGameMode() {
+        capture.stop();
+        stopPlayer();
+        pad.stop();
+    }
+
+    // What the play keeps (the reading followed, the driver, the pad, the press, the record) is used by the thread of the
+    // play - each picture as it comes - and by this program's own (its screen and keys): each holds this while it does.
+    mutable std::recursive_mutex state;
+    using Hold = std::lock_guard<std::recursive_mutex>;
+    // Frames of 1/60 s of QueryPerformanceCounter (the clock of the pictures).
+    static int64_t clockFrame() {
+        LARGE_INTEGER counter, frequency;
+        QueryPerformanceCounter(&counter), QueryPerformanceFrequency(&frequency);
+        return (counter.QuadPart / frequency.QuadPart) * 60 + (counter.QuadPart % frequency.QuadPart) * 60 / frequency.QuadPart;
+    }
 
     void open(int settingsStyle, int settingsLevel) {
         row = ROW_STYLE;
@@ -45,21 +65,19 @@ struct RealGameMode {
     // The value of the row under the cursor changed by `by` steps; past either end it comes in again at the other
     // (as on the settings screen: Lv 36 → Lv 1). False: the row has no value.
     bool change(int by) {
+        const Hold hold(state);
         if (row == ROW_STYLE) style = ((style + by) % 2 + 2) % 2;
         else if (row == ROW_LEVEL) level = ((level - 1 + by) % juraic::ai::LEVELS + juraic::ai::LEVELS) % juraic::ai::LEVELS + 1;
-        else if (row == ROW_LAG) lag = ((lag + by) % (MAX_LAG + 1) + MAX_LAG + 1) % (MAX_LAG + 1), driver.lag = lag;
-        else if (row == ROW_TURN) pad.aTurnsRight = !pad.aTurnsRight;
         else if (row == ROW_PRESS) pressButton = ((pressButton + by) % PRESS_BUTTONS + PRESS_BUTTONS) % PRESS_BUTTONS;
         else return false;
         return true;
     }
 
     // ---- the play ----
-    // The frames from a button of the pad to the frame of the real game that takes it (Driver::lag), and which button
-    // turns which way: as the person sets them here (measured: the screen of the real game shows a key 2 to 4 frames
-    // after it is pressed; this is the part before the frame of the game).
-    static constexpr int MAX_LAG = 6;
-    int lag = 2;
+    // The frames from a button of the pad to the picture of the real game that shows it taken, which the AI begins with
+    // (Driver::lag): measured through Steam on the real game, 6. The driver then takes the lag it measures, and finds
+    // from the screen which way the turns go (Driver::turnsSwapped); A is sent for a turn to the right.
+    int lag = 6;
     VirtualPad pad;
     realgame::Driver driver;
     bool playing = false; // the AI plays 2P
@@ -74,19 +92,31 @@ struct RealGameMode {
     static constexpr const char* PRESS_RECORD_NAMES[PRESS_BUTTONS] = {"A", "B", "Start"};
     int pressButton = 0; // (of PRESS_BUTTON_BITS)
     int pressLeft = -1;  // frames until the button is let go; above PRESS_HOLD: still waiting. -1: no press asked
+    USHORT pressBits = 0; // the button of the press asked for
+
+    // The real game's menus read from its screen (play/realgame_menu.h): the pad of 2P presses A where 2P has to pick
+    // its row, its character and its way of play, so that the person need not.
+    bool autoMenus = true;
+    bool padOnReading = true; // the pad is plugged in as reading begins (a test of the reading alone plugs in none)
+    const realgame::MenuLayout menus = realgame::measuredMenus();
+    realgame::Menu menu = realgame::Menu::None; // as last read
+    realgame::MenuPresser presser;
+    std::wstring padError; // (the pad could not be plugged in as reading began)
 
     // The AI `agent` begins to play 2P. False, with the reason in `error`, when it cannot.
     bool startPlaying(std::unique_ptr<juraic::ai::Agent> agent, std::wstring& error) {
+        const Hold hold(state);
         if (reading != Reading::On) return error = L"先に「読み始める」で実機の窓を選んでください", false;
         if (!pad.running() && !pad.start(error)) return false;
         driver = realgame::Driver{};
         driver.lag = lag, driver.agent = std::move(agent);
         driver.notes = &notes;
         playing = true;
-        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + ", A turns " + (pad.aTurnsRight ? "right" : "left"));
+        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with");
         return true;
     }
     void stopPlaying() {
+        const Hold hold(state);
         if (playing) record.event(tracker.frame, "the AI stops");
         playing = false;
         driver.stop();
@@ -95,15 +125,23 @@ struct RealGameMode {
     }
     // A press asked for (the pad plugged in if it is not). False, with the reason in `error`, when the pad cannot be.
     bool pressLater(std::wstring& error) {
+        const Hold hold(state);
         if (!pad.running() && !pad.start(error)) return false;
-        pressLeft = PRESS_WAIT + PRESS_HOLD;
+        pressLeft = PRESS_WAIT + PRESS_HOLD, pressBits = PRESS_BUTTON_BITS[pressButton];
         record.event(tracker.frame, std::string("a press of ") + PRESS_RECORD_NAMES[pressButton] + " asked for");
         return true;
     }
-    bool pressing() const { return pressLeft >= 0; }
+    bool pressing() const {
+        const Hold hold(state);
+        return pressLeft >= 0;
+    }
     // The seconds of the wait before the press (0 while the button is held).
-    int pressSeconds() const { return pressLeft > PRESS_HOLD ? (pressLeft - PRESS_HOLD + 59) / 60 : 0; }
+    int pressSeconds() const {
+        const Hold hold(state);
+        return pressLeft > PRESS_HOLD ? (pressLeft - PRESS_HOLD + 59) / 60 : 0;
+    }
     void stopPress() {
+        const Hold hold(state);
         if (pressLeft >= 0) pad.hold(0);
         pressLeft = -1;
     }
@@ -111,16 +149,19 @@ struct RealGameMode {
     // (stopPlaying and stopPress only let its buttons go): a pad pulled out and plugged in again is a new pad to the
     // real game, which no longer has it as the pad of 2P.
     void leave() {
-        stopReading(), stopPlaying(), stopPress();
+        stopReading();
+        const Hold hold(state);
+        stopPlaying(), stopPress();
         pad.stop();
     }
-    // Every frame of the game: the press asked for, or while the AI plays the buttons for the frame `now` of the clock
-    // (frames of 1/60 s of QueryPerformanceCounter, as the times of the pictures).
+    // The press asked for, or while the AI plays the buttons for the frame `now` of the clock (clockFrame): on the thread
+    // of the play after each picture while reading, otherwise each frame of this program.
     void drive(int64_t now) {
+        const Hold hold(state);
         realgame::PadRecord held{now, 0, 0, 0};
         if (pressLeft >= 0) {
             --pressLeft;
-            pad.hold(pressLeft >= 0 && pressLeft < PRESS_HOLD ? PRESS_BUTTON_BITS[pressButton] : USHORT(0));
+            pad.hold(pressLeft >= 0 && pressLeft < PRESS_HOLD ? pressBits : USHORT(0));
             held.by = 2;
         } else if (playing) {
             const int corrected = driver.corrected;
@@ -157,7 +198,7 @@ struct RealGameMode {
     int width = 0, height = 0;  // of the last picture
     int64_t pictures = 0;       // pictures read since reading began
     int64_t firstFrame = -1;    // the frame of the clock of the first of them
-    int framesWithout = 0;      // frames of the game since a picture last came
+    int framesWithout = 0;      // frames of the clock since a picture last came
 
     // The record of the reading (play/realgame_log.h): in the folder of one's own files, realgame\<date and time>.
     realgame::Record record;
@@ -166,6 +207,7 @@ struct RealGameMode {
     // Begins to read the window `w` with the table of `folder` (or the one built in); `about` begins the record.
     bool startReading(HWND w, const std::filesystem::path& folder, const std::string& about, std::wstring& error) {
         stopReading();
+        const Hold hold(state);
         layout = realgame::measuredLayout(), layoutOwn = false, layoutError.clear();
         std::error_code ignored;
         const std::filesystem::path file = folder / LAYOUT_FILE;
@@ -177,6 +219,10 @@ struct RealGameMode {
         }
         follow.reset();
         follow.tracker.stillFrames = layout.stillFrames;
+        // (the pad of 2P is there from the menus on: the real game gives it the row of 2P)
+        padError.clear();
+        if (padOnReading && !pad.running() && !pad.start(padError)) padError = L"仮想のパッドを差せません: " + padError;
+        menu = realgame::Menu::None, presser = realgame::MenuPresser{};
         const realgame::Layout table = layout; // (the capture's own copy: it reads on its thread)
         recordError.clear();
         const std::time_t now = std::time(nullptr);
@@ -188,46 +234,34 @@ struct RealGameMode {
         if (!header.empty() && header.back() != '\n') header += '\n';
         header += std::string("table: ") + (layoutOwn ? "the file realgame_layout.txt" : "built in") + ", " + std::to_string(layout.baseWidth) + " x " +
                   std::to_string(layout.baseHeight) + "\n";
-        header += "lag " + std::to_string(lag) + ", A turns " + (pad.aTurnsRight ? "right" : "left") + ", the press " + PRESS_RECORD_NAMES[pressButton] + "\n";
+        header += "lag " + std::to_string(lag) + " to begin with, the press " + PRESS_RECORD_NAMES[pressButton] + "\n";
         header += "each line: the frame of the clock (1/60 s), then what happened\n";
         if (!record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作れませんでした（" + (folder / L"realgame").wstring() + L"）";
         notes.clear();
-        const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table); }, error);
+        const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table, menus); }, error);
         reading = started ? Reading::On : Reading::Off;
-        if (!started) record.close();
+        if (started) startPlayer();
+        else record.close();
         return started;
     }
+    // (the threads of the capture and of the play end first, this holding nothing they wait for)
     void stopReading() {
-        if (playing) stopPlaying();
         capture.stop();
+        stopPlayer();
+        const Hold hold(state);
+        if (playing) stopPlaying();
         record.close(); // (after the capture: its thread offers the record pictures)
         reading = Reading::Off;
-        std::lock_guard<std::mutex> hold(lock);
+        std::lock_guard<std::mutex> handed(lock);
         taken.clear();
         saveWanted = savedReady = false;
         width = height = 0, pictures = 0, firstFrame = -1, framesWithout = 0;
     }
 
-    // Every frame of the game: what was read since is followed, in its order.
+    // Every frame of this program: how long since a picture came.
     void pump() {
-        std::deque<Taken> now;
-        {
-            std::lock_guard<std::mutex> hold(lock);
-            now.swap(taken);
-        }
-        framesWithout = now.empty() ? framesWithout + 1 : 0;
-        for (const Taken& t : now) {
-            if (firstFrame < 0) firstFrame = t.frame;
-            if (record.isOpen()) {
-                record.reading(t.reading, t.frame, t.width, t.height);
-                if (t.width != width || t.height != height) record.event(t.frame, "picture size " + std::to_string(t.width) + " x " + std::to_string(t.height));
-            }
-            const Counts before = counts();
-            follow.step(t.reading, t.frame);
-            width = t.width, height = t.height;
-            ++pictures;
-            if (record.isOpen()) noteStep(before, t.frame);
-        }
+        const int64_t last = lastPicture.load();
+        framesWithout = last < 0 ? framesWithout + 1 : int(clockFrame() - last);
     }
 
     // The next picture kept as it is, to be saved (savedPicture).
@@ -253,7 +287,70 @@ private:
         realgame::Reading reading;
         int64_t frame;
         int width, height;
+        realgame::Menu menu;
     };
+    // The thread of the play: woken by each picture taken (`arrived`, with `lock`), it follows what was read and then
+    // drives the pad - in the rhythm of the pictures, not of this program's frames (which come late or twice at times).
+    std::thread player;
+    std::condition_variable arrived;
+    bool playerStop = false;
+    std::atomic<int64_t> lastPicture{-1}; // the frame of the clock in which the play last took pictures
+
+    void startPlayer() {
+        stopPlayer();
+        {
+            std::lock_guard<std::mutex> hold(lock);
+            playerStop = false;
+        }
+        lastPicture = -1;
+        player = std::thread([this] { playLoop(); });
+    }
+    void stopPlayer() {
+        {
+            std::lock_guard<std::mutex> hold(lock);
+            playerStop = true;
+        }
+        arrived.notify_all();
+        if (player.joinable()) player.join();
+    }
+    // On the thread of the play: what was read, in its order.
+    void followTaken(const std::deque<Taken>& now) {
+        for (const Taken& t : now) {
+            if (firstFrame < 0) firstFrame = t.frame;
+            if (record.isOpen()) {
+                record.reading(t.reading, t.frame, t.width, t.height);
+                if (t.width != width || t.height != height) record.event(t.frame, "picture size " + std::to_string(t.width) + " x " + std::to_string(t.height));
+            }
+            const Counts before = counts();
+            follow.step(t.reading, t.frame);
+            width = t.width, height = t.height;
+            ++pictures;
+            if (record.isOpen()) noteStep(before, t.frame);
+            if (t.menu != menu) record.event(t.frame, std::string("menu: ") + realgame::menuName(t.menu));
+            menu = t.menu;
+        }
+        // (in the menus the pad of 2P presses A where 2P has to; a press asked for by hand comes first)
+        if (!now.empty() && autoMenus && pad.running() && pressLeft < 0 && presser.step(menu)) {
+            pressLeft = PRESS_HOLD, pressBits = XUSB_GAMEPAD_A;
+            record.event(now.back().frame, std::string("the pad of 2P presses A: ") + realgame::menuName(menu));
+        }
+    }
+    void playLoop() {
+        for (;;) {
+            std::deque<Taken> now;
+            {
+                std::unique_lock<std::mutex> hold(lock);
+                arrived.wait(hold, [this] { return playerStop || !taken.empty(); });
+                if (playerStop) return;
+                now.swap(taken);
+            }
+            const Hold hold(state);
+            followTaken(now);
+            const int64_t at = clockFrame();
+            lastPicture = at;
+            drive(at);
+        }
+    }
     std::vector<std::pair<int64_t, std::string>> notes; // of the driver, until they go into the record
 
     // What the record is told after each reading: what it changed of these.
@@ -302,12 +399,13 @@ private:
     int savedWidth = 0, savedHeight = 0;
 
     // On the capture's thread: a picture read; the frame from the time it was shown (frames of 1/60 s).
-    void took(const realgame::Picture& p, int64_t time, const realgame::Layout& table) {
-        Taken t{realgame::read(p, table), (time * 60 + 5000000) / 10000000, p.width, p.height};
+    void took(const realgame::Picture& p, int64_t time, const realgame::Layout& table, const realgame::MenuLayout& menuTable) {
+        Taken t{realgame::read(p, table), (time * 60 + 5000000) / 10000000, p.width, p.height, realgame::readMenu(p, menuTable)};
         record.offer(p, t.frame);
         std::lock_guard<std::mutex> hold(lock);
         if (taken.size() >= 600) taken.pop_front(); // (no one takes them: the oldest go)
         taken.push_back(std::move(t));
+        arrived.notify_one();
         if (saveWanted) {
             saved.resize(size_t(p.width) * size_t(p.height) * 4);
             for (int y = 0; y < p.height; ++y)

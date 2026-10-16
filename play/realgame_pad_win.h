@@ -12,8 +12,8 @@ namespace play {
 
 class VirtualPad {
 public:
-    // Which button of the pad turns the pair which way in the real game (as set there): A right and B left, or the
-    // other way round.
+    // Which button of the pad a turn is sent on: A for a turn to the right, B to the left (when the real game turns the
+    // other way round the driver sends the other turn: realgame::Driver::turnsSwapped).
     bool aTurnsRight = true;
 
     VirtualPad() = default;

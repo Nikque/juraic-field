@@ -27,13 +27,21 @@ namespace play::realgame {
 class Driver {
 public:
     int me = 1;                               // the seat played
-    int lag = 2;                              // frames from a button sent to the frame of the game that takes it
+    // Frames from a button sent to the picture of the game that shows it taken. The driver begins with it and takes the
+    // lag it measures (measuredLag) from the pair after LAGS_TAKEN measurements on (takeLag).
+    int lag = 2;
+    bool takeLag = true;
+    static constexpr int LAGS_TAKEN = 5;
     juraic::Rules rules;                      // the real game's
     std::unique_ptr<juraic::ai::Agent> agent; // a PlacementAgent
     uint64_t seed = 1;                        // of the agent's rounds
     int played = 0;                           // pairs played
     int corrected = 0;                        // pictures that showed the pair elsewhere than the engine had it
     std::vector<int> lags;                    // the lags measured, the last first ones dropped (at most 15)
+    // The buttons of the two turns are sent the other way round: found from the screen, when a pair it turned shows the
+    // way opposite to the engine's TURNS_OPPOSITE pictures in a row (a turn the game took the other way round).
+    bool turnsSwapped = false;
+    static constexpr int TURNS_OPPOSITE = 2;
     // When set: what the driver does, as lines with the frame of the clock they are of (the record of a reading,
     // play/realgame_log.h) - each pair begun, the placement it is brought to, a pair put where the picture shows it,
     // a lag measured.
@@ -89,7 +97,7 @@ public:
             play(f, true);
             if ((held & (juraic::BTN_LEFT | juraic::BTN_RIGHT)) && movedAt < 0) movedAt = now, movedFrom = spawnX;
         }
-        return held;
+        return sent(held);
     }
 
 private:
@@ -111,6 +119,13 @@ private:
     int spawnX = juraic::SPAWN_X;
     bool measured = true;
     int noted = -2; // the placement last noted (notes)
+    int opposite = 0; // pictures in a row that showed a pair turned the opposite way of the engine's
+
+    // The buttons held as they go to the pad: the two turns the other way round when the game turns so.
+    uint8_t sent(uint8_t b) const {
+        if (!turnsSwapped) return b;
+        return uint8_t((b & ~(juraic::BTN_CW | juraic::BTN_CCW)) | (b & juraic::BTN_CW ? juraic::BTN_CCW : 0) | (b & juraic::BTN_CCW ? juraic::BTN_CW : 0));
+    }
 
     void note(int64_t at, const std::string& line) {
         if (notes) notes->emplace_back(at, line);
@@ -142,6 +157,10 @@ private:
         for (size_t i = 0; i < t.pairs.size(); ++i) {
             const juraic::Pair p = t.known[i] ? t.pairs[i] : juraic::Pair{1, 1};
             tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2] = p.axis, tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2 + 1] = p.child;
+        }
+        if (takeLag && int(lags.size()) >= LAGS_TAKEN && measuredLag() != lag) {
+            note(t.frame, "the lag taken: " + std::to_string(measuredLag()) + " frames (was " + std::to_string(lag) + ")");
+            lag = measuredLag();
         }
         // (seen late, it was in play already in the frame of the picture: it is taken as appearing in that frame)
         next = side.spawnedAt + (side.late ? 0 : 1);
@@ -227,6 +246,14 @@ private:
         pairHalves(seen, sx, sh, tx, th);
         const juraic::Pair c = past[i].state.colors;
         const bool sameCells = (ax == sx && ah == sh && cx == tx && ch == th) || (c.axis == c.child && ax == tx && ah == th && cx == sx && ch == sh);
+        // (a pair of two colours turned: the way it shows against the engine's)
+        if (c.axis != c.child && had.dir != juraic::UP) {
+            if (sameCells) opposite = 0;
+            else if (seen.dir == (had.dir + 2) % 4 && ++opposite >= TURNS_OPPOSITE) {
+                turnsSwapped = !turnsSwapped, opposite = 0;
+                note(t.frame, std::string("the turns are taken the other way round: the buttons of the two turns are now sent ") + (turnsSwapped ? "swapped" : "as they are"));
+            }
+        }
         if (sameCells) return;
         ++corrected;
         note(t.frame, "2P pair " + std::to_string(pairsSeen) + " put right: the engine had " + controlText(had) + ", the picture shows " + controlText(seen));

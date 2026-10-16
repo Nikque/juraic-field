@@ -629,23 +629,34 @@ struct SideTrack {
     int64_t noticeSince = 0;
     juraic::Pair next[2]{};    // the window of the next pairs as last read
     bool nextRead[2]{};
+    int nextStill = 0;         // readings in a row that showed the window as the one before it (both pairs read)
+    int64_t nextMovedAt = -1;  // the last reading in which it was read otherwise (moving)
+    int learnFor = -1;         // the pair whose next two are still to be learnt from the window (-1: none)
 };
 
 class Tracker {
 public:
     juraic::Timing timing = juraic::DEFAULT_TIMING;
     int stillFrames = 2;
-    // Both fields empty, with no pair, for this many frames: a new round (the screen before a round shows them so).
-    int roundGap = 30;
+    // Both fields empty, with no pair, for this many frames: a new round (the screen before a round shows them so). A
+    // reading otherwise for fewer than roundBreak frames in a row does not end the empty time (a light read as a piece).
+    int roundGap = 30, roundBreak = 2;
     // The notice is taken when it has read the same for this many frames (a light of the screen over it changes it).
     int noticeFrames = 3;
     // A new pair hidden by a light as it appeared: taken when it is seen within this many frames after the light, in
     // the air, of the colours of the pair that comes next (Tracker::late).
     int lateFrames = 20;
+    // A pair where pairs appear within this many frames after the last one appeared, over the field it appeared over,
+    // is that pair (moved at once and read as another colour in a picture, it was taken for a new one).
+    int pairGap = 12;
+    // The window of the next pairs moves for some frames as a pair appears, reading as other pairs on its way: the two
+    // after a new pair are learnt once it has read the same windowStill readings in a row, after it moved - at most
+    // windowBefore frames before the pair appeared - or windowWait frames after the pair appeared (the same pairs again).
+    int windowStill = 2, windowBefore = 10, windowWait = 30;
     SideTrack side[2];
     // The pairs the screen has shown, numbered as the players draw them (both draw from one tsumo).
     std::vector<juraic::Pair> pairs;
-    std::vector<uint8_t> known;
+    std::vector<uint8_t> known; // 1: learnt from a window that stood still; 2: from one that may have been moving (put right after)
     Reading last;             // the last reading
     int64_t frame = -1;       // ... and its frame
     int64_t roundStart = -1;  // the frame that is frame 0 of the round (-1: not known yet)
@@ -657,9 +668,11 @@ public:
 
     void reset() {
         const juraic::Timing t = timing;
-        const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames;
+        const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames, twice = pairGap, broken = roundBreak;
+        const int windowS = windowStill, windowB = windowBefore, windowW = windowWait;
         *this = Tracker{};
-        timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness;
+        timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness, pairGap = twice, roundBreak = broken;
+        windowStill = windowS, windowBefore = windowB, windowWait = windowW;
     }
 
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
@@ -678,7 +691,14 @@ public:
             SideTrack& t = side[s];
             if (read.notice != t.noticeRead) t.noticeRead = read.notice, t.noticeSince = at;
             if (at - t.noticeSince + 1 >= noticeFrames) t.notice = t.noticeRead;
+            const bool sameWindow = read.nextRead[0] && read.nextRead[1] && t.nextRead[0] && t.nextRead[1] && same(read.next[0], t.next[0]) && same(read.next[1], t.next[1]);
+            t.nextStill = sameWindow ? t.nextStill + 1 : 0;
+            if (!sameWindow) t.nextMovedAt = at;
             for (int n = 0; n < 2; ++n) t.next[n] = read.next[n], t.nextRead[n] = read.nextRead[n];
+            if (t.learnFor >= 0 && windowSettled(t, at)) {
+                learn(t.learnFor + 1, t.next[0]), learn(t.learnFor + 2, t.next[1]);
+                t.learnFor = -1;
+            }
             t.clear = read.unsure == 0;
             if (!t.clear) {
                 // (something the screen draws over the field: nothing of it is taken, the pair not seen in this frame)
@@ -715,16 +735,19 @@ public:
                 const bool hidden = !there && !t.inHand && t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && fresh.seen && !fresh.childHidden &&
                                     knows(t.pairs) && same(fresh.colors, pairs[size_t(t.pairs)]) && fresh.at.y >= juraic::SPAWN_Y - 3 &&
                                     !pairLying(fresh, resting);
-                if (settled && (there || hidden)) newPair(s, fresh, resting, read, at), late[s] = t.late = hidden;
+                const bool samePair = t.inHand && resting == t.under && at - t.spawnedAt < pairGap;
+                if (settled && (there || hidden) && !samePair) newPair(s, fresh, resting, read, at), late[s] = t.late = hidden;
             }
             t.loose = looseOf(read, t);
             empty = empty && resting.f.empty() && t.loose == 0 && !t.inHand;
         }
-        if (!empty) emptySince = -1;
-        else if (emptySince < 0) emptySince = at;
+        fullFor = empty ? 0 : fullFor + 1;
+        if (fullFor >= roundBreak) emptySince = -1;
+        else if (empty && emptySince < 0) emptySince = at;
         if (empty && at - emptySince >= roundGap && (side[0].pairs || side[1].pairs || !fromStart)) newRound();
         // Before the first pair of a round: the window shows the first two pairs.
-        if (fromStart && !side[0].pairs && !side[1].pairs && !knows(0) && side[0].nextRead[0] && side[0].nextRead[1]) {
+        if (fromStart && !side[0].pairs && !side[1].pairs && !knows(0) && side[0].nextRead[0] && side[0].nextRead[1] && side[0].nextStill >= windowStill &&
+            (!side[1].nextRead[0] || !side[1].nextRead[1] || side[1].nextStill >= windowStill)) {
             if (side[1].nextRead[0] && side[1].nextRead[1] && !(same(side[0].next[0], side[1].next[0]) && same(side[0].next[1], side[1].next[1]))) ++doubts;
             else learn(0, side[0].next[0]), learn(1, side[0].next[1]);
         }
@@ -732,6 +755,7 @@ public:
 
 private:
     int64_t emptySince = -1;
+    int fullFor = 0; // readings in a row in which the fields were not empty
 
     static bool same(juraic::Pair a, juraic::Pair b) { return a.axis == b.axis && a.child == b.child; }
     // Points that show a piece above the field the pair moves over (or above the pieces at rest), the pair's own left out.
@@ -745,15 +769,22 @@ private:
             for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && !own(x, k);
         return n;
     }
-    void learn(int index, juraic::Pair p) {
+    // The pair `index` is p: read from a window that stood still (sure), or that may have been moving - taken until the
+    // window stands still, never over a pair learnt so.
+    void learn(int index, juraic::Pair p, bool sure = true) {
         if (index < 0) return;
         if (int(known.size()) <= index) pairs.resize(size_t(index) + 1), known.resize(size_t(index) + 1, 0);
-        if (known[size_t(index)] && !same(pairs[size_t(index)], p)) ++doubts;
-        pairs[size_t(index)] = p, known[size_t(index)] = 1;
+        uint8_t& k = known[size_t(index)];
+        if (k == 1 && sure && !same(pairs[size_t(index)], p)) ++doubts;
+        if (k == 1 && !sure) return;
+        pairs[size_t(index)] = p, k = sure ? 1 : 2;
+    }
+    bool windowSettled(const SideTrack& t, int64_t at) const {
+        return t.nextStill >= windowStill && (t.nextMovedAt >= t.spawnedAt - windowBefore || at - t.spawnedAt >= windowWait);
     }
     void newRound() {
         ++rounds;
-        for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false;
+        for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false, t.learnFor = -1;
         pairs.clear(), known.clear();
         roundStart = -1;
         fromStart = true;
@@ -771,9 +802,14 @@ private:
             if (fresh.colors.axis != pairs[size_t(index)].axis) ++doubts;
             t.colors = t.pair.colors = t.lastSeen.colors = pairs[size_t(index)];
         }
-        // (the window has moved on: the two pairs after this one)
-        for (int n = 0; n < 2; ++n)
-            if (read.nextRead[n]) learn(index + 1 + n, read.next[n]);
+        // (the window has moved on: the two pairs after this one, sure once it stands still - until then as it reads)
+        if (windowSettled(t, at)) {
+            learn(index + 1, read.next[0]), learn(index + 2, read.next[1]);
+        } else {
+            for (int n = 0; n < 2; ++n)
+                if (read.nextRead[n]) learn(index + 1 + n, read.next[n], false);
+            t.learnFor = index;
+        }
         spawned[s] = true;
         // The first pair of a round is seen in its frame firstSpawn (game/player.h startPlayer).
         if (index == 0 && roundStart < 0) roundStart = at - timing.firstSpawn;
