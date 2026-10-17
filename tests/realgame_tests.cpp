@@ -772,6 +772,23 @@ static void testRow13Kept() {
     std::cout << "a pair put with a piece in the 13th row, which the screen does not show, is found and the piece kept\n";
 }
 
+// The AI that plays 2P of the real game learns its third pair only as the pair appears (the window moves until then),
+// so its second choice comes after the pair has set out: while it is on its way the pair goes straight down where that
+// loses nothing (PlacementAgent::holdSecond) - for the AI the driver is given and the one that takes over from it.
+static void testSecondChoiceHeld() {
+    const std::unique_ptr<ai::Agent> given = ai::makeAgent("x3");
+    Driver::prepare(given.get());
+    const auto* placing = dynamic_cast<const ai::PlacementAgent*>(given.get());
+    check(placing && placing->holdSecond, "the AI given to the driver does not go straight down while its second choice is on its way");
+    Driver d;
+    d.replaceAgent(ai::makeAgent("lv5"));
+    Follower f;
+    d.tick(f, 100);
+    const auto* taken = dynamic_cast<const ai::PlacementAgent*>(d.agent.get());
+    check(taken && taken->holdSecond, "the AI that takes over does not go straight down while its second choice is on its way");
+    std::cout << "the AI playing 2P goes straight down while its second choice is on its way\n";
+}
+
 // What the AI is shown before its pair appears (observeWith, the own side as the driver follows it, waiting for the
 // pair): the pairs the screen has shown and no other. The window shows the pair that comes and the one after it; the
 // pair after those is learnt when the pair has appeared, and the AI is then asked for its second choice.
@@ -1291,6 +1308,7 @@ int main(int argc, char** argv) {
         testShownPairsOnly();
         testPairsAfterLight();
         testRow13Kept();
+        testSecondChoiceHeld();
         testDriver();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");

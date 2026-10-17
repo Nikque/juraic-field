@@ -71,7 +71,18 @@ public:
     // Another AI to play from the next pair on (the level changed while the AI plays): it takes over when no pair is in
     // play, the one before let go on a thread of its own (it waits for a search it may have begun, as long as its
     // level lets it think: the pad is not to wait for that).
-    void replaceAgent(std::unique_ptr<juraic::ai::Agent> given) { nextAgent = std::move(given); }
+    void replaceAgent(std::unique_ptr<juraic::ai::Agent> given) {
+        prepare(given.get());
+        nextAgent = std::move(given);
+    }
+
+    // An AI that plays 2P of the real game: while its second choice is on its way, the pair goes straight down in every
+    // frame in which that loses nothing (PlacementAgent::holdSecond, Params::thinkHold). The third pair is known only as
+    // the pair appears (the window of the next pairs moves until then), so the second choice comes after the pair has
+    // set out for the first (on the real game 26 pairs of 147 changed their placement 1 to 6 frames after they were seen).
+    static void prepare(juraic::ai::Agent* agent) {
+        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true;
+    }
 
     // The middle of the lags the pictures of the last pairs fitted best; -1: none yet.
     int measuredLag() const {
