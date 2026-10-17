@@ -710,6 +710,68 @@ static void testPairsAfterLight() {
     std::cout << "a pair first seen after a light, both pieces showing, is the pair that came; the pair the window shows as it moves on is learnt\n";
 }
 
+// The real game shows twelve rows; a piece rests in the 13th too (the AI builds into it). A pair put there, one piece
+// in the 12th row of one column and the other in the 13th of a column twelve high, is found (the screen does not tell
+// it from the pair standing on the second column, its child in the 13th row there), and a piece in the 13th row stays
+// in the field followed and in what the AI is shown, as the next pair appears. The driver takes the 13th and 14th rows
+// of a column from its engine, which put the pair, where the twelve rows the screen shows are the engine's.
+static void testRow13Kept() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 5}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    Follower f;
+    int64_t at = 50000;
+    for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+    // 2P's field: the first column twelve high, the second eleven (two colours in turn: nothing clears).
+    Reading tall = empty;
+    for (int y = 0; y < 12; ++y) tall.side[1].point[0][2 * y] = tall.side[1].point[0][2 * y + 1] = Cell(1 + y % 2);
+    for (int y = 0; y < 11; ++y) tall.side[1].point[1][2 * y] = tall.side[1].point[1][2 * y + 1] = Cell(3 + y % 2);
+    for (int k = 0; k < 5; ++k) f.step(tall, at++);
+    // The first pair (5 5) appears, and comes to rest lying across the first two columns: one piece in the 12th row of
+    // the second column, the other in the 13th of the first, which the screen does not show.
+    Reading first = window(tall, {1, 2}, {3, 3});
+    first.side[1].point[SPAWN_X][23] = 5;
+    for (int k = 0; k < 3; ++k) f.step(first, at++);
+    check(f.tracker.side[1].pairs == 1, "the first pair is not seen");
+    Reading landed = window(tall, {1, 2}, {3, 3});
+    landed.side[1].point[1][22] = landed.side[1].point[1][23] = 5;
+    for (int k = 0; k < 6; ++k) f.step(landed, at++);
+    // The next pair (1 2) appears.
+    Reading next = window(landed, {3, 3}, {4, 4});
+    next.side[1].point[SPAWN_X][23] = 1;
+    f.step(next, at++);
+    check(f.tracker.spawned[1] && f.tracker.side[1].pairs == 2, "the second pair is not seen");
+    check(f.model[1].followed == 0, "a pair put with a piece in the 13th row is not found where it was put");
+    const auto row13 = [](const GameField& g) {
+        int n = 0;
+        for (int x = 0; x < W; ++x) n += g.f.get(x, 12) == 5;
+        return n;
+    };
+    check(row13(f.model[1].core.field) == 1, "the piece in the 13th row is not in the field followed");
+    ai::Observation o;
+    check(f.observe(1, f.rules, o) && row13(o.self().field) == 1, "the piece in the 13th row is not in what the AI is shown");
+    // The engine put the pair lying, its child in the 13th row of the first column; its row 14 holds a piece the screen
+    // knows nothing of. The fourth column the engine has otherwise than the screen: there it is the field followed.
+    GameField engine = f.model[1].core.field;
+    for (int x = 0; x < W; ++x) engine.f.set(x, 12, EMPTY);
+    engine.f.set(0, 12, 5), engine.row14[0] = 3;
+    GameField followed = f.model[1].core.field;
+    followed.f.set(3, 0, 4);
+    engine.f.set(3, 0, 2), engine.f.set(3, 1, 2);
+    const GameField taken = Driver::hiddenFromEngine(followed, engine);
+    check(taken.f.get(0, 12) == 5 && taken.f.get(1, 12) == EMPTY && taken.row14[0] == 3, "the driver does not take the 13th and 14th rows from its engine");
+    check(taken.f.get(3, 0) == 4 && taken.f.get(3, 1) == EMPTY, "the driver takes a column from its engine that the screen shows otherwise");
+    std::cout << "a pair put with a piece in the 13th row, which the screen does not show, is found and the piece kept\n";
+}
+
 // What the AI is shown before its pair appears (observeWith, the own side as the driver follows it, waiting for the
 // pair): the pairs the screen has shown and no other. The window shows the pair that comes and the one after it; the
 // pair after those is learnt when the pair has appeared, and the AI is then asked for its second choice.
@@ -1228,6 +1290,7 @@ int main(int argc, char** argv) {
         testWindowBeforeRound();
         testShownPairsOnly();
         testPairsAfterLight();
+        testRow13Kept();
         testDriver();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");

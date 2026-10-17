@@ -85,6 +85,22 @@ public:
     // pair locks with them).
     void stop() { active = false; }
     bool playing() const { return active; }
+    // The field a pair is begun with: `followed` (the twelve rows the screen shows; the 13th and 14th, which it does not,
+    // as Follower made them out) with the 13th and 14th rows of `engine` (the field the engine left: it put the pairs,
+    // where the screen cannot tell one piece in the 13th row of one column from one in another, nor see a pair put whole
+    // into those rows) on every column whose twelve rows are the same in both.
+    static juraic::GameField hiddenFromEngine(const juraic::GameField& followed, const juraic::GameField& engine) {
+        juraic::GameField g = followed;
+        for (int x = 0; x < juraic::W; ++x) {
+            bool same = true;
+            for (int y = 0; y < 12 && same; ++y) same = followed.f.get(x, y) == engine.f.get(x, y);
+            if (!same) continue;
+            g.f.set(x, 12, engine.f.get(x, 12));
+            g.row14[size_t(x)] = engine.row14[size_t(x)];
+        }
+        return g;
+    }
+
     // The placement the pair in play is brought to (-1: none).
     int target() const {
         const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(agent.get());
@@ -162,6 +178,7 @@ private:
     bool active = false;
     uint8_t held = 0;
     int round = -1, pairsSeen = 0;
+    int begunRound = -1; // the round of the last pair begun (the engine's field is of it)
     int64_t checked = -1;
     int noted = -2; // the placement last noted (notes)
     int64_t steeredSeen = 0, againSeen = 0; // the agent's counts of the nearest placements taken and the second choices taken, as last noted
@@ -234,8 +251,12 @@ private:
     void begin(const Follower& f, const SideTrack& side) {
         const Tracker& t = f.tracker;
         fit(f); // (the pair before, whose pictures are all in)
+        const juraic::GameField engine = own.field; // (as the engine left it after the pair before)
+        const bool sameRound = begunRound == t.rounds;
+        begunRound = t.rounds;
         own = juraic::Player{};
-        own.field = f.model[me].known ? f.model[me].core.field : side.under; // (with the 14th row the moves followed put there)
+        own.field = f.model[me].known ? f.model[me].core.field : side.under; // (with the 13th and 14th rows the moves followed put there)
+        if (sameRound) own.field = hiddenFromEngine(own.field, engine);
         own.phase = juraic::Phase::Next;
         own.wait = 1;
         own.nextPair = own.moves = side.pairs - 1;

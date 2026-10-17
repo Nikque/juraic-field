@@ -8,7 +8,8 @@
 // sent: a notice of more is taken only when it has read the same for a long time (a light of the screen over the
 // notice changes what it shows).
 //
-// The 14th row is not on the screen: its pieces are those the placements followed put there (they never move).
+// The 13th and 14th rows are not on the screen (it shows twelve): their pieces are those the placements followed put
+// there - in the 13th row where the screen shows the column twelve high, in the 14th always (they never move).
 //
 // What the screen does not tell: the points of the down key (a point a row, which count towards garbage), so the
 // garbage a chain sends is reckoned short by a little at times (Follower::slack).
@@ -80,12 +81,10 @@ public:
                 // A new pair: the pieces it appears over, against the game (only garbage may have come above them).
                 if (m.known && m.followed == t.pairs - 2) {
                     ++checks;
-                    if (!fits(t.under, m.core.field)) ++misses;
+                    if (!fits(withHidden(t.under, m.core.field), m.core.field)) ++misses;
                 }
-                // (the 14th row is not on the screen: its pieces, put there by the moves followed, stay as they were)
-                const std::array<juraic::Cell, juraic::W> row14 = m.core.field.row14;
-                m.core.field = t.under;
-                m.core.field.row14 = row14;
+                // (the 13th and 14th rows are not on the screen: their pieces, put there by the moves followed, stay)
+                m.core.field = withHidden(t.under, m.core.field);
                 m.known = true;
                 // (its chain has ended: what it sent is in the notice of the other side)
                 model[1 - s].budget = 0;
@@ -115,7 +114,7 @@ private:
     void complete(juraic::ai::Observation& o) const {
         for (int s = 0; s < 2; ++s) {
             juraic::Player& p = o.player[s];
-            p.field.row14 = model[s].core.field.row14; // (the 14th row as the moves followed put it)
+            p.field = withHidden(p.field, model[s].core.field); // (the 13th and 14th rows as the moves followed put them)
             p.incoming = {};
             (tracker.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = notice[s];
             if (model[s].known) p.scoring = model[s].core.scoring;
@@ -123,6 +122,23 @@ private:
     }
 
     static int count(const juraic::GameField& g) { return g.f.count(); }
+    // `read` (the twelve rows the screen shows) with the pieces of `game` in the rows it does not show where they can
+    // rest: in the 13th row of a column read twelve high, and in the 14th row.
+    static juraic::GameField withHidden(const juraic::GameField& read, const juraic::GameField& game) {
+        juraic::GameField g = read;
+        int h[juraic::W];
+        read.heights(h);
+        for (int x = 0; x < juraic::W; ++x)
+            if (h[x] == 12 && game.f.get(x, 12) != juraic::EMPTY) g.f.set(x, 12, game.f.get(x, 12));
+        g.row14 = game.row14;
+        return g;
+    }
+    // ... and the twelve rows of `g` alone.
+    static juraic::GameField shown(const juraic::GameField& g) {
+        juraic::GameField s;
+        for (int i = 0; i < 3; ++i) s.f.plane[size_t(i)] = g.f.plane[size_t(i)] & juraic::MASK_12;
+        return s;
+    }
     // `read` is `game` with garbage above it, or nothing more.
     static bool fits(const juraic::GameField& read, const juraic::GameField& game) {
         if (!contains(read, game)) return false;
@@ -149,27 +165,28 @@ private:
     }
 
     // The pieces of side s since its pair appeared: the pair lying where it would be locked (which of the placements of
-    // the game makes them: the field it appeared over and two pieces more, or one when the other is in the 14th row),
+    // the game makes them: the field it appeared over - with the pieces of the rows the screen does not show - and the
+    // pair, in the twelve rows the screen shows: two pieces more, or one when the other is in the 13th or 14th row),
     // or locked.
     void find(int s, int64_t at) {
         const SideTrack& t = tracker.side[s];
         SideModel& m = model[s];
-        // (one piece more when the other went into the 14th row, which the screen does not show)
+        // (one piece more when the other went into the 13th or 14th row, which the screen does not show)
         const int more = count(t.resting) - count(t.under);
         if ((more == 2 || more == 1) && contains(t.resting, t.under)) {
             if (m.lying && m.index == t.pairs - 1 && t.resting == m.with) return;
-            const unsigned legal = juraic::legalPlacements(t.under);
+            const juraic::GameField base = withHidden(t.under, m.core.field), seen = shown(t.resting);
+            const unsigned legal = juraic::legalPlacements(base);
             for (juraic::Cell child = 0; child <= juraic::MAX_COLORS; ++child) {
                 if (child && t.colors.child) break; // (a child not seen: each colour)
                 const juraic::Pair colors{t.colors.axis, t.colors.child ? t.colors.child : child};
                 if (!colors.child) continue;
                 for (int id = 0; id < juraic::PLACEMENTS; ++id) {
                     if (!(legal >> id & 1)) continue;
-                    juraic::GameField g = t.under;
+                    juraic::GameField g = base;
                     juraic::place(g, juraic::placement(id), colors);
-                    if (!(g.f == t.resting.f)) continue;
-                    m.lying = true, m.index = t.pairs - 1, m.at = juraic::placement(id), m.colors = colors, m.base = t.under, m.with = t.resting;
-                    m.base.row14 = m.core.field.row14; // (the 14th row, which the screen does not show)
+                    if (!(shown(g).f == seen.f)) continue;
+                    m.lying = true, m.index = t.pairs - 1, m.at = juraic::placement(id), m.colors = colors, m.base = base, m.with = t.resting;
                     juraic::PlayerCore core = m.core;
                     juraic::Incoming other{0, notice[1 - s]};
                     core.incoming = {0, notice[s]};
@@ -181,7 +198,7 @@ private:
         } else if (m.lying) {
             // Locked: the pieces under it changed (its chain), or more came above them (garbage). Otherwise it is moving
             // still (lifted, or half over a lower column).
-            if (!contains(t.resting, m.base) || count(t.resting) > count(m.base) + 2) lock(s, at);
+            if (!contains(t.resting, shown(m.base)) || count(t.resting) > count(shown(m.base)) + 2) lock(s, at);
             else m.lying = false;
         }
     }
