@@ -102,6 +102,8 @@ struct Layout {
     float patch = 4;              // a point is the square this many base pixels from it each way
     float markPatch = 4;          // ... a point of a mark of the notice
     int colorDistance = 60;       // a point within this distance (red, green, blue) of a colour of the table is that colour
+    int faceHue = 0;              // ... or, near none and with the warm white of a piece's face, the colour nearest in hue
+                                  // within this many degrees when the other point of its cell is a piece of it (0: not used)
     std::vector<ColorRef> colors; // (the nearest counts; a point near none of them is empty)
     // A point is a piece of a colour when `colored` in a hundred of its pixels have strong colour and `cover` in a hundred
     // have strong colour or are pale grey; with fewer of strong colour, garbage when `garbage` in a hundred are pale grey;
@@ -184,6 +186,9 @@ inline Layout measuredLayout() {
                mark(360, {{0, 10, {228, 136, 14}}, {26, -6, {224, 176, 141}}, {-26, -6, {214, 89, 92}}}),
                mark(720, {{16, 0, {220, 34, 34}}, {0, 10, {212, 127, 53}}, {26, -6, {219, 125, 45}}})};
     l.colorDistance = 80;
+    // (the eyes of a face of joined red pieces under the shine: mean 219 67 64 and 237 77 74, 85 and 108 from the red
+    //  of the table, 88 and 85 from its yellow; in hue 1 degree, the red 0, the yellows 35 and 47)
+    l.faceHue = 12;
     l.colored = 8, l.cover = 45, l.garbage = 30;
     l.colors = {{1, {158, 23, 24}}, {2, {54, 185, 37}}, {3, {36, 122, 216}}, {4, {233, 143, 21}}, {4, {245, 200, 40}}, {5, {130, 50, 188}}};
     const float left[2] = {324.2f, 1461.6f}, nextX[2][2] = {{875.8f, 927.4f}, {1361.9f, 1308.2f}};
@@ -200,7 +205,7 @@ inline Layout measuredLayout() {
 
 // The table as text: one item a line, a word and its numbers; # begins a remark.
 //   base <width> <height>              patch <half side>        markpatch <half side>        still <frames>
-//   distance <colours> <marks>         share <strong colour> <cover> <garbage> <unsure>   (in a hundred pixels of a point)
+//   distance <colours> <marks> [<face hue>]   share <strong colour> <cover> <garbage> <unsure>   (in a hundred pixels of a point)
 //   color <piece> <r> <g> <b>          (piece: 0 no piece, 1 to 5 the colours, 6 garbage; one line a colour)
 //   mark <pieces> <dx> <dy> <r> <g> <b> [<dx> <dy> <r> <g> <b> ...]
 //   field <side> <left> <bottom> <cell width> <cell height> <rows shown>      (side: 1 or 2)
@@ -209,7 +214,7 @@ inline Layout measuredLayout() {
 //   marked <side> <column> <row> <pale grey> <r> <g> <b> [<r> <g> <b> ...]   (columns 1 to 6, rows 1 to 13 from the floor)
 inline std::string formatLayout(const Layout& l) {
     std::ostringstream o;
-    o << "base " << l.baseWidth << ' ' << l.baseHeight << "\npatch " << l.patch << "\nmarkpatch " << l.markPatch << "\nstill " << l.stillFrames << "\ndistance " << l.colorDistance << ' ' << l.markDistance
+    o << "base " << l.baseWidth << ' ' << l.baseHeight << "\npatch " << l.patch << "\nmarkpatch " << l.markPatch << "\nstill " << l.stillFrames << "\ndistance " << l.colorDistance << ' ' << l.markDistance << ' ' << l.faceHue
       << "\nshare " << l.colored << ' ' << l.cover << ' ' << l.garbage << ' ' << l.unsure << '\n';
     for (const ColorRef& c : l.colors) o << "color " << int(c.cell) << ' ' << c.rgb.r << ' ' << c.rgb.g << ' ' << c.rgb.b << '\n';
     for (const Mark& m : l.marks) {
@@ -255,7 +260,10 @@ inline bool parseLayout(const std::string& text, Layout& out, std::string* error
         else if (word == "patch") ok = bool(words >> l.patch) && l.patch >= 0;
         else if (word == "markpatch") ok = bool(words >> l.markPatch) && l.markPatch >= 0;
         else if (word == "still") ok = bool(words >> l.stillFrames) && l.stillFrames >= 1;
-        else if (word == "distance") ok = bool(words >> l.colorDistance >> l.markDistance) && l.colorDistance >= 0 && l.markDistance >= 0;
+        else if (word == "distance") {
+            ok = bool(words >> l.colorDistance >> l.markDistance) && l.colorDistance >= 0 && l.markDistance >= 0;
+            if (ok && !(words >> std::ws).eof()) ok = bool(words >> l.faceHue) && l.faceHue >= 0 && l.faceHue <= 180;
+        }
         else if (word == "share") {
             ok = bool(words >> l.colored >> l.cover >> l.garbage >> l.unsure);
             for (int v : {l.colored, l.cover, l.garbage, l.unsure}) ok = ok && v >= 0 && v <= 100;
@@ -362,11 +370,34 @@ inline juraic::Cell classify(const Layout& l, const Rgb& c) {
     return cell;
 }
 
+// The hue of `c` in degrees, 0 to 360 (0 for a grey).
+inline float hueOf(const Rgb& c) {
+    const int high = std::max(c.r, std::max(c.g, c.b)), low = std::min(c.r, std::min(c.g, c.b));
+    if (high == low) return 0;
+    const float d = float(high - low);
+    const float h = 60 * (high == c.r ? float(c.g - c.b) / d : high == c.g ? 2 + float(c.b - c.r) / d : 4 + float(c.r - c.g) / d);
+    return h < 0 ? h + 360 : h;
+}
+
+// The piece of the table nearest to `c` in hue, within `degrees`; EMPTY when none is.
+inline juraic::Cell classifyHue(const Layout& l, const Rgb& c, int degrees) {
+    const float h = hueOf(c);
+    float best = float(degrees);
+    juraic::Cell cell = juraic::EMPTY;
+    for (const ColorRef& ref : l.colors) {
+        const float apart = std::fabs(h - hueOf(ref.rgb)), d = std::min(apart, 360 - apart);
+        if (d <= best) best = d, cell = ref.cell;
+    }
+    return cell;
+}
+
 // What the square around (x, y) shows (in base pixels): a piece of a colour, garbage, nothing or UNSURE. Strong colour: at
 // least 45 in a hundred as bright as white and its weakest part at most half its strongest; pale grey: at least 40 in
 // a hundred as bright as white and its weakest part at least three quarters of its strongest. `mark`: the mark of the
-// screen in that cell, if any.
-inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, float x, float y, const MarkedCell* mark = nullptr) {
+// screen in that cell, if any. `face`: for an UNSURE point with the warm white of a piece's face, the colour of the
+// table nearest in hue within Layout::faceHue (EMPTY for none), for read to take when the other point of the cell is
+// a piece of that colour.
+inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, float x, float y, const MarkedCell* mark = nullptr, juraic::Cell* face = nullptr) {
     const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
     const float px = x * s.x, py = y * s.y, hx = l.patch * s.x, hy = l.patch * s.y;
     const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
@@ -396,9 +427,13 @@ inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, flo
             for (const Rgb& c : mark->colors)
                 if (distance2(mean, c) < nearest) return juraic::EMPTY;
         }
-        const juraic::Cell cell = classify(l, mean);
+        juraic::Cell cell = classify(l, mean);
         // (too little of a piece's colour: the dots where the pair would land; of another colour: something else)
         if (100 * (strong + light) < long(l.cover) * all) return cell ? juraic::EMPTY : other;
+        // (the eyes and the shine of a face make the strong colour lighter than the table, toward white and so toward
+        //  other colours too: with the warm white of the face, the colour of its hue - which the edge of another piece
+        //  over a face, or words over the field, may have too: read takes it only from the rest of the cell)
+        if (!cell && warm && l.faceHue > 0 && face) *face = classifyHue(l, mean, l.faceHue);
         return cell ? cell : UNSURE;
     }
     return 100 * light >= long(l.garbage) * all ? juraic::GARBAGE : other;
@@ -450,13 +485,19 @@ inline Reading read(const Picture& p, const Layout& l) {
     for (int side = 0; side < 2; ++side) {
         const SideLayout& d = l.side[side];
         SideRead& out = r.side[side];
+        juraic::Cell face[juraic::W][POINTS]{};
         for (int x = 0; x < juraic::W; ++x)
             for (int k = 0; k < POINTS; ++k) {
                 const Spot at = pointSpot(d, x, k);
                 const MarkedCell* mark = nullptr;
                 for (const MarkedCell& m : d.marked)
                     if (m.x == x && m.y == k / 2) mark = &m;
-                out.point[x][k] = pointHeight(k) > d.shownRows ? HIDDEN : piece(p, l, s, at.x, at.y, mark);
+                out.point[x][k] = pointHeight(k) > d.shownRows ? HIDDEN : piece(p, l, s, at.x, at.y, mark, &face[x][k]);
+            }
+        // (an UNSURE point with a piece's face takes the colour of its hue when the other point of its cell reads it)
+        for (int x = 0; x < juraic::W; ++x)
+            for (int k = 0; k < POINTS; ++k) {
+                if (out.point[x][k] == UNSURE && face[x][k] != juraic::EMPTY && out.point[x][k ^ 1] == face[x][k]) out.point[x][k] = face[x][k];
                 out.unsure += out.point[x][k] == UNSURE;
             }
         for (int n = 0; n < 2; ++n) {

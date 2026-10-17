@@ -42,6 +42,8 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 
 using namespace juraic;
 using namespace play::realgame;
@@ -438,6 +440,38 @@ static void testPointRules() {
     check(at(2, 6, Rgb{120, 230, 230}, 60, white, 0) == UNSURE && at(2, 6, Rgb{230, 150, 200}, 70, white, 0) == UNSURE,
           "a light of the screen over the field is not read as not sure");
     check(at(2, 6, Rgb{60, 60, 70}, 100, white, 0) == EMPTY, "the dark of the field is read as not sure");
+    // The eyes of a face of joined red pieces, under the shine: the strong colour lighter than the table's red (mean
+    // 219 67 64 in a picture of the real game, 85 away from it), with the piece's warm white face. As not sure, the
+    // reading of that side was taken by Tracker in none of 313 frames, and four pairs fell with nothing played.
+    const Rgb shine{219, 67, 64}, face{250, 238, 230}, yellow{233, 143, 21};
+    // Both points of a cell, drawn as `at` draws one: the lower point, then the upper one.
+    const auto cell = [&](int x, int y, Rgb low, int lowShare, Rgb high, int highShare, int whiteShare) {
+        Canvas c(2000, 1125, l);
+        const float half = l.patch, width = 2 * half + 1;
+        const Spot a = pointSpot(d, x, 2 * y), b = pointSpot(d, x, 2 * y + 1);
+        c.fill(a.x - 3 * half, b.y - 3 * half, a.x + 3 * half, a.y + 3 * half, Rgb{38, 46, 72});
+        for (const auto& [p, colour, share] : {std::tuple{a, low, lowShare}, std::tuple{b, high, highShare}}) {
+            const float from = p.x - half;
+            c.fill(from, p.y - half, from + width * float(share) / 100, p.y + half + 1, colour);
+            if (share) c.fill(from + width * float(share) / 100, p.y - half, from + width * float(share + whiteShare) / 100, p.y + half + 1, face);
+        }
+        const SideRead r = read(c.picture(), l).side[1];
+        return std::pair{r.point[x][2 * y], r.point[x][2 * y + 1]};
+    };
+    check(cell(0, 1, red, 50, shine, 40, 40) == std::pair<Cell, Cell>{1, 1}, "the eyes of a face of red pieces (the strong colour lighter than the table) are not read as red");
+    // (lighter still, 237 77 74: 108 from the red of the table and 85 from its yellow; by its hue it is red. A point
+    //  on the border of a yellow piece and a green one, 165 202 62, is near neither by its hue)
+    check(cell(3, 1, red, 50, Rgb{237, 77, 74}, 30, 50) == std::pair<Cell, Cell>{1, 1}, "a red piece lit lighter still is read as yellow");
+    check(at(3, 1, Rgb{165, 202, 62}, 25, face, 50) == UNSURE, "a point between a yellow piece and a green one is read as a piece");
+    // (the hue alone is not enough: the edge of a red piece above the screen over the face of a yellow one, and words
+    //  the screen draws over the field, have the hue of a colour too; the other point of the cell has to be a piece of
+    //  that colour)
+    check(cell(2, 11, yellow, 50, shine, 40, 40) == std::pair<Cell, Cell>{4, UNSURE}, "the edge of a red piece over the face of a yellow one is read as red");
+    check(cell(2, 3, shine, 40, Rgb{38, 46, 72}, 0, 40) == std::pair<Cell, Cell>{UNSURE, EMPTY}, "a lit red with no piece in the rest of its cell is read as red");
+    check(at(2, 6, shine, 70, white, 0) == UNSURE && at(2, 6, shine, 70, Rgb{235, 235, 245}, 20) == UNSURE,
+          "a bright colour near no colour of the table, without the warm white of a piece's face, is read as a piece");
+    check(at(DEATH_X, DEATH_Y, Rgb{227, 64, 64}, 85, white, 0) == EMPTY && at(DEATH_X, DEATH_Y, Rgb{222, 63, 61}, 85, white, 0) == EMPTY,
+          "the mark where the pair appears, in its lighter reds, is read as a piece");
     std::cout << "the measured table: pieces, small dots, the background, the mark where the pair appears and garbage read as they should\n";
 }
 
