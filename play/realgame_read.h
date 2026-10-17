@@ -731,12 +731,20 @@ public:
                 const bool there = fresh.seen && fresh.at.x == spawn.x && fresh.at.y == spawn.y && fresh.at.upper == spawn.upper && fresh.at.dir == spawn.dir;
                 const bool settled = at - t.changedAt >= stillFrames && t.loose == 0;
                 // (hidden by a light as it appeared: seen after it, in the air, both pieces, of the colours of the pair
-                //  that comes)
-                const bool hidden = !there && !t.inHand && t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && fresh.seen && !fresh.childHidden &&
-                                    knows(t.pairs) && same(fresh.colors, pairs[size_t(t.pairs)]) && fresh.at.y >= juraic::SPAWN_Y - 3 &&
-                                    !pairLying(fresh, resting);
+                //  that comes - or its axis only, the child still above the screen, where pairs appear or a row below,
+                //  2 * pairGap frames or more after the last pair appeared, over pieces at rest: on the real game a pair
+                //  first seen so after a light, after a chain, was taken for no pair, and nothing played it; between two
+                //  rounds, the fields empty, a point read there in one picture is no pair. With no pair in hand the
+                //  reading before had that pair's own points above the field: for it, nothing besides it may be there now.)
+                const bool colours = knows(t.pairs) && fresh.colors.axis == pairs[size_t(t.pairs)].axis &&
+                                     (fresh.childHidden ? fresh.at.x == spawn.x && fresh.at.y >= juraic::SPAWN_Y - 1 && (t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap) &&
+                                                              !resting.f.empty()
+                                                        : fresh.colors.child == pairs[size_t(t.pairs)].child);
+                const bool hidden = !there && !t.inHand && t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && fresh.seen && colours &&
+                                    fresh.at.y >= juraic::SPAWN_Y - 3 && !pairLying(fresh, resting);
+                const bool settledLate = at - t.changedAt >= stillFrames && (t.loose == 0 || (t.loose <= 4 && looseOver(read, resting, fresh) == 0));
                 const bool samePair = t.inHand && resting == t.under && at - t.spawnedAt < pairGap;
-                if (settled && (there || hidden) && !samePair) newPair(s, fresh, resting, read, at), late[s] = t.late = hidden;
+                if (((settled && there) || ((fresh.childHidden ? settledLate : settled) && hidden)) && !samePair) newPair(s, fresh, resting, read, at), late[s] = t.late = hidden;
             }
             t.loose = looseOf(read, t);
             empty = empty && resting.f.empty() && t.loose == 0 && !t.inHand;
@@ -759,12 +767,14 @@ private:
 
     static bool same(juraic::Pair a, juraic::Pair b) { return a.axis == b.axis && a.child == b.child; }
     // Points that show a piece above the field the pair moves over (or above the pieces at rest), the pair's own left out.
-    static int looseOf(const SideRead& read, const SideTrack& t) {
+    static int looseOf(const SideRead& read, const SideTrack& t) { return looseOver(read, t.inHand ? t.under : t.resting, t.pair); }
+    // ... above `base`, those of `pair` (if seen) left out.
+    static int looseOver(const SideRead& read, const juraic::GameField& base, const PairSeen& pair) {
         int ax = -1, ah = -1, cx = -1, ch = -1;
-        if (t.pair.seen) pairHalves(t.pair.at, ax, ah, cx, ch);
+        if (pair.seen) pairHalves(pair.at, ax, ah, cx, ch);
         const auto own = [&](int x, int k) { return (x == ax && (k == ah || k == ah + 1)) || (x == cx && (k == ch || k == ch + 1)); };
         int h[juraic::W], n = 0;
-        (t.inHand ? t.under : t.resting).heights(h);
+        base.heights(h);
         for (int x = 0; x < juraic::W; ++x)
             for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && !own(x, k);
         return n;

@@ -552,7 +552,25 @@ static void testPairsSeenOnce() {
     u.step(stray, at++);
     for (int f = 0; f < u.roundGap / 2 + 5; ++f) u.step(empty, at++);
     check(u.rounds == rounds + 1, "a point read as a piece in one picture between two rounds hides the round that begins");
-    std::cout << "a pair read as another colour in one picture is the same pair; the window of the next pairs is read once it stands still; a round is seen begin through a point read wrong in one picture\n";
+    // A pair that appears under a light, first seen when the light is gone half a cell below where pairs appear, its
+    // child still above the screen, falling by itself: it is the pair that came. (On the real game, after a chain, such a
+    // pair was taken for none - its own points counted as pieces falling, there being no pair in hand to leave them out -
+    // and no pair of 2P was seen for the rest of the round: 20 seconds that nothing played.)
+    {
+        Tracker v;
+        for (int f = 0; f < v.roundGap + 5; ++f) v.step(empty, at++);
+        Reading still = empty;
+        still.side[1].point[0][0] = still.side[1].point[0][1] = 4; // (a piece at rest)
+        for (int f = 0; f < 10; ++f) v.step(still, at++);
+        Reading lit = still;
+        lit.side[1].unsure = 3;
+        for (int f = 0; f < 4; ++f) v.step(lit, at++);
+        Reading pair = still;
+        pair.side[1].point[SPAWN_X][22] = pair.side[1].point[SPAWN_X][23] = 1; // (the axis, 1, a cell below the top; its child above the screen)
+        for (int f = 0; f < 6; ++f) v.step(pair, at++);
+        check(v.side[1].pairs == 1 && v.side[1].inHand, "a pair first seen half a cell below where pairs appear after a light, its child above the screen, is not seen");
+    }
+    std::cout << "a pair read as another colour in one picture is the same pair; the window of the next pairs is read once it stands still; a round is seen begin through a point read wrong in one picture; a pair first seen after a light, its child above the screen, is the pair that came\n";
 }
 
 // The notice against what the chains followed can have sent (Follower): with nothing sent, a notice of a few pieces is
