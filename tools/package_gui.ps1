@@ -24,7 +24,7 @@ foreach ($name in @("JuraicFieldGenerator.exe", "random_19_chain.exe")) {
 foreach ($name in @("config.ini", "run.cmd", "GUI_README.md", "URL_FORMATS.md", "CHANGELOG.md", "README.md", "README.en.md", "LICENSE")) {
     Copy-Item -LiteralPath (Join-Path $sourceDirectory $name) -Destination $packageDirectory
 }
-foreach ($name in @("editor-demo.jfboard", "sample-19chain.jfchain")) {
+foreach ($name in @("editor-demo.jfboard", "sample-19chain.jfchain", "sample-47chain.jfchain")) {
     $example = Join-Path (Join-Path $sourceDirectory "examples") $name
     if (Test-Path -LiteralPath $example) { Copy-Item -LiteralPath $example -Destination $packageDirectory }
 }

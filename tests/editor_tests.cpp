@@ -30,6 +30,15 @@ int wmain(int argc,wchar_t** argv){try{
         auto frames=editorTimeline(b);auto name=std::to_string(i);saveBoard(root/(name+".jfboard"),b);saveBoard(root/(name+".final"),frames.back().board);std::ofstream stats(root/(name+".stats"));stats<<frames.back().chain<<' '<<frames.back().score<<'\n';
         for(int format=0;format<3;++format)if(urlUnavailableReason(b,UrlFormat(format)).empty()){std::ofstream u(root/(name+"-"+urlFormatIds[format]+".url"));u<<simulatorUrl(b,UrlFormat(format));}
     }
+    // 10 x 19 boards: the 19th row does not match and is not erased by adjacency but falls; walls; archives of
+    // version 2; random boards replayed by tests/test_editor.py.
+    b=emptyBoard(true);for(int x=0;x<4;++x)for(int y=0;y<19;++y)b.cells[x][y]=y==18?Red:Iron;check(editorClear(b,1).colored==0,"row19 does not match");
+    b=emptyBoard(true);for(int x=6;x<10;++x)b.cells[x][17]=Red;b.cells[9][18]=Garbage;auto wideWave=editorClear(b,1);check(wideWave.colored==4&&b.cells[9][18]==Garbage,"row19 garbage not erased by adjacency");settle(b);check(b.cells[9][0]==Garbage,"row19 still falls");
+    b=emptyBoard(true);b.cells[9][4]=Wall;b.cells[9][18]=Iron;b.cells[9][3]=PointPiece;settle(b);check(b.cells[9][4]==Wall&&b.cells[9][5]==Iron&&b.cells[9][0]==PointPiece,"wall divides column gravity on 10 x 19");
+    b=emptyBoard(true);b.cells[9][18]=Wall;b.cells[0][0]=Red;saveBoard(root/L"10x19.jfboard",b);check(loadBoard(root/L"10x19.jfboard")==b,"10 x 19 archive roundtrip");
+    check(!urlUnavailableReason(b,UrlFormat::Mattulwan).empty(),"a 10 x 19 board has no URL");
+    for(int i=0;i<300;++i){b=emptyBoard(true);for(int x=0;x<10;++x)for(int y=0;y<19;++y)b.cells[x][y]=Cell(rng()%11);if(i<100)for(int x=0;x<4;++x)b.cells[x+3][0]=Red;
+        auto frames=editorTimeline(b);auto name="wide-"+std::to_string(i);saveBoard(root/(name+".jfboard"),b);saveBoard(root/(name+".final"),frames.back().board);std::ofstream stats(root/(name+".stats"));stats<<frames.back().chain<<' '<<frames.back().score<<'\n';}
     // Non-point fixture exercises all destinations, row13, holes and leading blanks.
     b={};for(int x=0;x<6;++x)for(int y=0;y<13;++y){b.cells[x][y]=Cell(rng()%11);if(b.cells[x][y]==PointPiece)b.cells[x][y]=Hard;}saveBoard(root/L"compatible.jfboard",b);
     for(int f=0;f<3;++f){std::ofstream out(root/(std::string("compatible-")+urlFormatIds[f]+".url"));out<<simulatorUrl(b,UrlFormat(f));}

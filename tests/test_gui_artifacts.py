@@ -2,7 +2,7 @@
 import pathlib
 import sys
 import re
-from verify_output import verify, wave
+from verify_output import verify, wave, WIDE
 
 def decode_url(url):
     if url.startswith("https://www.pndsng.com/puyo/index.html?"):
@@ -23,8 +23,16 @@ def archive_cells(path):
     columns = [list(map(int, line.split()))[1:] for line in path.read_text(encoding="utf-8").splitlines()[2:8]]
     return [columns[x][y] if y < len(columns[x]) else 0 for y in range(12, -1, -1) for x in range(6)]
 
+def wide_archive_code(path):
+    """The board code (as boards_10x18.txt) of an archive of version 3."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "JURAIC_FIELD_CHAIN 3" and lines[1] == "10 18", path
+    columns = [list(map(int, line.split()))[1:] for line in lines[3:13]]
+    return "10x18:" + "".join(".RGBYP"[columns[x][y]] if y < len(columns[x]) else "." for y in range(18, -1, -1) for x in range(10))
+
 root = pathlib.Path(sys.argv[1])
 total = 0
+wide_total = 0
 formats = set()
 for log in root.rglob("generator.log"):
     text = log.read_text(encoding="utf-8")
@@ -35,6 +43,15 @@ for log in root.rglob("generator.log"):
         continue
     counts = verify(text, True)
     n = sum(counts.values())
+    if (log.parent / "boards_10x18.txt").exists():
+        # A 10 x 18 run: board codes instead of URLs, archives of version 3.
+        codes = (log.parent / "boards_10x18.txt").read_text(encoding="utf-8").splitlines()
+        assert n == len(archives) == len(codes) == len(set(codes)) and all(k.startswith("10x18/") for k in counts), (log, counts)
+        assert not (log.parent / "simulator_urls.txt").exists() and not (log.parent / "url-format.txt").exists()
+        for i, code in enumerate(codes, 1):
+            assert wide_archive_code(log.parent / f"board-{i}.jfchain") == code, (log, i)
+        wide_total += n
+        continue
     urls = (log.parent / "19chain_urls.txt").read_text(encoding="utf-8").splitlines()
     assert n == len(archives) == len(urls) == len(set(urls)), (log, counts)
     # Old retained runs predate the selector; their canonical URLs still verify.
@@ -94,6 +111,28 @@ for path in pathlib.Path(sys.argv[2]).glob("*/timeline.txt"):
             assert transition(frames[i-1][2], frames[i][2], frames[i+1][2]) == 5
     timeline_count += 1
 assert timeline_count == 18, timeline_count
-print(f"Independently verified {total} GUI results (completed and cancelled runs)")
+
+# The 10 x 18 timelines of the model test: one frame a line, the chain and the 190 cells from the hidden row down.
+wide_timelines = 0
+for path in pathlib.Path(sys.argv[2]).glob("wide/*/timeline-10x19.txt"):
+    lines = path.read_text().splitlines()
+    frames = []
+    for line in lines[1:]:
+        chain, *cells = map(int, line.split())
+        assert len(cells) == 190
+        frames.append((chain, {(i % 10, 18 - i // 10): color for i, color in enumerate(cells) if color}))
+    assert len(frames) == int(lines[0])
+    target = frames[-1][0]
+    assert len(frames) == 1 + 2 * target and frames[0][0] == 0
+    for n in range(1, target + 1):
+        before, cleared, dropped = frames[2*n - 2][1], frames[2*n - 1][1], frames[2*n][1]
+        groups, after = wave(before, WIDE)
+        assert len(groups) == 1 and len(groups[0]) == 4, (path, n)
+        assert cleared == {pos: color for pos, color in before.items() if pos not in groups[0]} and dropped == after, (path, n)
+    wide_timelines += 1
+assert wide_timelines == 6, wide_timelines
+assert wide_total >= 3, wide_total
+print(f"Independently verified {total} GUI results (completed and cancelled runs) and {wide_total} of 10 x 18")
+print(f"Verified the 10 x 18 playback of all {wide_timelines} model timelines (1, 20 and 47 chains)")
 print(f"Also verified all {model_count} URL exports for 1/19 chains, 3/4/5 colors and 0/1/2 extra cells")
 print(f"Verified post-clear holes and following gravity in all {timeline_count} displayed timelines, including preparation clears")

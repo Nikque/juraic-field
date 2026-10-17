@@ -22,7 +22,7 @@ enum Id { START=100, CANCEL, LOAD_CONFIG, SAVE_CONFIG, DEFAULTS, RESULTS=120,
     LOAD_RESULT, COPY_URL, OPEN_URL, PREV, NEXT, PLAY, IGNITE, LAST,
     SLIDER, SPEED, FOLDER, OPEN_FOLDER, DETAIL, STATE, COUNT, PROGRESS, FRAME_LABEL,
     OUTPUT_BASE, OUTPUT_RUN, CAPACITY, URL_FORMAT, EXPORT_URLS, EDIT_MODE,
-    NEW_BOARD, LOAD_BOARD, SAVE_BOARD, CLONE_BOARD, UNDO, REDO, EDIT_HELP };
+    NEW_BOARD, LOAD_BOARD, SAVE_BOARD, CLONE_BOARD, UNDO, REDO, EDIT_HELP, FIELD_SIZE, FIELD_LABEL };
 constexpr int PIECE_FIRST=400; // the buttons of the palette: PIECE_FIRST + the kind (gui_editor.h, Piece)
 constexpr const wchar_t* paletteLabels[]={L"消す",L"赤",L"緑",L"青",L"黄",L"紫",L"おじゃま",L"得点",L"かた",L"鉄",L"壁"};
 struct Event { enum Kind { Saved, Done } kind; Record record; int code=0; std::string error; };
@@ -70,17 +70,20 @@ public:
     }
     void place(HWND h,int x,int y,int w,int hgt){SetWindowPos(h,nullptr,s(x),s(y),s(w),s(hgt),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|SWP_NOCOPYBITS);}
     void place(int id,int x,int y,int w,int hgt){place(get(id),x,y,w,hgt);}
-    void put(int id,const std::wstring& value){auto ctl=get(id);if(text(ctl)!=value)SetWindowTextW(ctl,value.c_str());}
+    void put(HWND ctl,const std::wstring& value){if(text(ctl)!=value)SetWindowTextW(ctl,value.c_str());}
+    void put(int id,const std::wstring& value){put(get(id),value);}
     void error(const std::exception& e){++errors;state=wide(e.what());put(STATE,state);if(!testing)MessageBoxW(window,state.c_str(),L"入力・保存エラー",MB_OK|MB_ICONERROR);}
-    GeneratorConfig settings(){std::array<std::string,INPUT_COUNT> t;for(int i=0;i<INPUT_COUNT;++i)t[i]=utf8(text(inputs[i]));return parseInputs(t);}
+    bool wideSelected() const{return SendMessageW(get(FIELD_SIZE),CB_GETCURSEL,0,0)==1;}
+    GeneratorConfig settings(){std::array<std::string,INPUT_COUNT> t;for(int i=0;i<INPUT_COUNT;++i)t[i]=utf8(text(inputs[i]));return parseInputs(t,wideSelected());}
     void setSettings(const GeneratorConfig& c){
         const std::array<std::string,INPUT_COUNT> t{std::to_string(c.targetChain),std::to_string(c.targetSuccessCount),std::to_string(c.initialSeed),std::to_string(c.colorCount),std::to_string(c.minExtraPieces),std::to_string(c.maxExtraPieces),std::to_string(c.beamWidth),std::to_string(c.candidatesPerParent),std::to_string(c.restarts),std::to_string(c.threads)};
-        for(int i=0;i<INPUT_COUNT;++i)SetWindowTextW(inputs[i],wide(t[i]).c_str()); capacity();
+        for(int i=0;i<INPUT_COUNT;++i)SetWindowTextW(inputs[i],wide(t[i]).c_str()); SendMessageW(get(FIELD_SIZE),CB_SETCURSEL,c.wide()?1:0,0); capacity();
     }
     void capacity(){
-        auto t=utf8(text(inputs[0]));
-        try{int n=parsePositiveInt(t,"target_chain");put(CAPACITY,n>=1&&n<=19?L"余剰上限: "+std::to_wstring(78-4*n)+L"個":L"連鎖数は1〜19です。");}
-        catch(...){put(CAPACITY,L"連鎖数は1〜19です。");}
+        auto t=utf8(text(inputs[0]));GeneratorConfig c;if(wideSelected())c.fieldColumns=G10::W,c.fieldRows=G10::CLEAR_H;
+        const std::wstring range=L"連鎖数は1〜"+std::to_wstring(c.maxChain())+L"です。";put(labels[0],L"連鎖数（1〜"+std::to_wstring(c.maxChain())+L"）");
+        try{int n=parsePositiveInt(t,"target_chain");put(CAPACITY,n>=1&&n<=c.maxChain()?L"余剰上限: "+std::to_wstring(c.maxPieces()-4*n)+L"個":range);}
+        catch(...){put(CAPACITY,range);}
     }
     void selectPiece(Cell value){
         selectedPiece=value;
@@ -120,6 +123,8 @@ public:
         add(1,L"STATIC",L"盤面ジェネレーター",SS_LEFT);SendMessageW(get(1),WM_SETFONT,reinterpret_cast<WPARAM>(titleFont),TRUE);
         const wchar_t* names[]={L"連鎖数（1〜19）",L"生成目標（件）",L"探索seed（uint64）",L"色数（3〜5）",L"余剰 下限",L"余剰 上限",L"beam_width",L"親ごとの候補数",L"試行上限",L"スレッド数（0=自動）"};
         for(int i=0;i<INPUT_COUNT;++i){labels[i]=add(200+i,L"STATIC",names[i]);inputs[i]=add(300+i,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,WS_EX_CLIENTEDGE);SendMessageW(inputs[i],EM_SETLIMITTEXT,20,0);}
+        add(FIELD_LABEL,L"STATIC",L"盤面");add(FIELD_SIZE,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL);
+        for(auto str:{L"6列×12段",L"10列×18段"})SendMessageW(get(FIELD_SIZE),CB_ADDSTRING,0,reinterpret_cast<LPARAM>(str));SendMessageW(get(FIELD_SIZE),CB_SETCURSEL,0,0);
         add(CAPACITY,L"STATIC",L"");
         for(auto [id,caption]:std::initializer_list<std::pair<int,const wchar_t*>>{{LOAD_CONFIG,L"設定を読込"},{SAVE_CONFIG,L"名前を付けて保存"},{DEFAULTS,L"初期値"},{START,L"生成開始"},{CANCEL,L"中断"},{FOLDER,L"保存先を選択"},{OPEN_FOLDER,L"今回の保存先を開く"},{LOAD_RESULT,L"保存結果を読込"},{COPY_URL,L"URLコピー"},{OPEN_URL,L"URLを開く"},{EXPORT_URLS,L"一覧のURLを保存"},{PREV,L"◀ 前へ"},{NEXT,L"次へ ▶"},{PLAY,L"再生"},{IGNITE,L"発火へ"},{LAST,L"終了へ"}}) add(id,L"BUTTON",caption,WS_TABSTOP);
         add(OUTPUT_BASE,L"EDIT",(exeDirectory/L"results").c_str(),ES_AUTOHSCROLL|WS_TABSTOP,WS_EX_CLIENTEDGE);
@@ -148,7 +153,7 @@ public:
     }
     void layout(){
         RECT r;GetClientRect(window,&r);if(r.right<=0||r.bottom<=0)return;int w=MulDiv(r.right,96,dpi),h=MulDiv(r.bottom,96,dpi);int right=642,rw=std::max(280,w-right-18);
-        place(1,18,14,400,36);
+        place(1,18,14,400,36);place(FIELD_LABEL,18,59,133,25);place(FIELD_SIZE,153,54,144,120);
         for(int i=0;i<INPUT_COUNT;++i){int y=90+i*37+(i>=6?43:0);place(labels[i],18,y+5,133,25);place(inputs[i],153,y,144,30);}
         place(CAPACITY,18,314,280,24);place(8,18,337,280,22);
         place(LOAD_CONFIG,18,512,92,31);place(SAVE_CONFIG,115,512,182,31);place(DEFAULTS,18,553,75,31);place(START,100,553,119,31);place(CANCEL,226,553,71,31);
@@ -173,17 +178,19 @@ public:
     }
     void updateEnabled(){
         for(HWND i:inputs)EnableWindow(i,!running);
-        for(int id:{START,LOAD_CONFIG,SAVE_CONFIG,DEFAULTS,FOLDER,OUTPUT_BASE,URL_FORMAT})EnableWindow(get(id),!running);
+        for(int id:{START,LOAD_CONFIG,SAVE_CONFIG,DEFAULTS,FOLDER,OUTPUT_BASE,URL_FORMAT,FIELD_SIZE})EnableWindow(get(id),!running);
         EnableWindow(get(EXPORT_URLS),!running&&(editing||!records.empty()));
         EnableWindow(get(CANCEL),running&&!cancel);EnableWindow(get(OPEN_FOLDER),!runDirectory.empty());
         for(int id:{COPY_URL,OPEN_URL,PREV,NEXT,PLAY,IGNITE,LAST,SLIDER})EnableWindow(get(id),editing||selected>=0);
+        if(!editing&&selected>=0&&records[selected].wide)for(int id:{COPY_URL,OPEN_URL})EnableWindow(get(id),FALSE); // (no site shows 10 x 18)
         ShowWindow(get(RESULTS),editing?SW_HIDE:SW_SHOW);
         for(int id:{NEW_BOARD,LOAD_BOARD,SAVE_BOARD,CLONE_BOARD,UNDO,REDO,EDIT_HELP})ShowWindow(get(id),editing?SW_SHOW:SW_HIDE);
         for(int i=0;i<=Wall;++i)ShowWindow(get(PIECE_FIRST+i),editing?SW_SHOW:SW_HIDE);
         EnableWindow(get(UNDO),!editor.undo.empty());EnableWindow(get(REDO),!editor.redo.empty());EnableWindow(get(CLONE_BOARD),selected>=0);
         put(EDIT_MODE,editing?L"結果表示へ戻る":L"盤面編集");put(EXPORT_URLS,editing?L"編集盤面URLを保存":L"一覧のURLを保存");put(7,editing?L"盤面編集 / パレットで種類を選択":L"結果一覧 / 選択して再生");
         put(IGNITE,editing?L"編集盤面へ":L"発火へ");
-        put(4,editing?L"13段目は消去対象外。壁は固定、その他は落下。":L"13段目は消去対象外・落下対象。白い輪: 最初に消える4個 / 黄色の輪: 最後に置く1組。");
+        const std::wstring hidden=std::to_wstring(shownBoard().height)+L"段目";
+        put(4,editing?hidden+L"は消去対象外。壁は固定、その他は落下。":hidden+L"は消去対象外・落下対象。白い輪: 最初に消える4個 / 黄色の輪: 最後に置く1組。");
         put(5,editing?L"種類を選んで盤面へ配置。「再生」「次へ」で連鎖を確認できます。":L"黄色の輪の1組を最後に置くと発火します。盤面と連鎖はエンジンで検証済みです。");
         if(editing){auto reason=urlUnavailableReason(editor.board,urlFormat());for(int id:{COPY_URL,OPEN_URL,EXPORT_URLS})EnableWindow(get(id),reason.empty()&&(id!=EXPORT_URLS||!running));}
     }
@@ -210,20 +217,25 @@ public:
         std::filesystem::create_directories(base);
         SYSTEMTIME st;GetLocalTime(&st);wchar_t name[100];swprintf_s(name,L"run-%04u%02u%02u-%02u%02u%02u-%03u-%lu",st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond,st.wMilliseconds,GetCurrentProcessId());
         runDirectory=base/name;if(!std::filesystem::create_directory(runDirectory))throw std::runtime_error("新規の保存先を作成できません。");
-        writeConfig(runDirectory/L"config.ini",c);
-        {std::ofstream meta(runDirectory/L"url-format.txt",std::ios::binary);meta<<urlFormatIds[int(format)]<<'\n';if(!meta)throw std::runtime_error("URL形式を保存できません。");}
+        writeConfig(runDirectory/L"config.ini",c);const bool wideRun=c.wide();
+        if(!wideRun){std::ofstream meta(runDirectory/L"url-format.txt",std::ios::binary);meta<<urlFormatIds[int(format)]<<'\n';if(!meta)throw std::runtime_error("URL形式を保存できません。");}
         if(worker.joinable())worker.join();cancel=false;closing=false;running=true;target=c.targetSuccessCount;saved=0;resultCode=0;
         firstSeconds=fifthSeconds=-1;completedSeconds=0;started=std::chrono::steady_clock::now();state=L"探索中";
         {std::lock_guard lock(mutex);progress={};}
         put(OUTPUT_RUN,runDirectory.wstring());updateEnabled();
-        worker=std::thread([this,dir=runDirectory,format]{
+        worker=std::thread([this,dir=runDirectory,format,wideRun]{
             try {
                 std::ofstream log(dir/L"generator.log",std::ios::binary);if(!log)throw std::runtime_error("ログを作成できません。");
-                std::ofstream urls(dir/L"simulator_urls.txt",std::ios::binary);if(!urls)throw std::runtime_error("選択形式のURL一覧を作成できません。");
+                // (a 10 x 18 result has no URL: its board code is in boards_10x18.txt, written by the engine)
+                std::ofstream urls;if(!wideRun){urls.open(dir/L"simulator_urls.txt",std::ios::binary);if(!urls)throw std::runtime_error("選択形式のURL一覧を作成できません。");}
                 // Only the worker uses the engine's human-readable log. UI data uses hooks.
                 struct Redirect {std::streambuf* out,*err;Redirect(std::ostream& l):out(std::cout.rdbuf(l.rdbuf())),err(std::cerr.rdbuf(l.rdbuf())){}~Redirect(){std::cout.flush();std::cerr.flush();std::cout.rdbuf(out);std::cerr.rdbuf(err);}} redirect(log);
                 GeneratorHooks hooks;hooks.cancel=&cancel;
                 hooks.progress=[this](const GeneratorProgress& p){std::lock_guard lock(mutex);progress=p;};
+                hooks.savedWide=[this,dir](const WideSolution& solution,uint64_t seed,int count){
+                    auto path=dir/(L"board-"+std::to_wstring(count)+L".jfchain");saveRecord(path,solution,seed);
+                    Record r;r.wide=true;r.wideSolution=solution;r.seed=seed;r.path=path;post({Event::Saved,std::move(r)},count<=8);
+                };
                 hooks.saved=[this,dir,format,&urls](const Solution& solution,uint64_t seed,int count){
                     auto path=dir/(L"board-"+std::to_wstring(count)+L".jfchain");saveRecord(path,solution,seed);
                     urls<<simulatorUrl(solution.field,format)<<'\n';urls.flush();if(!urls)throw std::runtime_error("選択形式のURL一覧の書き込みに失敗しました。");
@@ -234,12 +246,12 @@ public:
         });
     }
     void select(int n){
-        if(n<0 || n>=int(records.size()))return;stopPlay();editing=false;selected=n;frames=timeline(records[n].solution);frame=0;
+        if(n<0 || n>=int(records.size()))return;stopPlay();editing=false;selected=n;frames=timeline(records[n]);frame=0;
         SendMessageW(get(RESULTS),LB_SETCURSEL,n,0);SendMessageW(get(SLIDER),TBM_SETRANGE,TRUE,MAKELPARAM(0,int(frames.size()-1)));showFrame();updateEnabled();
     }
     void append(Record r,bool update=true){ // update=false: the caller brings the controls up to date itself (a row of results)
-        int cells=r.solution.field.count();
-        std::wstring label=std::to_wstring(records.size()+1)+L".  "+std::to_wstring(r.solution.targetChain)+L"連鎖 / "+std::to_wstring(cells)+L"個 / 余剰"+std::to_wstring(cells-4*r.solution.targetChain);
+        int cells=r.pieces();
+        std::wstring label=std::to_wstring(records.size()+1)+L".  "+(r.wide?L"10×18 / ":L"")+std::to_wstring(r.targetChain())+L"連鎖 / "+std::to_wstring(cells)+L"個 / 余剰"+std::to_wstring(cells-4*r.targetChain());
         records.push_back(std::move(r));SendMessageW(get(RESULTS),LB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));if(selected<0&&!editing)select(int(records.size()-1));else if(update)updateEnabled();
     }
     void drain(){
@@ -269,17 +281,18 @@ public:
         if(editing){put(FRAME_LABEL,wide(f.label)+L" ["+std::to_wstring(frame)+L"/"+std::to_wstring(frames.size()-1)+L"]");SendMessageW(get(SLIDER),TBM_SETRANGE,TRUE,MAKELPARAM(0,int(frames.size()-1)));SendMessageW(get(SLIDER),TBM_SETPOS,TRUE,frame);
             auto reason=urlUnavailableReason(editor.board,urlFormat());std::wstring detail=L"編集盤面 / "+std::to_wstring(f.chain)+L"連鎖 / "+std::to_wstring(f.score)+L"点\r\n"+(editor.board==savedBoard?L"保存状態と一致\r\n":L"未保存の変更あり\r\n")+L"\r\nおじゃま: 隣の色消去で消える\r\n得点: 消去時50点（1個につき1回）\r\nかた: 1方向でおじゃま、2方向で消去\r\n鉄: 消えない・落下する\r\n壁: 消えない・固定\r\n\r\nURLは計算開始前の編集盤面。\r\n";
             if(!reason.empty())detail+=L"\r\n出力不可: "+wide(reason)+L"\r\nmattulwan系を選択してください。";put(DETAIL,detail);InvalidateRect(board,nullptr,FALSE);updateEnabled();return;}
-        if(selected<0)return;resultViewBoard=f.board;const auto& rec=records[selected];const auto& sol=rec.solution;
+        if(selected<0)return;resultViewBoard=f.board;const auto& rec=records[selected];
         put(FRAME_LABEL,wide(f.label)+L"  ["+std::to_wstring(frame)+L"/"+std::to_wstring(frames.size()-1)+L"]");SendMessageW(get(SLIDER),TBM_SETPOS,TRUE,frame);
-        int cells=sol.field.count();
+        int cells=rec.pieces(),chain=rec.targetChain();
         std::wostringstream o;o<<L"盤面・連鎖・最後の1組: エンジン検証済み\r\n"<<L"探索seed: "<<rec.seed<<L"\r\n";
-        o<<sol.targetChain<<L"連鎖 / "<<cells<<L"個 / 余剰"<<cells-4*sol.targetChain<<L"個\r\n";
-        o<<L"現在 "<<f.chain<<L" / "<<sol.targetChain<<L"連鎖  "<<f.score<<L"点\r\n\r\n";
-        o<<L"最初に消える4個（列,段）:\r\n ";for(Point q:pointsOf(sol.trigger))o<<L" ("<<q.first+1<<L","<<q.second+1<<L")";
+        if(rec.wide)o<<L"盤面: 10列×18段（＋隠れ1段）\r\n";
+        o<<chain<<L"連鎖 / "<<cells<<L"個 / 余剰"<<cells-4*chain<<L"個\r\n";
+        o<<L"現在 "<<f.chain<<L" / "<<chain<<L"連鎖  "<<f.score<<L"点\r\n\r\n";
+        o<<L"最初に消える4個（列,段）:\r\n ";for(Point q:rec.trigger())o<<L" ("<<q.first+1<<L","<<q.second+1<<L")";
         o<<L"\r\n\r\n最後に置く1組の候補（どれか1つで発火）:\r\n";
         bool firstOption=true;
-        for(int id=0;id<PAIR_POSITIONS;++id)if(sol.firePairs>>id&1){o<<(firstOption?L"> ":L"  ")<<(id<W?L"縦":L"横");for(Point q:pointsOf(pairCells(sol.field,id)))o<<L" ("<<q.first+1<<L","<<q.second+1<<L")";o<<(firstOption?L"  ← 黄色の輪\r\n":L"\r\n");firstOption=false;}
-        o<<L"\r\nこの1組を除いた盤面は何も消えず、3列目12段目が空いていて、その1組がその場所へ届きます。\r\n";
+        for(const auto& [vertical,cellsOfPair]:rec.lastPairs()){o<<(firstOption?L"> ":L"  ")<<(vertical?L"縦":L"横");for(Point q:cellsOfPair)o<<L" ("<<q.first+1<<L","<<q.second+1<<L")";o<<(firstOption?L"  ← 黄色の輪\r\n":L"\r\n");firstOption=false;}
+        o<<(rec.wide?L"\r\nこの1組を除いた盤面は何も消えず、5列目と6列目の18段目が空いていて、その1組がその場所へ届きます。\r\n":L"\r\nこの1組を除いた盤面は何も消えず、3列目12段目が空いていて、その1組がその場所へ届きます。\r\n");
         put(DETAIL,o.str());InvalidateRect(board,nullptr,FALSE);
     }
     void stopPlay(){playing=false;KillTimer(window,2);put(PLAY,L"再生");}
@@ -290,23 +303,29 @@ public:
     std::filesystem::path boardFile(bool save){wchar_t path[32768]=L"";OPENFILENAMEW o{sizeof(o)};o.hwndOwner=window;o.lpstrFile=path;o.nMaxFile=32768;o.lpstrFilter=L"編集盤面\0*.jfboard\0\0";o.lpstrDefExt=L"jfboard";o.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);if(save?GetSaveFileNameW(&o):GetOpenFileNameW(&o))return path;return {};}
     bool saveEditor(){auto path=boardFile(true);if(path.empty())return false;saveBoard(path,editor.board);savedBoard=editor.board;showFrame();return true;}
     bool confirmClose(){if(!hasEditor||editor.board==savedBoard)return true;int choice=MessageBoxW(window,L"編集盤面に未保存の変更があります。保存して終了しますか？",L"編集盤面の保存",MB_YESNOCANCEL|MB_ICONQUESTION);return choice==IDNO||(choice==IDYES&&saveEditor());}
-    void drawCell(int px,int py,Cell piece){if(!editing)return;RECT r;GetClientRect(board,&r);int cell=std::min((r.right-s(35))/6,(r.bottom-s(24))/13),left=(r.right-6*cell)/2+s(9),top=s(5);if(px<left||px>=left+6*cell||py<top||py>=top+13*cell)return;int x=(px-left)/cell,y=12-(py-top)/cell;editor.board.cells[x][y]=piece;frames={{editor.board,{},{},"編集中"}};frame=0;showFrame();}
-    void beginStroke(int x,int y,bool erase){if(!editing)return;if(stroking)endStroke();RECT r;GetClientRect(board,&r);int cell=std::min((r.right-s(35))/6,(r.bottom-s(24))/13),left=(r.right-6*cell)/2+s(9),top=s(5);if(x<left||x>=left+6*cell||y<top||y>=top+13*cell)return;stopPlay();SetFocus(board);strokeBefore=editor.board;if(!frames.empty())editor.board=frames[frame].board;strokePiece=erase?Empty:selectedPiece;stroking=true;SetCapture(board);drawCell(x,y,strokePiece);}
+    // The board shown: the frame of the result or of the editor, else the editor's board.
+    const Board& shownBoard() const{return frames.empty()?editor.board:frames[frame].board;}
+    // Where the cells of the shown board are drawn in the board control.
+    struct Grid{int columns,rows,cell,left,top;};
+    Grid grid() const{const Board& b=shownBoard();RECT r;GetClientRect(board,&r);int cell=std::min((r.right-s(35))/b.width,(r.bottom-s(24))/b.height);return {b.width,b.height,cell,(r.right-b.width*cell)/2+s(9),s(5)};}
+    void drawCell(int px,int py,Cell piece){if(!editing)return;const Grid g=grid();if(px<g.left||px>=g.left+g.columns*g.cell||py<g.top||py>=g.top+g.rows*g.cell)return;int x=(px-g.left)/g.cell,y=g.rows-1-(py-g.top)/g.cell;editor.board.cells[x][y]=piece;frames={{editor.board,{},{},"編集中"}};frame=0;showFrame();}
+    void beginStroke(int x,int y,bool erase){if(!editing)return;if(stroking)endStroke();const Grid g=grid();if(x<g.left||x>=g.left+g.columns*g.cell||y<g.top||y>=g.top+g.rows*g.cell)return;stopPlay();SetFocus(board);strokeBefore=editor.board;if(!frames.empty())editor.board=frames[frame].board;strokePiece=erase?Empty:selectedPiece;stroking=true;SetCapture(board);drawCell(x,y,strokePiece);}
     void endStroke(){if(!stroking)return;stroking=false;auto after=editor.board;editor.board=strokeBefore;editor.replace(after);ReleaseCapture();showFrame();}
     UrlFormat urlFormat() const {auto n=SendMessageW(get(URL_FORMAT),CB_GETCURSEL,0,0);if(n<0||n>=3)throw std::runtime_error("URL形式を選択してください。");return UrlFormat(n);}
-    std::string selectedUrl() const {return editing?simulatorUrl(editor.board,urlFormat()):selected>=0?simulatorUrl(records[selected].solution.field,urlFormat()):std::string{};}
+    std::string selectedUrl() const {return editing?simulatorUrl(editor.board,urlFormat()):selected>=0?simulatorUrl(records[selected].board(),urlFormat()):std::string{};}
     void exportUrls(){
         // Reject incompatible types before any dialog or file is opened.
         const auto boardUrl=editing?selectedUrl():std::string{};
         wchar_t path[32768]=L"simulator_urls.txt";OPENFILENAMEW o{sizeof(o)};o.hwndOwner=window;o.lpstrFile=path;o.nMaxFile=32768;
         o.lpstrTitle=L"結果一覧の全件を選択形式で保存";o.lpstrFilter=L"URL一覧 (*.txt)\0*.txt\0\0";o.lpstrDefExt=L"txt";o.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_OVERWRITEPROMPT;
-        if(GetSaveFileNameW(&o)){if(editing){std::ofstream out(std::filesystem::path(path),std::ios::binary);out<<boardUrl<<'\n';out.flush();if(!out)throw std::runtime_error("URLを保存できません。");state=L"編集盤面URLを保存しました。";}else{writeSimulatorUrls(path,records,urlFormat());state=L"結果一覧の全"+std::to_wstring(records.size())+L"件を選択形式で保存しました。";}metrics();}
+        if(GetSaveFileNameW(&o)){if(editing){std::ofstream out(std::filesystem::path(path),std::ios::binary);out<<boardUrl<<'\n';out.flush();if(!out)throw std::runtime_error("URLを保存できません。");state=L"編集盤面URLを保存しました。";}else{const size_t written=writeSimulatorUrls(path,records,urlFormat());state=L"結果一覧の全"+std::to_wstring(records.size())+L"件を選択形式で保存しました。";if(written<records.size())state=L"結果一覧の"+std::to_wstring(written)+L"件を選択形式で保存しました（10×18の"+std::to_wstring(records.size()-written)+L"件はURLにできないため除きました）。";}metrics();}
     }
     void copyUrl(){if(selected<0&&!editing)return;auto w=wide(selectedUrl());auto mem=GlobalAlloc(GMEM_MOVEABLE,(w.size()+1)*sizeof(wchar_t));if(!mem)throw std::runtime_error("クリップボードメモリ不足");auto p=GlobalLock(mem);if(!p){GlobalFree(mem);throw std::runtime_error("クリップボードメモリを取得できません");}memcpy(p,w.c_str(),(w.size()+1)*sizeof(wchar_t));GlobalUnlock(mem);if(!OpenClipboard(window)){GlobalFree(mem);throw std::runtime_error("クリップボードを開けません");}EmptyClipboard();if(!SetClipboardData(CF_UNICODETEXT,mem)){CloseClipboard();GlobalFree(mem);throw std::runtime_error("URLをコピーできません");}CloseClipboard();state=L"盤面のURLをコピーしました。";metrics();}
     void open(const std::wstring& path){if(reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)throw std::runtime_error("開けません: "+utf8(path));}
     void command(int id,int notification){
         if(stroking)endStroke();
         if(id==300 && notification==EN_CHANGE){capacity();return;}
+        if(id==FIELD_SIZE && notification==CBN_SELCHANGE){capacity();return;}
         if(id==RESULTS && notification==LBN_SELCHANGE){select(int(SendMessageW(get(RESULTS),LB_GETCURSEL,0,0)));return;}
         if(id==URL_FORMAT && notification==CBN_SELCHANGE){state=L"URL形式: "+wide(urlFormatNames[int(urlFormat())])+L"（次回生成・コピー・一覧保存に適用）";updateEnabled();if(editing)showFrame();metrics();return;}
         if(notification!=BN_CLICKED && id!=SPEED)return;
@@ -319,7 +338,7 @@ public:
         case FOLDER:if(!running)chooseFolder();break;case OPEN_FOLDER:if(!runDirectory.empty())open(runDirectory.wstring());break;
         case LOAD_RESULT:{auto p=chooseFile(false,false);if(!p.empty()){append(loadRecord(p));select(int(records.size()-1));}}break;
         case COPY_URL:copyUrl();break;case OPEN_URL:if(selected>=0||editing)open(wide(selectedUrl()));break;case EXPORT_URLS:if(!running)exportUrls();break;
-        case EDIT_MODE:toggleEditor();break;case NEW_BOARD:editor.replace({});editorView();break;
+        case EDIT_MODE:toggleEditor();break;case NEW_BOARD:editor.replace(emptyBoard(wideSelected()));editorView();break;
         case LOAD_BOARD:{auto p=boardFile(false);if(!p.empty()){auto b=loadBoard(p);editor.replace(b);savedBoard=b;editorView();}}break;
         case SAVE_BOARD:saveEditor();break;
         case CLONE_BOARD:if(selected>=0){editor.replace(resultViewBoard);editorView();}break;
@@ -332,17 +351,17 @@ public:
     void paintBoard(HWND h,HDC printDC=nullptr){
         PAINTSTRUCT ps{};HDC dc=printDC?printDC:BeginPaint(h,&ps);RECT r;GetClientRect(h,&r);HDC mem=CreateCompatibleDC(dc);HBITMAP bmp=CreateCompatibleBitmap(dc,r.right,r.bottom);auto oldBmp=SelectObject(mem,bmp);
         auto bg=CreateSolidBrush(RGB(24,34,49));FillRect(mem,&r,bg);DeleteObject(bg);SelectObject(mem,font);SetBkMode(mem,TRANSPARENT);
-        int cell=std::min((r.right-s(35))/6,(r.bottom-s(24))/13),left=(r.right-6*cell)/2+s(9),top=s(5);
+        const Grid g=grid();const int cell=g.cell,left=g.left,top=g.top;
         const Frame* f=frames.empty()?nullptr:&frames[frame];
         auto gridPen=CreatePen(PS_SOLID,1,RGB(58,73,91));auto oldPen=SelectObject(mem,gridPen);auto oldBrush=SelectObject(mem,GetStockObject(NULL_BRUSH));
-        for(int y=0;y<13;++y){int yy=top+(12-y)*cell;SetTextColor(mem,RGB(170,186,205));RECT nr{0,yy,left-s(3),yy+cell};auto n=std::to_wstring(y+1);DrawTextW(mem,n.c_str(),-1,&nr,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
-            for(int x=0;x<6;++x){int xx=left+x*cell;RECT box{xx,yy,xx+cell,yy+cell};if(y==12){auto b=CreateSolidBrush(RGB(54,49,68));FillRect(mem,&box,b);DeleteObject(b);}Rectangle(mem,xx,yy,xx+cell,yy+cell);
+        for(int y=0;y<g.rows;++y){int yy=top+(g.rows-1-y)*cell;SetTextColor(mem,RGB(170,186,205));RECT nr{0,yy,left-s(3),yy+cell};auto n=std::to_wstring(y+1);DrawTextW(mem,n.c_str(),-1,&nr,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);
+            for(int x=0;x<g.columns;++x){int xx=left+x*cell;RECT box{xx,yy,xx+cell,yy+cell};if(y==g.rows-1){auto b=CreateSolidBrush(RGB(54,49,68));FillRect(mem,&box,b);DeleteObject(b);}Rectangle(mem,xx,yy,xx+cell,yy+cell);
                 int v=f?f->board.cells[x][y]:0;
                 if(v)paintPiece(mem,box,Cell(v));
                 for(int ring=0;f&&ring<2;++ring){const auto& list=ring?f->pair:f->marked;if(std::find(list.begin(),list.end(),Point{x,y})==list.end())continue;int inset=ring?s(4):s(1);auto p=CreatePen(PS_SOLID,s(2),ring?RGB(255,221,51):RGB(255,255,255));SelectObject(mem,p);Ellipse(mem,xx+inset,yy+inset,xx+cell-inset,yy+cell-inset);SelectObject(mem,gridPen);DeleteObject(p);}
             }
         }
-        SetTextColor(mem,RGB(170,186,205));for(int x=0;x<6;++x){RECT nr{left+x*cell,top+13*cell,left+(x+1)*cell,r.bottom};auto n=std::to_wstring(x+1);DrawTextW(mem,n.c_str(),-1,&nr,DT_CENTER|DT_SINGLELINE);}
+        SetTextColor(mem,RGB(170,186,205));for(int x=0;x<g.columns;++x){RECT nr{left+x*cell,top+g.rows*cell,left+(x+1)*cell,r.bottom};auto n=std::to_wstring(x+1);DrawTextW(mem,n.c_str(),-1,&nr,DT_CENTER|DT_SINGLELINE);}
         SelectObject(mem,oldPen);SelectObject(mem,oldBrush);DeleteObject(gridPen);BitBlt(dc,0,0,r.right,r.bottom,mem,0,0,SRCCOPY);SelectObject(mem,oldBmp);DeleteObject(bmp);DeleteDC(mem);if(!printDC)EndPaint(h,&ps);
     }
     void snapshot(const std::filesystem::path& path,bool live=false){
@@ -444,6 +463,31 @@ int selfTest(App& a,const std::filesystem::path& root) {
             // exclude only its pixels, while comparing all text and controls.
             auto stablePixels=[&](const std::filesystem::path& path){std::ifstream in(path,std::ios::binary);std::string bytes(std::istreambuf_iterator<char>(in),{});size_t offset=sizeof(BITMAPFILEHEADER)+sizeof(BITMAPINFOHEADER);for(int y=animation.top;y<animation.bottom;++y){size_t first=offset+size_t(y*client.right+animation.left)*4,last=offset+size_t(y*client.right+animation.right)*4;std::fill(bytes.begin()+first,bytes.begin()+last,0);}return bytes;};if(_wgetenv(L"JURAIC_SELFTEST_SKIP_PIXELS")&&stablePixels(actual)!=stablePixels(clean)){report<<"SKIP resized live text and controls equal clean repaint without trails (screen capture not available)\n";}else check(stablePixels(actual)==stablePixels(clean),"resized live text and controls equal clean repaint without trails");
         }
+        // The 10 x 18 field: generation, display, playback, the archive, no URL, and the editor.
+        {const Board smallDraft=a.editor.board;click(EDIT_MODE);
+         SendMessageW(a.get(FIELD_SIZE),CB_SETCURSEL,1,0);SendMessageW(a.window,WM_COMMAND,MAKEWPARAM(FIELD_SIZE,CBN_SELCHANGE),reinterpret_cast<LPARAM>(a.get(FIELD_SIZE)));
+         c=defaults();c.fieldColumns=10;c.fieldRows=18;c.targetChain=47;c.targetSuccessCount=3;a.setSettings(c);
+         check(text(a.get(CAPACITY))==L"余剰上限: 0個"&&text(a.labels[0])==L"連鎖数（1〜47）"&&configText(a.settings())==configText(c),"10 x 18: chain range, capacity and settings");
+         click(START);awaitDone(300);check(a.resultCode==0&&a.saved==3,"10 x 18: three boards of 47 chains via GUI");
+         check(!std::filesystem::exists(a.runDirectory/L"simulator_urls.txt")&&std::filesystem::exists(a.runDirectory/L"boards_10x18.txt"),"10 x 18 run keeps board codes, no URL list");
+         a.select(int(a.records.size()-1));const Record wideRecord=a.records.back();
+         check(wideRecord.wide&&a.frames.size()==1+2*47&&a.frames[0].board.width==10&&a.frames[0].board.height==19&&a.frames[0].marked.size()==4&&a.frames[0].pair.size()==2,"10 x 18 result shows 1 + 2 x 47 frames, trigger and last pair");
+         check(!IsWindowEnabled(a.get(COPY_URL))&&!IsWindowEnabled(a.get(OPEN_URL)),"10 x 18 result has no URL");
+         a.snapshot(root/L"gui-47chain.bmp");
+         click(LAST);check(a.frames[a.frame].chain==47&&a.frames[a.frame].board==emptyBoard(true),"10 x 18 playback: 47 chains, all clear");click(IGNITE);
+         auto reopened=loadRecord(wideRecord.path);check(reopened.wide&&reopened.wideSolution.field==wideRecord.wideSolution.field&&reopened.wideSolution.firePairs==wideRecord.wideSolution.firePairs,"10 x 18 archive reopens and validates");
+         click(EDIT_MODE);click(CLONE_BOARD);check(a.editing&&a.editor.board==wideRecord.board(),"10 x 18 result opens in the editor");
+         click(NEW_BOARD);check(a.editor.board==emptyBoard(true),"new 10 x 19 board");
+         RECT br;GetClientRect(a.board,&br);int wcell=std::min((br.right-a.s(35))/10,(br.bottom-a.s(24))/19),wleft=(br.right-10*wcell)/2+a.s(9),wtop=a.s(5);
+         click(PIECE_FIRST+Red);SendMessageW(a.board,WM_LBUTTONDOWN,0,MAKELPARAM(wleft+9*wcell+wcell/2,wtop+wcell/2));SendMessageW(a.board,WM_LBUTTONUP,0,MAKELPARAM(wleft+9*wcell+wcell/2,wtop+wcell/2));
+         check(a.editor.board.cells[9][18]==Red,"mouse editing reaches the 10th column and the 19th row");
+         Board w=emptyBoard(true);for(int x=6;x<10;++x){for(int y=0;y<18;++y)w.cells[x][y]=(x+y)%2?Blue:Green;w.cells[x][18]=Red;}
+         a.editor.replace(w);a.editorView();click(LAST);check(a.frames.back().chain==0,"four in the 19th row do not clear");
+         for(int x=6;x<10;++x)w.cells[x][17]=Yellow;
+         a.editor.replace(w);a.editorView();click(LAST);check(a.frames.back().chain==2&&a.frames.back().board.cells[6][17]==Empty,"the 19th row falls into the 18th and clears");a.editorView();
+         saveBoard(root/L"10x19.jfboard",a.editor.board);check(loadBoard(root/L"10x19.jfboard")==a.editor.board,"10 x 19 edited board saves and reopens");
+         SendMessageW(a.get(FIELD_SIZE),CB_SETCURSEL,0,0);SendMessageW(a.window,WM_COMMAND,MAKEWPARAM(FIELD_SIZE,CBN_SELCHANGE),reinterpret_cast<LPARAM>(a.get(FIELD_SIZE)));
+         check(text(a.labels[0])==L"連鎖数（1〜19）","back to 6 x 12");a.editor.replace(smallDraft);a.editorView();}
         a.snapshot(root/L"gui-editor.bmp");a.savedBoard=a.editor.board;click(EDIT_MODE);
         c=defaults();c.targetSuccessCount=10000000;c.restarts=2000000000;a.setSettings(c);click(START);SendMessageW(a.window,WM_CLOSE,0,0);awaitDone(3);check(!IsWindow(a.window),"window close cancels and joins worker");
         report<<"ALL GUI TESTS PASSED\n";return 0;
