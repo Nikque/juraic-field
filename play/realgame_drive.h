@@ -80,8 +80,12 @@ public:
     // frame in which that loses nothing (PlacementAgent::holdSecond, Params::thinkHold). The third pair is known only as
     // the pair appears (the window of the next pairs moves until then), so the second choice comes after the pair has
     // set out for the first (on the real game 26 pairs of 147 changed their placement 1 to 6 frames after they were seen).
+    // Its taps are pressed two frames and let go two (PlacementAgent::tapHold): on a machine under load the real game's
+    // frames take the buttons of the frame before or after now and then, and a tap of one frame is then lost or runs into
+    // the next one (rounds drawn as the real game, a frame sooner or later in one frame of 8: 83.7% of the pairs where
+    // the AI chose with taps of one frame, 97.7% with taps of two; 98.4% and 97.8% with no frame sooner or later).
     static void prepare(juraic::ai::Agent* agent) {
-        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true;
+        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true, placing->tapHold = 2;
     }
 
     // The middle of the lags the pictures of the last pairs fitted best; -1: none yet.
@@ -487,10 +491,13 @@ private:
         // (the way: as the engine had it from TURN_LATEST frames before on, and back through turns that came one after the
         //  other into that time, each within TURN_RUN frames of the next - the way before the first of them included: the
         //  real game shows such turns one after the other)
+        // (taps held longer - PlacementAgent::tapHold - space the turns of a way so much more)
+        const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(agent.get());
+        const int run = TURN_RUN + (placing ? 2 * (placing->tapHold - 1) : 0);
         int64_t from = g - TURN_LATEST;
         for (int extended = 0, more = 1; more && extended < 30; ++extended) {
             more = 0;
-            for (int64_t q = from; q > from - TURN_RUN && !more; --q) {
+            for (int64_t q = from; q > from - run && !more; --q) {
                 const juraic::PairControl* before = at(q - 1);
                 const juraic::PairControl* after = at(q);
                 if (before && after && before->dir != after->dir) from = q - 1, more = 1;

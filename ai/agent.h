@@ -88,6 +88,9 @@ public:
     // no second choice 160.) false: the pair sets out for the first choice at once (the default:
     // Params::thinkHold 0).
     bool holdSecond = false;
+    // The taps of the buttons it gives (InputPlanner::tapHold): pressed this many frames, let go as many before the
+    // next. 1: a frame each (the fastest; the default).
+    int tapHold = 1;
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
     // after it has appeared, and falls by itself, before the first button moves it. The wait ends earlier when
@@ -103,6 +106,7 @@ public:
     // planned again from where `o` shows the pair. No way left to it: the pair goes to the placement nearest to it that
     // it can still reach (as a choice that came after the pair had fallen behind a column); none: down where it is.
     void steer(const Observation& o) {
+        planner.tapHold = tapHold;
         if (o.self().phase != Phase::Control || late || target < 0) return;
         step = 0;
         const Player& p = o.self();
@@ -124,6 +128,7 @@ public:
     }
 
     uint8_t frame(const Observation& o) override {
+        planner.tapHold = tapHold;
         const Player& p = o.self();
         uint8_t b = 0;
         if (late && p.phase != Phase::Control) finish(); // the pair came to rest before its choice was made

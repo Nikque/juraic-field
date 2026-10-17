@@ -1170,6 +1170,40 @@ static void testDriver() {
               << shaky.locks << " went where it chose\n";
 }
 
+// On a machine under load the real game's frames take the buttons of the frame before or after now and then (its
+// twelfth record: 79% of the pictures where the engine had the pair, 93 to 98% in the records before), and a tap of
+// one frame is then lost or runs into the next one; the driver does not always see it in time (a turn shown late, or
+// the engine's pair locked before the picture shows it otherwise). The AI of the mode (Driver::prepare) presses each
+// tap two frames and lets go two (PlacementAgent::tapHold), and the driver takes turns that far apart as one run.
+static void testTapsHeld() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    const auto prepared = [&] {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        return a;
+    };
+    // (a pad as the real game - the turns the other way round, a turn and a move not to be read -, a frame sooner or
+    //  later in one frame of 8: 83.7% where the AI chose with taps of a frame, over 3 x 6 rounds; 92.1% with taps of two)
+    DriveCounts shaken;
+    for (int k = 0; k < 2; ++k)
+        driveRound(112 + uint64_t(k), 5, true, 2500, shaken, nullptr, nullptr, 6, true, 0, prepared(), false, 0, nullptr, 0, 2, 1, true);
+    check(shaken.locks >= 40 && shaken.hits * 100 >= shaken.locks * 88,
+          "through a pad as the real game under load, pairs of the mode's AI brought where it chose " + std::to_string(shaken.hits) + " of " + std::to_string(shaken.locks));
+    // (turns with a move or after another shown 6 frames late, the way of the turns known as the mode knows it: taps of two
+    //  frames space the turns 4 to 5 frames apart, which the driver took for no run - put right, they were turned again:
+    //  11 pairs of 361 elsewhere in 10 rounds, none when taken as one run)
+    DriveCounts crowded;
+    for (const uint64_t seed : {300, 302})
+        driveRound(seed, 5, false, 2500, crowded, nullptr, nullptr, 6, false, 0, prepared(), false, 0, nullptr, 0, 2, 1, true, 20, 6);
+    check(crowded.locks >= 40 && crowded.hits * 100 >= crowded.locks * 98,
+          "with turns shown 6 frames late, pairs of the mode's AI brought where it chose " + std::to_string(crowded.hits) + " of " + std::to_string(crowded.locks) +
+              ", put right " + std::to_string(crowded.corrected) + " times");
+    check(dynamic_cast<ai::PlacementAgent&>(*prepared()).tapHold == 2, "the AI of the mode taps a frame each");
+    std::cout << "the AI of the mode holds its taps: under load " << shaken.hits << " of " << shaken.locks << " where it chose, with turns shown late " << crowded.hits
+              << " of " << crowded.locks << "\n";
+}
+
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------
 
 static void testMenus() {
@@ -1344,6 +1378,7 @@ int main(int argc, char** argv) {
         testRow13Kept();
         testSecondChoiceHeld();
         testDriver();
+        testTapsHeld();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
         testMenus();
