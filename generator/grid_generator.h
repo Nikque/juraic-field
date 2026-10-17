@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -508,13 +509,15 @@ template <class G> std::vector<std::pair<GridField<G>, GridBits<G>>> gridPredece
 }
 
 // One independent search, as generateOne() in generator.cpp, with the values of
-// GeneratorConfig of the same names.
+// GeneratorConfig of the same names. `deadEnd` (for tools/grid_bench.cpp): the
+// boards of the last step reached when the search finds nothing.
 template <class G>
-std::optional<GridSolution<G>> gridGenerateOne(int colors, int target, int beamWidthValue, int perParentValue,
+std::optional<GridSolution<G>> gridGenerateWithPlan(int colors, int target, int beamWidthValue, int perParentValue,
                                                int minExtra, int maxExtra, Rng& rng,
                                                const std::atomic_bool* stop = nullptr,
                                                std::atomic_int* depthOut = nullptr,
-                                               const std::atomic_bool* cancel = nullptr) {
+                                               const std::atomic_bool* cancel = nullptr,
+                                               std::vector<grid_detail::Node<G>>* deadEnd = nullptr) {
     using namespace grid_detail;
     const size_t perParent = size_t(perParentValue), beamWidth = size_t(beamWidthValue);
     std::vector<Node<G>> beam(1), next;
@@ -588,8 +591,32 @@ std::optional<GridSolution<G>> gridGenerateOne(int colors, int target, int beamW
             const Node<G> child = makeChild(post, choices[pick]);
             return GridSolution<G>{child.field, child.trigger, pairs[pick], target};
         }
-        if (next.empty()) return std::nullopt;
-        const size_t width = depth == target - 1 ? next.size() : beamWidth;
+        if (next.empty()) {
+            if (deadEnd) *deadEnd = beam;
+            return std::nullopt;
+        }
+        // Boards on which the next step has no insertion at all are dropped (PLAN_LIVE).
+        if (planned && G::PLAN_LIVE && depth + 1 < target) {
+            thread_local std::vector<uint16_t> buffer;
+            buffer.resize(maxPlacements<G>());
+            const grid_detail::Placement<G>* table = grid_detail::placements<G>().data();
+            std::erase_if(next, [&](const Node<G>& n) {
+                int h[G::W];
+                const std::optional<Filter<G>> f = filterFor(n.field, depth + 1, h);
+                const size_t count = candidatePlacements(n, buffer.data(), f ? &*f : nullptr);
+                for (size_t k = 0; k < count; ++k)
+                    if (validColors(n.field, table[buffer[k]], colors)) return false;
+                return true;
+            });
+            if (next.empty()) {
+                if (deadEnd) *deadEnd = beam;
+                return std::nullopt;
+            }
+        }
+        // (PLAN_END_BEAM times as many boards are kept in the last PLAN_END_STEPS steps)
+        const size_t width = depth == target - 1                                  ? next.size()
+                             : planned && depth > target - G::PLAN_END_STEPS ? beamWidth * G::PLAN_END_BEAM
+                                                                                : beamWidth;
         if (planned && G::PLAN_GREEDY && (G::PLAN_GREEDY == 2 || depth <= target - G::PLAN_STEPS) && next.size() > width) {
             // In random order, the boards with the least room left away from the death columns first.
             rng.partialShuffle(next.data(), next.size(), next.size());
@@ -600,6 +627,8 @@ std::optional<GridSolution<G>> gridGenerateOne(int colors, int target, int beamW
                     const int distance = deathDistance<G>(x);
                     if (G::PLAN_GREEDY == 2) room += (G::H - h[x]) * (distance + 1) * (distance + 1);
                     else if (!(centerColumns<G>() >> x & 1)) room += G::H - h[x];
+                    // (steps between neighbouring columns: a deep narrow gap takes upright groups of four only)
+                    if (x + 1 < G::W) room += G::PLAN_BUMP * std::abs(h[x] - h[x + 1]);
                 }
                 return room;
             };
@@ -616,6 +645,34 @@ std::optional<GridSolution<G>> gridGenerateOne(int colors, int target, int beamW
         beam.swap(next);
     }
     return std::nullopt;
+}
+
+// The search, with the plan of G::ThreeColors for three colours (grid_field.h).
+template <class G>
+std::optional<GridSolution<G>> gridGenerateOne(int colors, int target, int beamWidthValue, int perParentValue,
+                                               int minExtra, int maxExtra, Rng& rng,
+                                               const std::atomic_bool* stop = nullptr,
+                                               std::atomic_int* depthOut = nullptr,
+                                               const std::atomic_bool* cancel = nullptr,
+                                               std::vector<grid_detail::Node<G>>* deadEnd = nullptr) {
+    using T = typename G::ThreeColors;
+    if constexpr (!std::is_same_v<T, G>) {
+        static_assert(T::W == G::W && T::H == G::H && T::CLEAR_H == G::CLEAR_H && T::SPAWN_X == G::SPAWN_X &&
+                      T::DEATH_COLUMNS == G::DEATH_COLUMNS);
+        if (colors == 3) {
+            const auto s = gridGenerateWithPlan<T>(colors, target, beamWidthValue, perParentValue, minExtra, maxExtra, rng,
+                                                   stop, depthOut, cancel);
+            if (!s) return std::nullopt;
+            GridSolution<G> same;
+            for (int i = 0; i < 3; ++i) same.field.plane[i].c = s->field.plane[i].c;
+            same.trigger.c = s->trigger.c;
+            same.firePairs = s->firePairs;
+            same.targetChain = s->targetChain;
+            return same;
+        }
+    }
+    return gridGenerateWithPlan<G>(colors, target, beamWidthValue, perParentValue, minExtra, maxExtra, rng, stop, depthOut,
+                                   cancel, deadEnd);
 }
 
 } // namespace juraic

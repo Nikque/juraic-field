@@ -366,8 +366,9 @@ static void testWideGeneration() {
         }
     }
     check(found >= 12, "10 x 19 generation coverage");
-    // The most: 47 chains of 188 pieces (the plan of grid_generator.h), checked cell by cell.
-    for (int colors : {4, 5}) {
+    // The most: 47 chains of 188 pieces (the plan of grid_generator.h; for three colours that of
+    // Grid10x19ThreeColors), checked cell by cell.
+    for (int colors : {3, 4, 5}) {
         bool fortySeven = false;
         for (uint64_t attempt = 1; attempt <= 100 && !fortySeven; ++attempt) {
             Rng r(47, attempt);
