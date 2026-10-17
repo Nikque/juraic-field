@@ -122,8 +122,12 @@ public:
             if (aim != noted) noted = aim, note(now, "2P pair " + std::to_string(pairsSeen) + ": brought to " + placementText(aim));
         }
         const int64_t at = now + lag;
-        // (frames of the game whose buttons were sent before: they took what was held)
-        while (active && next < at) play(f, false);
+        // (frames of the game whose buttons were sent before: they took what was held. A frame the clock went past without
+        //  a call - the thread of the play a frame late - had the agent's buttons chosen for it and not sent: the way to
+        //  the placement is planned again from where the engine has the pair, so that a move chosen for it is not lost)
+        bool same = true;
+        while (active && next < at) same = play(f, false) && same;
+        if (!same && active) steer(f);
         if (active && next == at) play(f, true);
         return press(now, held);
     }

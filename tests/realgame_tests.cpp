@@ -599,17 +599,19 @@ struct DriveCounts {
 // AI given to the driver in frame laterAt of the round. hidden: a pair turned is not drawn for that many frames (the
 // real game's pair is not to be read while it turns: seen in its record, 9 frames for two turns). movedHidden: a pair
 // moved to the side is not drawn for that many frames (the real game's pair, between two columns in the frame it moves,
-// is not to be read then: 92 moves of 97 in three of its records). quietLanding: as draw.
+// is not to be read then: 92 moves of 97 in three of its records). quietLanding: as draw. skipOneIn: in one frame of
+// that many (at random) the driver is not called and the pad holds what it held (the thread of the play a frame late:
+// 4.6% of the frames of a record of the real game, the next frame called twice).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
-                       int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false) {
+                       int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
     r.start(rules, seed);
     Canvas canvas(1280, 720, l);
-    Rng noise(seed, 7), shake(seed, 9);
+    Rng noise(seed, 7), shake(seed, 9), skipper(seed, 11);
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
     const std::unique_ptr<ai::Agent> other = ai::makeAgent("x3", narrow);
@@ -649,7 +651,9 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         }
         follow.step(read(canvas.picture(), l), clock);
         if (later && f == laterAt) d.replaceAgent(std::move(later)); // (another AI chosen on the screen of the mode)
-        sent[size_t(clock - first)] = d.tick(follow, clock);
+        // (a frame the driver is not called in: the pad holds what it held)
+        if (skipOneIn && f > 0 && skipper.below(uint64_t(skipOneIn)) == 0) sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
+        else sent[size_t(clock - first)] = d.tick(follow, clock);
         if (d.played != played) played = d.played, target = -1, begunAt = clock;
         if (d.target() >= 0) target = d.target();
         // The next frame of the round takes what was sent `lag` frames before it (a shaky pad: now and then a frame
@@ -833,6 +837,14 @@ static void testDriver() {
     // that had fallen by it in its first frames found no way to its placement behind a high column: four pairs went
     // down where they appeared).
     check(real.downAtSpawn == 0, "through a pad as the real game, " + std::to_string(real.downAtSpawn) + " pairs of " + std::to_string(real.locks) + " took the down button as they appeared");
+    // The thread of the play a frame late now and then (4.6% of the frames of a record of the real game, the next frame
+    // called twice): the button the AI chose for a frame the driver was not called in is not lost. (Lost, the engine went
+    // on without it as the game did, nothing was put right, and the pair went down a column short of its placement: five
+    // pairs of 45 in that record, the one move of their way chosen for such a frame.)
+    DriveCounts skipped;
+    for (int k = 0; k < 2; ++k) driveRound(112 + uint64_t(k), 5, false, 2500, skipped, nullptr, nullptr, 6, true, 0, nullptr, false, 0, nullptr, 0, 2, 1, true, 20);
+    check(skipped.locks >= 40 && skipped.hits * 100 >= skipped.locks * 98,
+          "with the driver not called in one frame of 20, pairs brought where the AI chose " + std::to_string(skipped.hits) + " of " + std::to_string(skipped.locks));
     std::cout << "the AI playing 2P through the screen and a pad: late as said, " << exact.hits << " pairs of " << exact.locks
               << " where it chose and none found elsewhere, the lag measured as it was; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
               << shaky.locks << " went where it chose\n";
