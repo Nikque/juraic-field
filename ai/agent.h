@@ -55,6 +55,7 @@ public:
     // waited there wait as long here, so that the buttons are those of the game. Null = no pair waits.
     const std::vector<int>* lateScript = nullptr;
     int64_t rerouted = 0;   // pairs whose chosen placement had no path from where they appeared, and that went to another (for tools)
+    int64_t steered = 0;    // pairs sent to the nearest placement they could still reach, no way leading to the chosen one any more (steer, a late choice; for tools)
     int lastWanted = -1, lastTaken = -1; // ... the last of them
     // true: a placement is offered to choose() only when the pair has a path to it from where it
     // appears. (legalPlacements follows the rule of reach of core/reach.h; on a field with columns
@@ -107,7 +108,7 @@ public:
         const Player& p = o.self();
         if (planner.plan(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) return;
         const int best = nearest(o, p.pair, target);
-        if (best >= 0 && planner.plan(p.field, p.pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best;
+        if (best >= 0 && planner.plan(p.field, p.pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best, ++steered;
         else path.buttons.clear();
     }
     // The placement the pair in play is brought to (-1: none yet).
@@ -373,7 +374,7 @@ private:
         }
         // The pair cannot get there any more: the choice came when it had fallen behind a column.
         const int best = nearest(o, pair, id);
-        if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best;
+        if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best, ++steered;
         else path.buttons.clear();
     }
     // The placement `pair` can still reach whose two pieces come down nearest to the columns of placement `id`; of equal

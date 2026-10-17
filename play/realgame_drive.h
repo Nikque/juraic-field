@@ -122,8 +122,17 @@ public:
         }
         correct(f);
         if (notes) {
+            // (a placement that takes the place of another: the AI's second choice, or the nearest one when no way led
+            //  to the one before any more)
             const int aim = target();
-            if (aim != noted) noted = aim, note(now, "2P pair " + std::to_string(pairsSeen) + ": brought to " + placementText(aim));
+            const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(agent.get());
+            if (aim != noted) {
+                std::string why;
+                if (placing && noted >= 0 && aim >= 0)
+                    why = placing->steered != steeredSeen ? " (no way to the one before: the nearest)" : placing->againSwitched != againSeen ? " (the second choice)" : "";
+                noted = aim, note(now, "2P pair " + std::to_string(pairsSeen) + ": brought to " + placementText(aim) + why);
+            }
+            if (placing) steeredSeen = placing->steered, againSeen = placing->againSwitched;
         }
         const int64_t at = now + lag;
         // (frames of the game whose buttons were sent before: they took what was held. A frame the clock went past without
@@ -155,6 +164,7 @@ private:
     int round = -1, pairsSeen = 0;
     int64_t checked = -1;
     int noted = -2; // the placement last noted (notes)
+    int64_t steeredSeen = 0, againSeen = 0; // the agent's counts of the nearest placements taken and the second choices taken, as last noted
     // After its pair is locked the engine goes on without buttons (its chain, then the wait for the next pair), so that
     // the AI is shown when the next pair comes and chooses before it appears, as in a match of this program - not as it
     // appears, the pair waiting for the choice (long on a machine under load). It stops two frames before the pair it

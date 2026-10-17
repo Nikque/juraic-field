@@ -632,8 +632,8 @@ struct SideTrack {
     int nextStill = 0;         // readings in a row that showed the window as the one before it (both pairs read)
     int64_t nextMovedAt = -1;  // the last reading in which it was read otherwise (moving)
     int learnFor = -1;         // the pair whose next two are still to be learnt from the window (-1: none)
-    // A pair where pairs appear before the first pair of the round, of other colours than those learnt: the frame of the
-    // reading it was seen in, and its axis (Tracker::step).
+    // A pair seen where pairs appear and not taken (pieces above the field in the reading before; before the first pair
+    // of the round, other colours than those learnt): the frame of the reading it was seen in, and its axis (Tracker::step).
     int64_t strayAt = -1;
     juraic::Cell strayAxis = juraic::EMPTY;
 };
@@ -709,6 +709,12 @@ public:
                 learn(t.learnFor + 1, t.next[0]), learn(t.learnFor + 2, t.next[1]);
                 t.learnFor = -1;
             }
+            // The window moves on before the next pair appears (Timing::nextShown): it shows the second of the two it
+            // showed, and the pair after them, which is learnt then (the AI waiting for its pair is shown it then, as
+            // in a match of this program).
+            if (t.learnFor < 0 && t.nextStill >= windowStill && knows(t.pairs) && knows(t.pairs + 1) && same(t.next[0], pairs[size_t(t.pairs + 1)]) &&
+                !(same(t.next[0], pairs[size_t(t.pairs)]) && same(t.next[1], pairs[size_t(t.pairs + 1)])))
+                learn(t.pairs + 2, t.next[1]);
             t.clear = read.unsure == 0;
             if (!t.clear) {
                 // (something the screen draws over the field: nothing of it is taken, the pair not seen in this frame)
@@ -758,9 +764,17 @@ public:
                 // (the first pair of a round: its own pieces read in the reading before, when it was not taken, do not keep
                 //  the field from standing still; seen there before as a pair of other colours than those learnt, it came then)
                 const bool firstOfRound = fromStart && t.pairs == 0;
-                const bool seenBefore = firstOfRound && t.strayAt >= 0 && at - t.strayAt <= 2 && fresh.seen && t.strayAxis == fresh.colors.axis;
-                if ((((firstOfRound ? settledLate : settled) && there) || ((fresh.childHidden ? settledLate : settled) && hidden)) && !samePair) {
+                // (seen there in the clear reading before and not taken - pieces above the field then, or other colours
+                //  than learnt before the first pair of a round -, it came then: pieces of a chain do not stay there)
+                const bool seenBefore = t.strayAt >= 0 && at - t.strayAt <= 2 && fresh.seen && t.strayAxis == fresh.colors.axis;
+                // (seen late, both pieces showing, 2 * pairGap frames or more after the last pair appeared: its own
+                //  pieces read in the reading before do not keep the field from standing still either - on the real game
+                //  such a pair, after garbage fell under a light, was taken for none to the end of the round)
+                const bool longAfter = t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap;
+                if (((((firstOfRound || seenBefore) ? settledLate : settled) && there) || (((fresh.childHidden || longAfter) ? settledLate : settled) && hidden)) && !samePair) {
                     newPair(s, fresh, resting, read, seenBefore ? t.strayAt : at), late[s] = t.late = hidden;
+                } else if (there && !samePair) {
+                    t.strayAt = at, t.strayAxis = fresh.colors.axis;
                 } else if (firstOfRound && knows(0) && !fresh.seen) {
                     // The first pair of a round, of other colours than the window showed before it (read on a screen before
                     // the round): taken when seen where pairs appear in two clear readings in a row with nothing else above

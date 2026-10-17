@@ -645,6 +645,71 @@ static void testWindowBeforeRound() {
     std::cout << "the window taken before a round is the one that stood last; the first pair of other colours than learnt is seen in two readings\n";
 }
 
+// After garbage fell under a light (on the real game: the other side's chain), the next pair was first seen in a clear
+// reading half a cell below where pairs appear, both pieces showing, of the colours of the pair that comes: it is the
+// pair that came. (Its own pieces, with no pair in hand, counted as pieces above the field, and the pieces that fell
+// before the light were still counted so in the first reading after it: no pair of 2P was seen to the end of the round.)
+// And the window moves on before a pair appears: the pair after the two it showed is learnt then.
+static void testPairsAfterLight() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {1, 5}, side.next[1] = {3, 1};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(i) && t.pairs[size_t(i)].axis == p.axis && t.pairs[size_t(i)].child == p.child; };
+    int64_t at = 40000;
+    Tracker t;
+    for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+    // The first pair of 2P (1 5) appears; the window moves on to 3 1 / 2 2 and stands.
+    Reading first = window(empty, {3, 1}, {2, 2});
+    first.side[1].point[SPAWN_X][23] = 1;
+    for (int f = 0; f < 4; ++f) t.step(first, at++);
+    check(t.side[1].pairs == 1 && is(t, 1, {3, 1}) && is(t, 2, {2, 2}), "the pairs after the first one are not learnt");
+    // It comes to rest in the first column; then, before the next pair appears, the window moves on to 2 2 / 4 5.
+    Reading rest = window(empty, {3, 1}, {2, 2});
+    rest.side[1].point[0][0] = rest.side[1].point[0][1] = 1, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 5;
+    for (int f = 0; f < 30; ++f) t.step(rest, at++);
+    for (int f = 0; f < 3; ++f) t.step(window(rest, {2, 2}, {4, 5}), at++);
+    check(t.side[1].pairs == 1 && is(t, 3, {4, 5}), "the pair the window shows as it moves on before a pair appears is not learnt");
+    // Garbage falls (pieces above the field), under a light it comes to rest, and the next pair (3 1) is first seen
+    // after the light a cell and a half below where pairs appear, both pieces showing.
+    Reading falling = window(rest, {2, 2}, {4, 5});
+    for (int x = 1; x < W; ++x) falling.side[1].point[x][12] = falling.side[1].point[x][13] = GARBAGE;
+    for (int f = 0; f < 3; ++f) t.step(falling, at++);
+    Reading landed = window(rest, {2, 2}, {4, 5});
+    for (int x = 1; x < W; ++x) landed.side[1].point[x][0] = landed.side[1].point[x][1] = GARBAGE;
+    Reading lit = landed;
+    lit.side[1].unsure = 4;
+    for (int f = 0; f < 6; ++f) t.step(lit, at++);
+    Reading seen = landed;
+    seen.side[1].point[SPAWN_X][19] = seen.side[1].point[SPAWN_X][20] = 3; // (the axis, its child above it)
+    seen.side[1].point[SPAWN_X][21] = seen.side[1].point[SPAWN_X][22] = 1;
+    for (int f = 0; f < 4; ++f) t.step(seen, at++);
+    check(t.side[1].pairs == 2 && t.side[1].inHand && t.side[1].late, "a pair first seen after a light below where pairs appear, both pieces showing, is not seen");
+    check(t.doubts == 0, "the pairs learnt did not fit (" + std::to_string(t.doubts) + " readings)");
+    // That pair comes to rest on the garbage; the next one (2 2) appears where pairs appear, a piece still read above
+    // the field in the reading before: it is seen in its second reading there, as the pair that came in the first.
+    Reading rested = landed;
+    rested.side[1].point[SPAWN_X][2] = rested.side[1].point[SPAWN_X][3] = 3, rested.side[1].point[SPAWN_X][4] = rested.side[1].point[SPAWN_X][5] = 1;
+    for (int f = 0; f < 10; ++f) t.step(rested, at++);
+    Reading leftover = rested;
+    leftover.side[1].point[4][14] = leftover.side[1].point[4][15] = GARBAGE; // (a piece above the field)
+    t.step(leftover, at++);
+    Reading next = rested;
+    next.side[1].point[SPAWN_X][23] = 2; // (the axis half a cell up where pairs appear, its child above the screen)
+    const int64_t came = at;
+    t.step(next, at++);
+    t.step(next, at++);
+    check(t.side[1].pairs == 3 && t.side[1].inHand && t.side[1].spawnedAt == came, "a pair where pairs appear, a piece above the field in the reading before, is not seen in its second reading");
+    std::cout << "a pair first seen after a light, both pieces showing, is the pair that came; the pair the window shows as it moves on is learnt\n";
+}
+
 // What the AI is shown before its pair appears (observeWith, the own side as the driver follows it, waiting for the
 // pair): the pairs the screen has shown and no other. The window shows the pair that comes and the one after it; the
 // pair after those is learnt when the pair has appeared, and the AI is then asked for its second choice.
@@ -1162,6 +1227,7 @@ int main(int argc, char** argv) {
         testPairsSeenOnce();
         testWindowBeforeRound();
         testShownPairsOnly();
+        testPairsAfterLight();
         testDriver();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
