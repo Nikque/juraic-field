@@ -211,6 +211,7 @@ Do not show the outside address in a stream or in public, and take the forwardin
 A C++20 program that randomly generates boards (three to five colours) which fire an exact
 chain of 1 to 19 waves when one last pair is placed. The URL of every board found is appended to
 `19chain_urls.txt`. The shipped settings generate 100 new 19-chain boards of 76 pieces in four colours.
+With the field set to 10 columns × 18 rows it generates chains of 1 to 47 waves ("10 × 18 fields" below).
 
 All board work is done on bitboards: one 16-bit lane per column, six columns in one SSE register,
 three registers for the colour code (48 bytes per board). The same core (`core/`) is used by solo play,
@@ -219,7 +220,7 @@ versus play and the AI.
 ### Windows GUI
 
 `JuraicFieldGenerator.exe` offers settings, asynchronous generation with cancellation, a result list, a
-6×13 board and chain playback. The CLI (`random_19_chain.exe` / `run.cmd`) remains available. See
+6×13 or 10×19 board and chain playback. The CLI (`random_19_chain.exe` / `run.cmd`) remains available. See
 [GUI_README.md](GUI_README.md) (Japanese) for usage and [URL_FORMATS.md](URL_FORMATS.md) for the simulator URLs.
 The board editor supports five colours, garbage, point, hard and iron pieces and fixed walls; these
 special kinds are never generated.
@@ -318,14 +319,15 @@ order, so **the same settings give the same boards in the same order for any thr
 
 | Key | Meaning | Shipped |
 | --- | --- | --- |
-| `target_chain` | number of waves, 1-19 | 19 |
+| `field_columns`, `field_rows` | columns and rows that clear (one hidden row above them): 6 and 12, or 10 and 18 | 6, 12 |
+| `target_chain` | number of waves, 1-19 (1-47 on 10 × 18) | 19 |
 | `target_success_count` | new unique boards to save in this run | 100 |
 | `initial_seed` | random seed (unsigned 64-bit) | 20261004 |
 | `color_count` | 3, 4 or 5 | 4 |
 | `beam_width` | boards kept per step | 48 |
 | `restarts` | maximum number of independent attempts | 100000 |
 | `candidates_per_parent` | children kept per board | 2 |
-| `min_extra_pieces` / `max_extra_pieces` | range of extra pieces, at most `78 - 4 * target_chain` | 0 / 0 |
+| `min_extra_pieces` / `max_extra_pieces` | range of extra pieces, at most `78 - 4 * target_chain` (`188 - 4 * target_chain` on 10 × 18) | 0 / 0 |
 | `threads` | search threads, 0 = automatic (half of the logical processors) | 0 |
 
 The first six keys are required.
@@ -346,6 +348,45 @@ Other work was running on the machine, so the numbers are indicative.
 
 v0.3.0 also searched for a build sequence from an empty board, so this is not a like-for-like comparison.
 See [BENCHMARK.md](BENCHMARK.md) (Japanese).
+
+### 10 × 18 fields
+
+With `field_columns = 10` and `field_rows = 18` in `config.ini` (in the GUI: "10列×18段" under "盤面") the
+generator works on a field of 10 columns:
+
+- the lower 18 rows connect and clear; the 19th row is hidden: it never connects or clears but falls when the
+  pieces below it disappear; nothing is put into a 20th row;
+- pairs appear in the fifth column, and the game is over when the fifth or the sixth column reaches the 18th
+  row: those two cells are empty after the chain and before the last pair;
+- the reach rule is the one above with the rows moved (17 or lower: passable; 19: never; 18: only while the
+  axis piece is lifted into the 19th row);
+- 1 to 47 chains: before the last pair the fifth and sixth columns hold at most 17 pieces, so a board holds at
+  most `8 × 19 + 2 × 17 + 2 = 188` pieces, `188 / 4 = 47` waves; extra pieces up to `188 - 4 * target_chain`.
+
+No simulator site shows a field of this size, so no URL is written; instead a **board code** is appended to
+`boards_10x18.txt` (and used to skip duplicates): `10x18:` and the 190 cells from the 19th row down, each
+row left to right, as `.` (empty) and `R G B Y P`. The output lists `field=10x18` before the board and a
+`board code:` line instead of the URL. The GUI shows, plays and edits these boards.
+
+The search is the same backward insertion, on a field type with one 32-bit word per column
+(`generator/grid_field.h`) and the same steps written for any field (`generator/grid_generator.h`); on
+6 × 13 that search finds, attempt by attempt, exactly the boards of the 6 × 13 search
+(`tests/grid_tests.cpp`). Boards with at most 20 cells to spare follow a plan: before the last 12 steps the
+columns more than two away from the fifth and sixth are filled and room for the last steps is kept next to
+them; in the last 12 steps the new group goes near the top there; at every step the boards with the least
+room, weighted by the distance from the fifth and sixth columns, are kept. For 47 chains in four colours,
+attempts without the plan found 0 boards of 300, with it 50 of 200 (`tools/grid_bench.cpp`; the numbers
+behind every value are in `generator/grid_field.h`).
+
+Speed (2026-10-17, same machine and settings as above, 100 boards each, all checked by the independent verifier):
+47 chains of 188 pieces in four colours 10.98 s on one thread (9.1/s) and 1.13 s on 16 threads (88/s); in
+five colours 4.50 s and 0.58 s; 40 chains in four colours 0.56 s on 16 threads.
+
+Of the 555 settings of 1 to 47 chains × three to five colours × extra pieces (none, one, the largest number,
+a range up to it), one board each within 20000 attempts or 60 seconds (2026-10-17, four threads): every setting
+in four and five colours was found. In three colours no board of 47 chains was found (nor in 100 to 200
+attempts of every other setting tried); 44 to 46 chains were found, in up to about 18 seconds; with the
+largest number of extra pieces, 8-10, 19-22, 24-27, 34, 41, 42 and 46 chains were not found.
 
 ## Build and test
 

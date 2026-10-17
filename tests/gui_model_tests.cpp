@@ -103,6 +103,84 @@ int wmain(int argc, wchar_t** argv) {
                     for (int format = 0; format < 3; ++format)
                         writeSimulatorUrls(dir / (std::string("urls-") + urlFormatIds[format] + ".txt"), records, UrlFormat(format));
                 }
+        // 10 x 18: settings, generation through the hooks, playback, archives of version 3, no URL.
+        // The timelines (190 cells a frame, top row first) are replayed by tests/test_gui_artifacts.py.
+        {
+            std::array<std::string, INPUT_COUNT> wideValues{"47", "1", "1", "4", "0", "0", "48", "2", "1000", "0"};
+            require(parseInputs(wideValues, true).wide() && parseInputs(wideValues, true).targetChain == 47, "10 x 18 accepts 47 chains");
+            bool rejected = false;
+            try { parseInputs(wideValues); } catch (...) { rejected = true; }
+            require(rejected, "6 x 12 rejects 47 chains");
+            for (auto [index, value] : std::initializer_list<std::pair<int, std::string>>{{0, "48"}, {5, "1"}}) {
+                auto t = wideValues;
+                t[index] = value;
+                rejected = false;
+                try { parseInputs(t, true); } catch (...) { rejected = true; }
+                require(rejected, "invalid 10 x 18 input accepted");
+            }
+            wideValues[0] = "40", wideValues[5] = "28";
+            require(parseInputs(wideValues, true).maxExtraPieces == 28, "10 x 18 extras up to 188 - 4 x chain");
+            auto wideConfig = parseInputs(wideValues, true);
+            writeConfig(root / L"wide.ini", wideConfig);
+            require(configText(loadConfig(root / L"wide.ini")) == configText(wideConfig), "10 x 18 config roundtrip");
+            require(!urlUnavailableReason(emptyBoard(true), UrlFormat::Mattulwan).empty(), "a 10 x 19 board has no URL");
+            int wideCases = 0;
+            for (int chain : {1, 20, 47})
+                for (int colorCount : {4, 5}) {
+                    auto dir = root / L"wide" / std::to_wstring(++wideCases);
+                    std::filesystem::create_directories(dir);
+                    auto config = defaults();
+                    config.fieldColumns = 10, config.fieldRows = 18;
+                    config.targetChain = chain;
+                    config.colorCount = colorCount;
+                    config.targetSuccessCount = 1;
+                    const int extra = chain == 20 ? 3 : 0;
+                    config.minExtraPieces = config.maxExtraPieces = extra;
+                    writeConfig(dir / L"config.ini", config);
+                    int count = 0;
+                    GeneratorHooks hooks;
+                    hooks.saved = [&](const Solution&, uint64_t, int) { require(false, "a 10 x 18 run reports a 6 x 13 board"); };
+                    hooks.savedWide = [&](const WideSolution& sol, uint64_t, int n) {
+                        ++count;
+                        require(n == 1 && gridVerifySolution(sol).empty(), "saved 10 x 18 board must verify");
+                        auto frames = timeline(sol);
+                        require(frames[0].board == boardFromGrid(sol.field) && frames[0].board.wide(), "10 x 18 ignition display");
+                        require(frames[0].marked.size() == 4 && frames[0].pair.size() == 2, "10 x 18 trigger and last pair are marked");
+                        require(frames.back().chain == chain && frames.size() == size_t(1 + 2 * chain), "10 x 18 playback chain count");
+                        require(gridFromBoard(frames.back().board).count() == extra, "10 x 18 residual display");
+                        {
+                            std::ofstream out(dir / L"timeline-10x19.txt", std::ios::binary);
+                            out << frames.size() << '\n';
+                            for (const auto& f : frames) {
+                                out << f.chain;
+                                for (int y = 18; y >= 0; --y)
+                                    for (int x = 0; x < 10; ++x) out << ' ' << int(f.board.cells[x][y]);
+                                out << '\n';
+                            }
+                            require(bool(out), "cannot save the 10 x 18 timeline");
+                        }
+                        saveRecord(dir / L"盤面.jfchain", sol, UINT64_MAX);
+                        auto r = loadRecord(dir / L"盤面.jfchain");
+                        require(r.wide && r.seed == UINT64_MAX && r.wideSolution.field == sol.field && r.wideSolution.trigger == sol.trigger &&
+                                    r.wideSolution.firePairs == sol.firePairs && r.wideSolution.targetChain == sol.targetChain,
+                                "10 x 18 archive roundtrip");
+                        require(timeline(r).size() == frames.size() && r.board() == frames[0].board, "a reopened 10 x 18 archive plays");
+                    };
+                    require(runGenerator(dir / L"config.ini", &hooks, dir) == 0 && count == 1, "generate and play 10 x 18 cases");
+                    require(std::filesystem::exists(dir / L"boards_10x18.txt") && !std::filesystem::exists(dir / L"19chain_urls.txt"),
+                            "10 x 18 history file");
+                }
+            std::vector<Record> mixed{loadRecord(root / L"1" / L"盤面.jfchain"), loadRecord(root / L"wide" / L"1" / L"盤面.jfchain")};
+            require(writeSimulatorUrls(root / L"wide" / L"mixed.txt", mixed, UrlFormat::Ishikawa) == 1, "URL list leaves out 10 x 18 results");
+            for (const char* text : {"JURAIC_FIELD_CHAIN 3\n6 12\n0 1\n", "JURAIC_FIELD_CHAIN 3\n10 18\n0 48\n"}) {
+                std::ofstream bad(root / L"wide" / L"bad.jfchain", std::ios::binary);
+                bad << text;
+                bad.close();
+                rejected = false;
+                try { loadRecord(root / L"wide" / L"bad.jfchain"); } catch (...) { rejected = true; }
+                require(rejected, "a wrong size or chain count in an archive of version 3 accepted");
+            }
+        }
         // Cancellation: the search must stop promptly and report code 3.
         auto dir = root / L"cancel";
         std::filesystem::create_directory(dir);

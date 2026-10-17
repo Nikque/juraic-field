@@ -7,9 +7,10 @@ inline constexpr std::array<const char*, 3> urlFormatNames{
     "石川", "対戦パーク", "mattulwan系（pndsngミラー）"};
 inline constexpr std::array<const char*, 3> urlFormatIds{"ishikawa", "park", "mattulwan"};
 
-// Export only the 6 x 13 board. Engine identity and CLI history keep using
+// Export only a 6 x 13 board. Engine identity and CLI history keep using
 // fieldToUrl; changing a destination cannot change the search or dedupe.
 inline std::string urlUnavailableReason(const Board& board, UrlFormat format) {
+    if (board.wide()) return "10列×18段の盤面を表せるサイトがないため、URLは出力できません。";
     for (const auto& col : board.cells)
         for (Cell v : col) {
             if (v > Wall) return "未対応の種別です。";
@@ -73,11 +74,18 @@ inline std::string simulatorUrl(const Board& board, UrlFormat format) {
 inline std::string simulatorUrl(const BitField& field, UrlFormat format) {
     return simulatorUrl(boardFromBits(field), format);
 }
-inline void writeSimulatorUrls(const std::filesystem::path& path, const std::vector<Record>& records, UrlFormat format) {
+// The URLs of the 6 x 13 results; 10 x 18 results have none and are left out. Returns how many were written.
+inline size_t writeSimulatorUrls(const std::filesystem::path& path, const std::vector<Record>& records, UrlFormat format) {
     std::ofstream out(path, std::ios::binary);
     if (!out) throw std::runtime_error("URL一覧を保存できません。");
-    for (const auto& record : records) out << simulatorUrl(record.solution.field, format) << '\n';
+    size_t written = 0;
+    for (const auto& record : records)
+        if (!record.wide) {
+            out << simulatorUrl(record.solution.field, format) << '\n';
+            ++written;
+        }
     out.flush();
     if (!out) throw std::runtime_error("URL一覧の書き込みに失敗しました。");
+    return written;
 }
 } // namespace juraic_gui

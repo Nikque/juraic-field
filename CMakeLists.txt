@@ -17,7 +17,9 @@ endif()
 add_library(juraic_engine STATIC
     generator/generator.cpp
     generator/runner.cpp
+    generator/grid_runner.cpp
     generator/generator.h
+    generator/grid_field.h generator/grid_generator.h generator/run_loop.h
     core/field_bits.h core/bit_field.h core/reach.h core/rng.h
     app/console_output.h)
 find_package(Threads REQUIRED)
@@ -110,6 +112,9 @@ target_link_libraries(ai_match PRIVATE Threads::Threads)
 # One player by the beam search: how large a chain, how fast.
 add_executable(ai_toko tools/ai_toko.cpp tools/toko_game.h ai/build.h ai/detect.h ai/params.h)
 target_link_libraries(ai_toko PRIVATE Threads::Threads)
+# Speed and success rate of the search on the 10 x 19 field.
+add_executable(grid_bench tools/grid_bench.cpp)
+target_link_libraries(grid_bench PRIVATE juraic_engine)
 # Tuning of the weights with one player.
 add_executable(ai_tune tools/ai_tune.cpp tools/toko_game.h ai/build.h ai/detect.h ai/params.h)
 target_link_libraries(ai_tune PRIVATE Threads::Threads)
@@ -121,10 +126,15 @@ if(BUILD_TESTING)
     add_executable(core_tests tests/core_tests.cpp)
     target_link_libraries(core_tests PRIVATE juraic_engine)
     add_test(NAME core_and_generator COMMAND core_tests)
-    add_executable(core_tests_portable tests/core_tests.cpp generator/generator.cpp generator/runner.cpp)
+    add_executable(core_tests_portable tests/core_tests.cpp generator/generator.cpp generator/runner.cpp generator/grid_runner.cpp)
     target_compile_definitions(core_tests_portable PRIVATE JURAIC_FORCE_PORTABLE)
     target_link_libraries(core_tests_portable PRIVATE Threads::Threads)
     add_test(NAME core_and_generator_portable COMMAND core_tests_portable)
+    # The field of any size and the template search: against the 6 x 13 engine
+    # and against a cell-by-cell reference on 10 x 19.
+    add_executable(grid_tests tests/grid_tests.cpp)
+    target_link_libraries(grid_tests PRIVATE juraic_engine)
+    add_test(NAME grid_field_and_search COMMAND grid_tests)
 
     # Move-level game rules (game/): cell-by-cell checks, and a log that the
     # independent Python simulator replays.
@@ -214,6 +224,11 @@ target_link_libraries(ai_tests PRIVATE Threads::Threads)
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_all_chains.py"
                 "$<TARGET_FILE:random_19_chain>" "${CMAKE_CURRENT_SOURCE_DIR}/config.ini")
         set_tests_properties(all_chain_lengths PROPERTIES TIMEOUT 300)
+        # The same for the 10 x 18 field: chain lengths 1 to 47.
+        add_test(NAME all_chain_lengths_10x18
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_all_wide.py"
+                "$<TARGET_FILE:random_19_chain>" "${CMAKE_CURRENT_SOURCE_DIR}/config.ini")
+        set_tests_properties(all_chain_lengths_10x18 PROPERTIES TIMEOUT 1500)
     endif()
 endif()
 
