@@ -257,7 +257,7 @@ static void playAndRead(const Layout& l, int width, int height, uint64_t seed, a
         follow.step(read(canvas.picture(), l), clock++);
         check(!tracker.spawned[0] && !tracker.spawned[1], "a pair seen before the round");
     }
-    check(tracker.fromStart && tracker.knows(0) && tracker.knows(1) && !tracker.knows(2), "the first two pairs are not learnt before the round");
+    check(tracker.fromStart && tracker.knows(1, 0) && tracker.knows(1, 1) && !tracker.knows(1, 2), "the first two pairs are not learnt before the round");
     uint8_t held[2] = {};
     int total[2] = {}; // the garbage above each field, and the frame of the clock since which it has been so
     int64_t totalSince[2] = {clock, clock};
@@ -386,6 +386,63 @@ static void testRounds() {
               << " new pairs seen in the frame before they can be moved, and observed as the round shows them (the other side's pair in the air "
               << n.otherInAir << " times); " << n.unclear << " readings of a side under a light, not taken; the placements of " << n.placed << " pairs of "
               << n.moves << " found, the pieces reckoned as read " << n.checks - n.misses << " times of " << n.checks << ", " << n.held << " notices held back\n";
+}
+
+// The window of one side read as other pairs of the round. On the real game the person's side (1P) counted its pairs
+// three short after pieces read wrong (its thirteenth record, fourth round) and learnt what its window showed at the
+// wrong places; 2P, which is given the same pairs, then waited for colours that did not come, counted none of its
+// pairs from its fifteenth on, and four of them fell with nothing played. Each side follows the pairs its own window
+// showed; those the other side learnt are taken only where it has learnt none.
+static void testSidesLearnApart() {
+    const Layout l = sampleLayout();
+    const Rules rules;
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    int seen = 0, missed = 0, shifted = 0;
+    for (const uint64_t seed : {77, 78}) {
+        const std::unique_ptr<ai::Agent> one = ai::makeAgent("x3", narrow), two = ai::makeAgent("x3", narrow);
+        ai::Agent* agents[2] = {one.get(), two.get()};
+        Round r;
+        r.start(rules, seed);
+        for (int s = 0; s < 2; ++s) agents[s]->startRound(s, seed + uint64_t(s));
+        Canvas canvas(1280, 720, l);
+        Rng noise(seed, 7), hands(seed, 8);
+        Follower follow;
+        const Tracker& t = follow.tracker;
+        int64_t clock = 1000;
+        for (int f = 0; f < 45; ++f, ++clock) {
+            draw(canvas, l, r, true, noise);
+            follow.step(read(canvas.picture(), l), clock);
+        }
+        uint8_t held[2] = {};
+        ai::Observation o;
+        for (int f = 0; f < 2500 && r.state == RoundState::Playing; ++f, ++clock) {
+            const Drawn shown = draw(canvas, l, r, false, noise);
+            // (1P's window from its sixth pair on: the pairs three after those the round shows there)
+            const Player& p1 = r.player[0];
+            if (p1.nextPair >= 6 && shown.nextShown[0]) {
+                const SideLayout& d = l.side[0];
+                const int first = p1.phase == Phase::Next && p1.wait <= r.timing.nextShown ? 1 : 0;
+                const float size = d.cellWidth * 0.35f;
+                for (int n = 0; n < 2; ++n) {
+                    const Pair q = r.tsumo.pair(p1.nextPair + first + n + 3);
+                    for (int k = 0; k < 2; ++k)
+                        canvas.fill(d.next[n][k].x - size, d.next[n][k].y - size, d.next[n][k].x + size, d.next[n][k].y + size, colorOf(l, k ? q.child : q.axis));
+                }
+                ++shifted;
+            }
+            follow.step(read(canvas.picture(), l), clock);
+            const Player& p2 = r.player[1];
+            if (p2.phase == Phase::Next && p2.wait == 1 && !p2.field.dead()) {
+                ++seen;
+                missed += !(t.spawned[1] && t.side[1].pairs == p2.nextPair + 1);
+            }
+            stepRound(r, agents, o, hands, held);
+        }
+    }
+    check(shifted > 500 && seen >= 40 && missed == 0,
+          "with the window of 1P read as other pairs, pairs of 2P not counted as they appear: " + std::to_string(missed) + " of " + std::to_string(seen));
+    std::cout << "the window of 1P read as other pairs: the " << seen << " pairs of 2P counted as they appear\n";
 }
 
 // ---- 4. small things ---------------------------------------------------------------------------------------------
@@ -524,7 +581,7 @@ static void testUnclearFrames() {
     for (int light = 0; light < 2; ++light) {
         Tracker u;
         for (int f = 0; f < u.roundGap + 5; ++f) u.step(empty, at++);
-        check(u.fromStart && u.knows(0) && u.pairs[0].axis == 2 && u.pairs[0].child == 3, "the first pairs are not learnt before the round");
+        check(u.fromStart && u.knows(1, 0) && u.pairOf(1, 0).axis == 2 && u.pairOf(1, 0).child == 3, "the first pairs are not learnt before the round");
         if (light) u.step(movedInFog, at++);
         u.step(moved, at++);
         check(u.spawned[1] == (light == 1) && u.late[1] == (light == 1) && u.side[1].pairs == light, light ? "a pair hidden as it appeared is not taken when seen after the light"
@@ -552,7 +609,7 @@ static void testPairsSeenOnce() {
     int64_t at = 5000;
     Tracker t;
     for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
-    check(t.knows(0) && t.knows(1) && t.pairs[0].axis == 1 && t.pairs[1].axis == 3, "the first pairs are not learnt before the round");
+    check(t.knows(1, 0) && t.knows(1, 1) && t.pairOf(1, 0).axis == 1 && t.pairOf(1, 1).axis == 3, "the first pairs are not learnt before the round");
     // The first pair of 1P appears (axis 1 half a cell up where pairs appear, its child above the screen) as the window
     // moves on: on its way it reads as 3 1 / 4 4, then stands still at 3 1 / 2 2.
     Reading coming = window(empty, {3, 4}, {4, 4});
@@ -567,7 +624,7 @@ static void testPairsSeenOnce() {
     moved.side[0].point[SPAWN_X - 1][23] = 1;
     for (int f = 0; f < 3; ++f) t.step(moved, at++);
     check(t.side[0].pairs == 1, "a pair in hand read as another colour in one picture is taken for a new pair (" + std::to_string(t.side[0].pairs) + " pairs)");
-    check(t.knows(1) && t.knows(2) && t.pairs[1].axis == 3 && t.pairs[1].child == 1 && t.pairs[2].axis == 2 && t.pairs[2].child == 2 && t.doubts == 0,
+    check(t.knows(1, 1) && t.knows(1, 2) && t.pairOf(1, 1).axis == 3 && t.pairOf(1, 1).child == 1 && t.pairOf(1, 2).axis == 2 && t.pairOf(1, 2).child == 2 && t.doubts == 0,
           "the pairs after the new one are learnt from the window on its way (" + std::to_string(t.doubts) + " readings did not fit)");
     // Between two rounds both fields stand empty, a point read as a piece in one picture of it (a light): the next round
     // is seen begin all the same.
@@ -624,7 +681,7 @@ static void testWindowBeforeRound() {
         for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
         return r;
     };
-    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(i) && t.pairs[size_t(i)].axis == p.axis && t.pairs[size_t(i)].child == p.child; };
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(1, i) && t.pairOf(1, i).axis == p.axis && t.pairOf(1, i).child == p.child; };
     const Reading menu = window(empty, {1, 4}, {4, 4});
     Reading lit = menu;
     lit.side[0].unsure = lit.side[1].unsure = 5;
@@ -696,7 +753,7 @@ static void testPairsAfterLight() {
         for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
         return r;
     };
-    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(i) && t.pairs[size_t(i)].axis == p.axis && t.pairs[size_t(i)].child == p.child; };
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(1, i) && t.pairOf(1, i).axis == p.axis && t.pairOf(1, i).child == p.child; };
     int64_t at = 40000;
     Tracker t;
     for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
@@ -742,6 +799,57 @@ static void testPairsAfterLight() {
     t.step(next, at++);
     check(t.side[1].pairs == 3 && t.side[1].inHand && t.side[1].spawnedAt == came, "a pair where pairs appear, a piece above the field in the reading before, is not seen in its second reading");
     std::cout << "a pair first seen after a light, both pieces showing, is the pair that came; the pair the window shows as it moves on is learnt\n";
+}
+
+// A pair of 2P is never left alone. (1) A pair put out of sight - both pieces in the 13th and 14th rows - changes nothing
+// the screen shows, and the next pair, of the same colour below, appears where it appeared: once the window has moved
+// on after the pair in hand appeared, that pair is put (on the real game, its thirteenth record, fifth round, the next
+// pair was taken for it, still where pairs appear, and fell with nothing played). (2) A pair where pairs appear, after
+// the window moved on, of other colours than those learnt (a window read wrong): seen there in two readings in a row
+// over pieces standing still, it is the pair that came, of the colours read.
+static void testPairsNeverLeft() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 4}, side.next[1] = {5, 3};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    // (the fifth column twelve high)
+    for (int k = 0; k < 24; ++k) empty.side[1].point[4][k] = k / 2 % 2 ? 1 : 2;
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    int64_t at = 50000;
+    Tracker t;
+    for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+    // The first pair (5 4) appears, its child above the screen; the window moves on to 5 3 / 2 2.
+    Reading first = window(empty, {5, 3}, {2, 2});
+    first.side[1].point[SPAWN_X][23] = 5;
+    for (int f = 0; f < 4; ++f) t.step(first, at++);
+    check(t.side[1].pairs == 1 && t.side[1].inHand, "the first pair is not seen");
+    // It goes up the fifth column, out of sight (the screen shows no change), and is put there.
+    Reading gone = window(empty, {5, 3}, {2, 2});
+    for (int f = 0; f < 40; ++f) t.step(gone, at++);
+    // The window moves on to 2 2 / 4 1, and the next pair (5 3) appears where pairs appear, its child above the screen.
+    for (int f = 0; f < 6; ++f) t.step(window(empty, {2, 2}, {4, 1}), at++);
+    Reading second = window(empty, {2, 2}, {4, 1});
+    second.side[1].point[SPAWN_X][23] = 5;
+    for (int f = 0; f < 3; ++f) t.step(second, at++);
+    check(t.side[1].pairs == 2 && t.side[1].inHand, "a pair after one put out of sight, where pairs appear as that one did, is not seen");
+    // It comes to rest in the first column. The window moves on to 4 1 / 3 3 and the next pair appears: 4 1 for the
+    // window read before, but of another axis on the screen (3: as if the window had been read wrong).
+    Reading rest = window(empty, {2, 2}, {4, 1});
+    rest.side[1].point[0][0] = rest.side[1].point[0][1] = 5, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 3;
+    for (int f = 0; f < 30; ++f) t.step(rest, at++);
+    for (int f = 0; f < 6; ++f) t.step(window(rest, {4, 1}, {3, 3}), at++);
+    Reading other = window(rest, {4, 1}, {3, 3});
+    other.side[1].point[SPAWN_X][23] = 3;
+    for (int f = 0; f < 3; ++f) t.step(other, at++);
+    check(t.side[1].pairs == 3 && t.side[1].inHand && t.side[1].colors.axis == 3,
+          "a pair of other colours than learnt, where pairs appear after the window moved on, is not seen as the pair that came");
+    std::cout << "a pair of 2P is never left alone: after one put out of sight, and of other colours than learnt\n";
 }
 
 // The real game shows twelve rows; a piece rests in the 13th too (the AI builds into it). A pair put there, one piece
@@ -842,7 +950,7 @@ static void testShownPairsOnly() {
     for (SideRead& side : first.side) side.next[0] = {4, 2}, side.next[1] = {1, 5};
     first.side[1].point[SPAWN_X][23] = 2;
     for (int f = 0; f < 5; ++f) t.step(first, at++);
-    check(t.side[1].pairs == 1 && t.knows(2) && t.pairs[2].axis == 1 && t.pairs[2].child == 5, "the pairs after the first one are not learnt");
+    check(t.side[1].pairs == 1 && t.knows(1, 2) && t.pairOf(1, 2).axis == 1 && t.pairOf(1, 2).child == 5, "the pairs after the first one are not learnt");
     // The driver's engine has the pair at rest and waits for the next (pair 1), 20 frames before it appears.
     Player own;
     own.phase = Phase::Next, own.wait = 20, own.nextPair = own.moves = 1;
@@ -850,7 +958,7 @@ static void testShownPairsOnly() {
     observeWith(t, 1, Rules{}, &own, at, o);
     check(o.mine().count() == 3, "the AI waiting for its pair is shown " + std::to_string(o.mine().count()) + " pairs, of which the screen has shown 3");
     for (int i = 0; i < o.mine().count(); ++i)
-        check(o.mine().pair(i).axis == t.pairs[size_t(i)].axis && o.mine().pair(i).child == t.pairs[size_t(i)].child, "a pair the AI is shown is not the one the screen showed");
+        check(o.mine().pair(i).axis == t.pairOf(1, i).axis && o.mine().pair(i).child == t.pairOf(1, i).child, "a pair the AI is shown is not the one the screen showed");
     std::cout << "the AI is shown the pairs the screen has shown and no other\n";
 }
 
@@ -889,6 +997,7 @@ struct DriveCounts {
     long lagTaken = 0;  // rounds that ended with the driver using the lag of the pad
     long turnsFound = 0; // rounds that ended with the driver turning the other way round (the pad turns so)
     long downAtSpawn = 0; // pairs of 2P that took the down button in the frame they appeared (sent before they were seen)
+    long leftAlone = 0;   // times a pair of 2P in the air took no button for 10 frames in a row (left to fall by itself)
 };
 
 // A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
@@ -938,6 +1047,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     int64_t begunAt = -1;                    // the frame of the clock the driver began its last pair in
     bool leftOver = false;                   // the pair of 2P that appeared last still takes buttons sent before it was begun
     uint8_t oldDir = 0;
+    int alone = 0; // frames in a row the pair of 2P in the air took no button
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
         if (oldFor > 0 || hideFor > 0) {
             Round shown = r;
@@ -972,6 +1082,8 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         PlayerEvents e[2];
         const uint8_t dirBefore = r.player[1].pair.dir;
         const int8_t columnBefore = r.player[1].pair.x;
+        alone = r.player[1].phase == Phase::Control && buttons[1] == 0 ? alone + 1 : 0;
+        if (alone == 10) ++n.leftAlone;
         r.step(buttons, e);
         if (turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = turnShownLate;
         if (crowdedLate && e[1].control.rotated && r.player[1].phase == Phase::Control) {
@@ -1190,6 +1302,9 @@ static void testTapsHeld() {
         driveRound(112 + uint64_t(k), 5, true, 2500, shaken, nullptr, nullptr, 6, true, 0, prepared(), false, 0, nullptr, 0, 2, 1, true);
     check(shaken.locks >= 40 && shaken.hits * 100 >= shaken.locks * 88,
           "through a pad as the real game under load, pairs of the mode's AI brought where it chose " + std::to_string(shaken.hits) + " of " + std::to_string(shaken.locks));
+    // (no pair is left to fall by itself: a pair the engine has put, the screen not yet showing it so, is held down
+    //  until the screen shows it lying or the next pair is foreseen - whether or not the screen's pair is followed)
+    check(shaken.leftAlone == 0, "through a pad as the real game under load, pairs of 2P left to fall by themselves " + std::to_string(shaken.leftAlone) + " times");
     // (turns with a move or after another shown 6 frames late, the way of the turns known as the mode knows it: taps of two
     //  frames space the turns 4 to 5 frames apart, which the driver took for no run - put right, they were turned again:
     //  11 pairs of 361 elsewhere in 10 rounds, none when taken as one run)
@@ -1383,6 +1498,8 @@ int main(int argc, char** argv) {
         testRecord(argc > 1 ? argv[1] : ".");
         testMenus();
         testRounds();
+        testSidesLearnApart();
+        testPairsNeverLeft();
     } catch (const std::exception& e) {
         std::cerr << "FAILED: " << e.what() << '\n';
         return 1;

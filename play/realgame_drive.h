@@ -147,7 +147,9 @@ public:
         keepShot(f);
         if (!active) {
             wait(f, now);
-            if (untilLocked && side.inHand && side.pairs == pairsSeen && !lies(f)) return press(now, held = juraic::BTN_DOWN);
+            // (whether or not the screen's pair is followed: a pair not found - turned otherwise than the engine has it, a
+            //  field read wrong - is still in the air, and let go it fell by itself for 45 frames on the real game)
+            if (untilLocked && side.pairs == pairsSeen && !lies(f)) return press(now, held = juraic::BTN_DOWN);
             untilLocked = false;
             return press(now, held = 0);
         }
@@ -277,8 +279,8 @@ private:
         own.nextPair = own.moves = side.pairs - 1;
         if (f.model[me].known) own.scoring = f.model[me].core.scoring;
         tsumo = juraic::Tsumo{};
-        for (size_t i = 0; i < t.pairs.size(); ++i) {
-            const juraic::Pair p = t.known[i] ? t.pairs[i] : juraic::Pair{1, 1};
+        for (size_t i = 0; i < t.pairsLearnt(); ++i) {
+            const juraic::Pair p = t.knows(me, int(i)) ? t.pairOf(me, int(i)) : juraic::Pair{1, 1};
             tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2] = p.axis, tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2 + 1] = p.child;
         }
         // (seen late, it was in play already in the frame of the picture: it is taken as appearing in that frame)
@@ -535,7 +537,11 @@ private:
             juraic::advancePlayer(own, nobody, past[k].buttons, tsumo, rules, t.timing, roundFrame(t, past[k].frame));
             past[k].state = own;
         }
-        if (own.phase != juraic::Phase::Control) return stop();
+        if (own.phase != juraic::Phase::Control) {
+            // (put right, the pair has come to rest in the engine: held down as after any pair the engine has put)
+            stop(), following = true, untilLocked = true;
+            return;
+        }
         steer(f);
     }
 };
