@@ -51,6 +51,10 @@ public:
     // What the real game shows of a move and of a turn of its pair, frames after it took them (its records: the column
     // of the frame before in a picture, the way of the child of two frames before, sometimes three).
     static constexpr int MOVE_SHOWN = 1, TURN_SHOWN = 2;
+    // A turn taken in the frame of a move or just after another turn is shown later still: the way before it was seen 5
+    // or 6 frames after it in a fifth of the pictures of those frames of the eighth record (8 frames twice). A picture of
+    // the pair turned the way the engine had it up to TURN_LATEST frames before puts nothing right.
+    static constexpr int TURN_LATEST = 6, TURN_RUN = 3;
     // The fit: lags from FIT_REACH less to FIT_REACH more than the driver's are tried, a pair with fewer than FIT_SHOTS
     // clear pictures is not counted; the pictures of the last FIT_PAIRS pairs are added up, and a lag is taken when its
     // engine shows FIT_MARGIN pictures more right than the driver's. The way of the turns, which does not change, is told
@@ -422,8 +426,8 @@ private:
     }
 
     // The picture `seen` (pair colours `c`) of the frame g of the game shows the pair where the engine had it: its row as
-    // in g, its column as in g or MOVE_SHOWN frames before, the way of its child as in g or up to a frame more than
-    // TURN_SHOWN before.
+    // in g, its column as in g or MOVE_SHOWN frames before, the way of its child as in g or up to TURN_LATEST frames
+    // before.
     bool shows(int64_t g, const juraic::PairControl& seen, juraic::Pair c) const {
         const auto at = [&](int64_t frame) -> const juraic::PairControl* {
             for (size_t i = past.size(); i-- > 0;)
@@ -438,8 +442,20 @@ private:
         for (int k = 0; k <= MOVE_SHOWN && !column; ++k)
             if (const juraic::PairControl* p = at(g - k)) column = p->x == seen.x;
         if (!column) return false;
-        for (int k = 0; k <= TURN_SHOWN + 1; ++k)
-            if (const juraic::PairControl* p = at(g - k); p && p->dir == seen.dir) return true;
+        // (the way: as the engine had it from TURN_LATEST frames before on, and back through turns that came one after the
+        //  other into that time, each within TURN_RUN frames of the next - the way before the first of them included: the
+        //  real game shows such turns one after the other)
+        int64_t from = g - TURN_LATEST;
+        for (int extended = 0, more = 1; more && extended < 30; ++extended) {
+            more = 0;
+            for (int64_t q = from; q > from - TURN_RUN && !more; --q) {
+                const juraic::PairControl* before = at(q - 1);
+                const juraic::PairControl* after = at(q);
+                if (before && after && before->dir != after->dir) from = q - 1, more = 1;
+            }
+        }
+        for (int64_t q = from; q <= g; ++q)
+            if (const juraic::PairControl* p = at(q); p && p->dir == seen.dir) return true;
         return false;
     }
 

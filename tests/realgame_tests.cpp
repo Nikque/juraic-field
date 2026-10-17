@@ -601,11 +601,14 @@ struct DriveCounts {
 // moved to the side is not drawn for that many frames (the real game's pair, between two columns in the frame it moves,
 // is not to be read then: 92 moves of 97 in three of its records). quietLanding: as draw. skipOneIn: in one frame of
 // that many (at random) the driver is not called and the pad holds what it held (the thread of the play a frame late:
-// 4.6% of the frames of a record of the real game, the next frame called twice).
+// 4.6% of the frames of a record of the real game, the next frame called twice). crowdedLate: a turn taken in the frame
+// of a move, or up to three frames after another turn, is shown that many frames late, the pair drawn the way it was
+// before the first of them (the real game in its eighth record: the way before such a turn still shown 5 or 6 frames
+// after it in a fifth of the pictures of those frames).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
-                       int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0) {
+                       int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -632,6 +635,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     ai::Observation o;
     int target = -1, played = 0; // (the engine of the Driver plays `lag` frames ahead of the round: the target of the pair it played last)
     int oldFor = 0, hideFor = 0, spawns = 0; // (spawns: pairs of 2P that have appeared in the round)
+    int lastTurn = -100;                     // the frame of the round the pair of 2P last turned in
     int64_t begunAt = -1;                    // the frame of the clock the driver began its last pair in
     bool leftOver = false;                   // the pair of 2P that appeared last still takes buttons sent before it was begun
     uint8_t oldDir = 0;
@@ -671,6 +675,13 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         const int8_t columnBefore = r.player[1].pair.x;
         r.step(buttons, e);
         if (turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = turnShownLate;
+        if (crowdedLate && e[1].control.rotated && r.player[1].phase == Phase::Control) {
+            if (r.player[1].pair.x != columnBefore || f - lastTurn <= 3) {
+                if (oldFor == 0) oldDir = dirBefore;
+                oldFor = crowdedLate;
+            }
+            lastTurn = f;
+        }
         if (movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, movedHidden);
         // (from the frame a pair appears in, until the frames take buttons the driver sent once it had begun that pair)
         if (e[1].spawned) ++spawns, leftOver = true;
@@ -845,6 +856,16 @@ static void testDriver() {
     for (int k = 0; k < 2; ++k) driveRound(112 + uint64_t(k), 5, false, 2500, skipped, nullptr, nullptr, 6, true, 0, nullptr, false, 0, nullptr, 0, 2, 1, true, 20);
     check(skipped.locks >= 40 && skipped.hits * 100 >= skipped.locks * 98,
           "with the driver not called in one frame of 20, pairs brought where the AI chose " + std::to_string(skipped.hits) + " of " + std::to_string(skipped.locks));
+    // A turn taken with a move, or just after another turn, shown up to 6 frames late (the real game's eighth record):
+    // a picture of the pair the way it was before is no pair turned otherwise. (Put right for it, the turns in flight were
+    // made again: five pairs of 89 in that record, each to go down in the sixth column with its child below, went down with
+    // the child on the left.)
+    DriveCounts crowded;
+    for (int k = 0; k < 2; ++k)
+        driveRound(112 + uint64_t(k), 5, false, 2500, crowded, nullptr, nullptr, 6, true, 0, nullptr, false, 0, nullptr, 0, 2, 1, true, 20, 6);
+    check(crowded.locks >= 40 && crowded.hits * 100 >= crowded.locks * 98 && crowded.corrected * 4 <= crowded.locks,
+          "with turns shown 6 frames late after a move or a turn, pairs brought where the AI chose " + std::to_string(crowded.hits) + " of " + std::to_string(crowded.locks) +
+              ", put right " + std::to_string(crowded.corrected) + " times");
     std::cout << "the AI playing 2P through the screen and a pad: late as said, " << exact.hits << " pairs of " << exact.locks
               << " where it chose and none found elsewhere, the lag measured as it was; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
               << shaky.locks << " went where it chose\n";
