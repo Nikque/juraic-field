@@ -573,6 +573,109 @@ static void testPairsSeenOnce() {
     std::cout << "a pair read as another colour in one picture is the same pair; the window of the next pairs is read once it stands still; a round is seen begin through a point read wrong in one picture; a pair first seen after a light, its child above the screen, is the pair that came\n";
 }
 
+// The screens before a round (the title, the menus) may read as two empty fields and a window standing still. On the
+// real game (a record of a reading) the first two pairs were learnt so from a menu, the first pair of the round, of
+// other colours, was taken for none, and nothing played 2P through the whole round. The window taken is the one that
+// stands still last before the first pair: one read for a few pictures (moving) is not; the window moved on as the
+// first pair comes (the second pair first) gives the third. A first pair of other colours than those learnt, seen
+// where pairs appear in two clear readings in a row, is the first pair all the same; seen in one only, it is none.
+static void testWindowBeforeRound() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(i) && t.pairs[size_t(i)].axis == p.axis && t.pairs[size_t(i)].child == p.child; };
+    const Reading menu = window(empty, {1, 4}, {4, 4});
+    Reading lit = menu;
+    lit.side[0].unsure = lit.side[1].unsure = 5;
+    Reading unread = empty;
+    for (SideRead& side : unread.side) side.nextRead[0] = side.nextRead[1] = false;
+    int64_t at = 20000;
+    {
+        Tracker t;
+        for (int f = 0; f < t.roundGap + 5; ++f) t.step(menu, at++);
+        check(is(t, 0, {1, 4}) && is(t, 1, {4, 4}), "the window of a screen before the round is not learnt as it was on the real game");
+        for (int f = 0; f < 20; ++f) t.step(lit, at++);
+        // The round's screen: the window stands at 5 5 / 3 5, reads for three pictures as 5 5 / 5 5 and 3 3 / 3 3 (moving).
+        for (int f = 0; f < 20; ++f) t.step(window(empty, {5, 5}, {3, 5}), at++);
+        for (int f = 0; f < 3; ++f) t.step(window(empty, {5, 5}, {5, 5}), at++);
+        for (int f = 0; f < 3; ++f) t.step(window(empty, {3, 3}, {3, 3}), at++);
+        for (int f = 0; f < 20; ++f) t.step(window(empty, {5, 5}, {3, 5}), at++);
+        check(is(t, 0, {5, 5}) && is(t, 1, {3, 5}), "the first pairs are not those of the window that stood last before the round");
+        // The window moves on as the first pair comes, and stands at 3 5 / 5 1 for nine pictures before it appears.
+        for (int f = 0; f < 9; ++f) t.step(window(empty, {3, 5}, {5, 1}), at++);
+        check(is(t, 0, {5, 5}) && is(t, 1, {3, 5}) && is(t, 2, {5, 1}), "the window moved on before the first pair is taken for the first pairs");
+        Reading first = window(empty, {3, 5}, {5, 1});
+        first.side[0].point[SPAWN_X][23] = first.side[1].point[SPAWN_X][23] = 5; // (the axis half a cell up where pairs appear, its child above the screen)
+        t.step(first, at++);
+        check(t.spawned[0] && t.spawned[1] && t.side[0].pairs == 1 && t.side[1].pairs == 1, "the first pair of a round is not seen after a window learnt on a screen before it");
+    }
+    {
+        // No window read on the round's screen: the first pair, of other colours than those learnt, is the first pair.
+        Tracker t;
+        for (int f = 0; f < t.roundGap + 5; ++f) t.step(menu, at++);
+        for (int f = 0; f < 20; ++f) t.step(lit, at++);
+        for (int f = 0; f < 20; ++f) t.step(unread, at++);
+        Reading first = unread;
+        first.side[0].point[SPAWN_X][23] = first.side[1].point[SPAWN_X][23] = 5;
+        t.step(first, at++);
+        check(!t.spawned[0] && !t.spawned[1], "a first pair of other colours than those learnt is taken in one reading");
+        const int64_t seen = at - 1;
+        t.step(first, at++);
+        check(t.side[0].pairs == 1 && t.side[1].pairs == 1 && t.side[1].inHand && t.side[1].spawnedAt == seen,
+              "a first pair of other colours than those learnt, seen where pairs appear in two readings, is not the first pair");
+        check(t.side[1].colors.axis == 5 && !is(t, 0, {1, 4}), "the pairs learnt on a screen before the round are kept after its first pair showed them wrong");
+    }
+    {
+        // ... seen in one reading only (a light, a point read wrong): no pair, and what was learnt stays.
+        Tracker t;
+        for (int f = 0; f < t.roundGap + 5; ++f) t.step(menu, at++);
+        Reading stray = menu;
+        stray.side[1].point[SPAWN_X][23] = 5;
+        t.step(stray, at++);
+        for (int f = 0; f < 10; ++f) t.step(menu, at++);
+        check(t.side[1].pairs == 0 && is(t, 0, {1, 4}), "a point read where pairs appear in one reading is taken for the first pair");
+    }
+    std::cout << "the window taken before a round is the one that stood last; the first pair of other colours than learnt is seen in two readings\n";
+}
+
+// What the AI is shown before its pair appears (observeWith, the own side as the driver follows it, waiting for the
+// pair): the pairs the screen has shown and no other. The window shows the pair that comes and the one after it; the
+// pair after those is learnt when the pair has appeared, and the AI is then asked for its second choice.
+static void testShownPairsOnly() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {2, 3}, side.next[1] = {4, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 30000;
+    for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+    // The first pair of 2P appears; the window moves on to 4 2 / 1 5 and stands there.
+    Reading first = empty;
+    for (SideRead& side : first.side) side.next[0] = {4, 2}, side.next[1] = {1, 5};
+    first.side[1].point[SPAWN_X][23] = 2;
+    for (int f = 0; f < 5; ++f) t.step(first, at++);
+    check(t.side[1].pairs == 1 && t.knows(2) && t.pairs[2].axis == 1 && t.pairs[2].child == 5, "the pairs after the first one are not learnt");
+    // The driver's engine has the pair at rest and waits for the next (pair 1), 20 frames before it appears.
+    Player own;
+    own.phase = Phase::Next, own.wait = 20, own.nextPair = own.moves = 1;
+    ai::Observation o;
+    observeWith(t, 1, Rules{}, &own, at, o);
+    check(o.mine().count() == 3, "the AI waiting for its pair is shown " + std::to_string(o.mine().count()) + " pairs, of which the screen has shown 3");
+    for (int i = 0; i < o.mine().count(); ++i)
+        check(o.mine().pair(i).axis == t.pairs[size_t(i)].axis && o.mine().pair(i).child == t.pairs[size_t(i)].child, "a pair the AI is shown is not the one the screen showed");
+    std::cout << "the AI is shown the pairs the screen has shown and no other\n";
+}
+
 // The notice against what the chains followed can have sent (Follower): with nothing sent, a notice of a few pieces is
 // taken at once, one of many (a light over it) only when it has read the same for noticeLong frames.
 static void testNoticeCeiling() {
@@ -1057,6 +1160,8 @@ int main(int argc, char** argv) {
         testUnclearFrames();
         testNoticeCeiling();
         testPairsSeenOnce();
+        testWindowBeforeRound();
+        testShownPairsOnly();
         testDriver();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
