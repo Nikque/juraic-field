@@ -382,11 +382,19 @@ Speed (2026-10-17, same machine and settings as above, 100 boards each, all chec
 47 chains of 188 pieces in four colours 10.98 s on one thread (9.1/s) and 1.13 s on 16 threads (88/s); in
 five colours 4.50 s and 0.58 s; 40 chains in four colours 0.56 s on 16 threads.
 
+Three colours leave few insertions whose colour none of their neighbours has, so for three colours the plan
+is changed (`Grid10x19ThreeColors`): no room is kept next to the fifth and sixth columns (the whole board
+counts as next to them), boards on which the next step can insert nothing are dropped, steps in height between
+neighbouring columns weigh heavily when boards are kept (a deep narrow gap takes upright groups of four only),
+and four times as many boards are kept in the last six steps. 46 chains in three colours: 0 of 300 attempts
+with the plan of four colours, 119 of 300 with this one; 47 chains: 100 boards in 323 s on one thread, 33 s
+on 16 threads. In four and five colours this plan finds more boards an attempt but fewer a second, so it is
+used for three colours only.
+
 Of the 555 settings of 1 to 47 chains × three to five colours × extra pieces (none, one, the largest number,
-a range up to it), one board each within 20000 attempts or 60 seconds (2026-10-17, four threads): every setting
-in four and five colours was found. In three colours no board of 47 chains was found (nor in 100 to 200
-attempts of every other setting tried); 44 to 46 chains were found, in up to about 18 seconds; with the
-largest number of extra pieces, 8-10, 19-22, 24-27, 34, 41, 42 and 46 chains were not found.
+a range up to it), one board each within 20000 attempts or 60 seconds (2026-10-17, four threads; three colours
+measured again with the plan of v0.9.4): every setting in four and five colours was found, and in three
+colours every setting but those with the largest number of extra pieces for 8, 9, 19, 20, 22 and 24-27 chains.
 
 ## Build and test
 

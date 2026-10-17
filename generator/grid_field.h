@@ -24,7 +24,12 @@
 //                   from the death columns before the last steps, 2 the least
 //                   room weighted by (distance + 1)^2 at every step);
 //                   PLAN_FAR_FIRST_EXTRA: from this many extra pieces on, they
-//                   are put into the columns farthest from the death columns first.
+//                   are put into the columns farthest from the death columns first;
+//                   PLAN_LIVE: boards on which the next step can insert nothing
+//                   are dropped; PLAN_BUMP: added to the room for each step
+//                   in height between neighbouring columns when boards are kept;
+//                   PLAN_END_BEAM times as many boards in the last PLAN_END_STEPS steps;
+//   ThreeColors     the geometry whose plan is used for three colours.
 #include "../core/bit_field.h"
 #include <array>
 #include <bit>
@@ -36,10 +41,11 @@ namespace juraic {
 // The 6 x 13 field (the same rules as core/), used to compare this type and the
 // template generator with the 6 x 13 engine.
 struct Grid6x13 {
+    using ThreeColors = Grid6x13; // the geometry used for three colours (grid_generator.h)
     static constexpr int W = 6, H = 13, CLEAR_H = 12, SPAWN_X = 2;
     static constexpr unsigned DEATH_COLUMNS = 1u << 2;
     static constexpr int GUIDE_MIN_PIECES = 72, GUIDED_STEPS = 6;
-    static constexpr int PLAN_MAX_SLACK = -1, PLAN_STEPS = 0, PLAN_DISTANCE = 0, PLAN_RAMP = 100, PLAN_GREEDY = 0, PLAN_FAR_FIRST_EXTRA = 0;
+    static constexpr int PLAN_MAX_SLACK = -1, PLAN_STEPS = 0, PLAN_DISTANCE = 0, PLAN_RAMP = 100, PLAN_GREEDY = 0, PLAN_FAR_FIRST_EXTRA = 0, PLAN_LIVE = 0, PLAN_BUMP = 0, PLAN_END_STEPS = 0, PLAN_END_BEAM = 1;
 };
 // 10 columns, 18 rows that clear and one hidden row above them. Pairs appear
 // in the fifth column; the fifth and sixth columns must not reach the 18th row.
@@ -56,12 +62,29 @@ struct Grid6x13 {
 //    40 chains (slack 28) 54 / 54 / 29 of 100.
 //  - extra pieces put far first / at random: 20 chains + 108: 41 / 0,
 //    27 + 80: 15 / 2, 28 + 76: 6 / 7, 36 + 44: 6 / 42, 40 + 28: 22 / 59 of 200.
+struct Grid10x19ThreeColors;
 struct Grid10x19 {
+    using ThreeColors = Grid10x19ThreeColors;
     static constexpr int W = 10, H = 19, CLEAR_H = 18, SPAWN_X = 4;
     static constexpr unsigned DEATH_COLUMNS = (1u << 4) | (1u << 5);
     static constexpr int GUIDE_MIN_PIECES = 1 << 20, GUIDED_STEPS = 0;
     static constexpr int PLAN_MAX_SLACK = 20, PLAN_STEPS = 12, PLAN_DISTANCE = 2, PLAN_RAMP = 100, PLAN_GREEDY = 2,
-                         PLAN_FAR_FIRST_EXTRA = 78;
+                         PLAN_FAR_FIRST_EXTRA = 78, PLAN_LIVE = 0, PLAN_BUMP = 0, PLAN_END_STEPS = 0, PLAN_END_BEAM = 1;
+};
+// The plan for three colours on 10 x 19. With three colours few insertions find
+// a colour that none of their neighbours has; the plan of Grid10x19 leaves deep
+// narrow gaps that only upright groups of four could fill and boards on which
+// nothing can be inserted. Measured as above (3 colours unless said otherwise):
+//  - 46 chains: Grid10x19 0 of 300; + PLAN_LIVE 1 of 300; + PLAN_BUMP 10: 7, with
+//    PLAN_DISTANCE 4: 11; PLAN_BUMP 20: 35; + PLAN_END_STEPS 6 / PLAN_END_BEAM 4: 42;
+//    PLAN_BUMP 40 / 60 / 100 / 150 / 250 / 500: 73 / 99 / 119 / 117 / 119 / 113 of 300.
+//  - 47 chains: Grid10x19 0 of 100; these values 23 of 300 (0.18 s an attempt).
+//  - 44 chains: 4 of 200 (0.85 a second) / 180 of 200 (5.3 a second).
+//  - in four colours these values find more boards an attempt but fewer a second
+//    (47 chains: 8.3 / 2.9 a second), so they are used for three colours only.
+struct Grid10x19ThreeColors : Grid10x19 {
+    using ThreeColors = Grid10x19ThreeColors;
+    static constexpr int PLAN_DISTANCE = 4, PLAN_LIVE = 1, PLAN_BUMP = 250, PLAN_END_STEPS = 6, PLAN_END_BEAM = 4;
 };
 
 // The most pieces a valid board can hold: every column full, except that the

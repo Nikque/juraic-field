@@ -2,10 +2,10 @@
 
 Chain lengths 1..47 with four and five colours, and for each no extra pieces,
 one extra piece, a range up to the largest number (188 - 4 * chain) and the
-largest number itself. Three colours: chain lengths 1..46 (no board of 47
-chains with three colours has been found) without the largest number of extra
-pieces (some of those are not found either). The independent verifier
-(verify_output.py) checks the full definition of a valid board.
+largest number itself. Three colours: chain lengths 1..47 without the largest
+number of extra pieces (with it some chain lengths are not found). The
+independent verifier (verify_output.py) checks the full definition of a valid
+board.
 """
 import configparser
 import json
@@ -25,8 +25,6 @@ with tempfile.TemporaryDirectory(prefix="juraic-all-wide-") as temp:
     for chain in range(1, 48):
         capacity = 188 - 4 * chain
         for colors in (3, 4, 5):
-            if colors == 3 and chain == 47:
-                continue
             ranges = {(0, 0), (min(1, capacity), min(1, capacity)), (0, capacity)}
             if colors != 3:
                 ranges.add((capacity, capacity))
