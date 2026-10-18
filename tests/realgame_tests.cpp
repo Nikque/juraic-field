@@ -671,7 +671,51 @@ static void testPairsSeenOnce() {
         for (int f = 0; f < 6; ++f) v.step(pair, at++);
         check(v.side[1].pairs == 1 && v.side[1].inHand, "a pair first seen half a cell below where pairs appear after a light, its child above the screen, is not seen");
     }
-    std::cout << "a pair read as another colour in one picture is the same pair; the window of the next pairs is read once it stands still; a round is seen begin through a point read wrong in one picture; a pair first seen after a light, its child above the screen, is the pair that came\n";
+    // ... and not one above where pairs appear: on a screen that shows a part of the 13th row, a piece there after a light,
+    // of the colour of the axis that comes, its point above beyond the screen, is no pair (in a round drawn and read, a
+    // piece drawn moving over a column eleven high as garbage fell was taken for one).
+    {
+        Reading tall = empty;
+        for (SideRead& side : tall.side)
+            for (auto& column : side.point)
+                for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12.4f ? HIDDEN : EMPTY;
+        Tracker v;
+        for (int f = 0; f < v.roundGap + 5; ++f) v.step(tall, at++);
+        Reading still = tall;
+        for (int k = 0; k < 22; ++k) still.side[1].point[SPAWN_X][k] = k / 2 % 2 ? 3 : 4; // (the third column eleven high)
+        for (int f = 0; f < 10; ++f) v.step(still, at++);
+        Reading lit = still;
+        lit.side[1].unsure = 3;
+        for (int f = 0; f < 4; ++f) v.step(lit, at++);
+        Reading above = still;
+        above.side[1].point[SPAWN_X][24] = 1; // (the lower half of the 13th row, the point above it beyond the screen)
+        for (int f = 0; f < 6; ++f) v.step(above, at++);
+        check(v.knows(1, 0) && v.pairOf(1, 0).axis == 1 && v.side[1].pairs == 0, "a piece above where pairs appear after a light, the point above it beyond the screen, is taken for a pair");
+    }
+    // The pair in hand not shown in one picture (turning), a piece at rest missing in that picture (a piece moving drawn
+    // over it): the pair is still in hand - the pieces under a pair in play do not go -, not a new pair when it shows
+    // again where pairs appear. (In a round drawn and read the pair, turned up into the 13th row where pairs appear, its
+    // child alone showing there, was counted again.)
+    {
+        Tracker v;
+        for (int f = 0; f < v.roundGap + 5; ++f) v.step(empty, at++);
+        Reading still = empty;
+        still.side[1].point[0][0] = still.side[1].point[0][1] = 4, still.side[1].point[0][2] = still.side[1].point[0][3] = 2; // (two pieces at rest)
+        for (int f = 0; f < 10; ++f) v.step(still, at++);
+        Reading pair = still;
+        pair.side[1].point[SPAWN_X][23] = 1; // (where pairs appear, its child above the screen)
+        for (int f = 0; f < 3; ++f) v.step(pair, at++);
+        check(v.side[1].pairs == 1 && v.side[1].inHand, "the first pair is not seen");
+        Reading missing = still;
+        missing.side[1].point[0][2] = missing.side[1].point[0][3] = EMPTY;
+        v.step(missing, at++);
+        for (int f = 0; f < 4; ++f) v.step(pair, at++);
+        check(v.side[1].pairs == 1 && v.side[1].inHand, "the pair in hand, not shown in a picture with a piece at rest missing, is counted again (" + std::to_string(v.side[1].pairs) + " pairs)");
+        // (the pieces missing in readings in a row: gone - a chain, the pair put unseen - and the pair is let go)
+        for (int f = 0; f < 2; ++f) v.step(missing, at++);
+        check(!v.side[1].inHand, "the pair in hand is kept with the pieces under it gone");
+    }
+    std::cout << "a pair read as another colour in one picture is the same pair; the window of the next pairs is read once it stands still; a round is seen begin through a point read wrong in one picture; a pair first seen after a light, its child above the screen, is the pair that came, a piece above where pairs appear none; the pair in hand kept through a picture with a piece missing\n";
 }
 
 // The screens before a round (the title, the menus) may read as two empty fields and a window standing still. On the
@@ -859,7 +903,23 @@ static void testPairsNeverLeft() {
     for (int f = 0; f < 3; ++f) t.step(other, at++);
     check(t.side[1].pairs == 3 && t.side[1].inHand && t.side[1].colors.axis == 3,
           "a pair of other colours than learnt, where pairs appear after the window moved on, is not seen as the pair that came");
-    std::cout << "a pair of 2P is never left alone: after one put out of sight, and of other colours than learnt\n";
+    // (3) As (1), the window not read (a light over it): the pair in hand, not seen in many clear readings in a row over
+    // the field it appeared over with nothing above it, has been put out of sight. (In a record of the real game a pair
+    // of 1P put so was let go only by a picture read with a piece missing, and the next one seen.)
+    {
+        Reading unread = empty;
+        for (SideRead& side : unread.side) side.nextRead[0] = side.nextRead[1] = false;
+        Tracker u;
+        for (int f = 0; f < u.roundGap + 5; ++f) u.step(empty, at++);
+        Reading coming = unread;
+        coming.side[1].point[SPAWN_X][23] = 5;
+        for (int f = 0; f < 4; ++f) u.step(coming, at++);
+        check(u.side[1].pairs == 1 && u.side[1].inHand, "the first pair is not seen with the window not read");
+        for (int f = 0; f < 40; ++f) u.step(unread, at++);
+        for (int f = 0; f < 3; ++f) u.step(coming, at++);
+        check(u.side[1].pairs == 2 && u.side[1].inHand, "a pair after one put out of sight, the window not read, is not seen (" + std::to_string(u.side[1].pairs) + " pairs)");
+    }
+    std::cout << "a pair of 2P is never left alone: after one put out of sight (the window read or not), and of other colours than learnt\n";
 }
 
 // The real game shows twelve rows; a piece rests in the 13th too (the AI builds into it). A pair put there, one piece
@@ -1220,6 +1280,7 @@ struct DriveCounts {
     long downAtSpawn = 0; // pairs of 2P that took the down button in the frame they appeared (sent before they were seen)
     long leftAlone = 0;   // times a pair of 2P in the air took no button for 10 frames in a row (left to fall by itself)
     long control = 0;     // frames a pair of 2P was in play (Phase::Control)
+    long spawnsSeen = 0, miscounted = 0; // new pairs of 2P the screen showed (Tracker), and those of them counted otherwise than the round gave them
     std::vector<int64_t> appeared; // the frames of the clock pairs of 2P appeared in
 };
 
@@ -1294,6 +1355,9 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
             if (litFor > 0) --litFor;
         }
         follow.step(read(canvas.picture(), l), clock);
+        // (the pair seen as it is about to appear, or in play already when seen late)
+        if (follow.tracker.spawned[1])
+            ++n.spawnsSeen, n.miscounted += follow.tracker.side[1].pairs != r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
         if (later && f == laterAt) d.replaceAgent(std::move(later)); // (another AI chosen on the screen of the mode)
         // (a frame the driver is not called in: the pad holds what it held)
         if (skipOneIn && f > 0 && skipper.below(uint64_t(skipOneIn)) == 0) sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
@@ -1573,6 +1637,11 @@ static void testPairsLitAsTheyAppear() {
     check(lit.locks >= 40 && lit.leftAlone == 0,
           "with the screen of 2P lit as a pair appears, pairs of 2P left to fall by themselves " + std::to_string(lit.leftAlone) + " times (" + std::to_string(lit.locks) + " pairs)");
     check(lit.hits * 100 >= lit.locks * 90, "with the screen of 2P lit as a pair appears, pairs brought where the AI chose " + std::to_string(lit.hits) + " of " + std::to_string(lit.locks));
+    // A pair the screen never showed - put while the light was over it - is counted all the same: the window moved on
+    // twice with no pair seen between. (Not counted, every pair after it had the number of the one before - the colours
+    // learnt from its own window by the same count, but the other side's numbers and what it borrows from them not.)
+    check(lit.spawnsSeen >= 30 && lit.miscounted == 0,
+          "with the screen of 2P lit as a pair appears, " + std::to_string(lit.miscounted) + " pairs of " + std::to_string(lit.spawnsSeen) + " seen are counted otherwise than the round gave them");
     // Garbage falls on 2P before each of the pairs lit, which the engine does not know of: it foresees the pair sooner
     // than it comes. A pair begun unseen is begun as it appears, after the window of the next pairs moved on (begun at
     // the frame foreseen, the engine ran it down by itself to where it locks while the game's pair was in the air).
@@ -1595,8 +1664,19 @@ static void testPairsLitAsTheyAppear() {
     }
     check(unseen >= 5 && off == 0, "with garbage falling on 2P before a pair its screen is lit for, " + std::to_string(off) + " pairs of " + std::to_string(unseen) +
                                        " begun unseen are begun more than " + std::to_string(Driver::BLIND_SLACK) + " frames from where they appeared");
-    std::cout << "the screen of 2P lit as a pair appears: no pair left alone, " << lit.hits << " of " << lit.locks << " where the AI chose; with garbage before it, "
-              << unseen << " pairs begun unseen as they appeared\n";
+    // ... and none is left alone: the engine, which knows of no garbage, puts a pair begun unseen in a few frames where
+    // the game's garbage has made a column higher, the game's pair still in the air. It is held down as any pair the
+    // engine has put, until a clear picture shows nothing above the pieces at rest (let go, it fell by itself: once in 31
+    // pairs of these rounds). The button goes no further than that pair (held on to the frame the engine foresaw the
+    // next pair, it reached the next pair as it appeared 11 times in 44 pairs).
+    check(fallen.leftAlone == 0, "with garbage falling on 2P before a pair its screen is lit for, pairs of 2P left to fall by themselves " + std::to_string(fallen.leftAlone) +
+                                     " times (" + std::to_string(fallen.locks) + " pairs)");
+    check(lit.downAtSpawn == 0 && fallen.downAtSpawn == 0, "with the screen of 2P lit as a pair appears, pairs that took the down button as they appeared: " +
+                                                               std::to_string(lit.downAtSpawn) + ", with garbage before it " + std::to_string(fallen.downAtSpawn));
+    check(fallen.miscounted == 0, "with garbage falling on 2P before a pair its screen is lit for, " + std::to_string(fallen.miscounted) + " pairs of " +
+                                      std::to_string(fallen.spawnsSeen) + " seen are counted otherwise than the round gave them");
+    std::cout << "the screen of 2P lit as a pair appears: no pair left alone, " << lit.hits << " of " << lit.locks << " where the AI chose, " << lit.spawnsSeen
+              << " pairs seen counted as the round gave them; with garbage before it, " << unseen << " pairs begun unseen as they appeared, none left alone\n";
 }
 
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------

@@ -137,7 +137,8 @@ public:
             noted = -2;
         }
         if (!agent) return held = 0;
-        if (t.rounds != round || side.pairs < pairsSeen - (blindFor >= 0 ? 1 : 0)) {
+        const int counted = side.pairs + side.unseen; // (with the pairs the window tells were put unseen)
+        if (t.rounds != round || counted < pairsSeen - (blindFor >= 0 ? 1 : 0)) {
             if (t.rounds != round) {
                 following = untilLocked = false;
                 own = juraic::Player{};
@@ -156,6 +157,11 @@ public:
             //  engine has put it already)
             blindFor = -1;
             if (!active || std::abs(side.spawnedAt - blindAt) > BLIND_SLACK) begin(f, side);
+        } else if (blindFor >= 0 && side.unseen > 0 && counted >= blindFor) {
+            // (the window tells the pair begun unseen has been put, the screen never showing it: the next one may be
+            //  begun unseen too - kept waiting for the screen to show this one, the next pair under the same light, 80
+            //  frames long, was left alone 11 times in a round of 34 pairs drawn so)
+            blindFor = -1;
         }
         keepShot(f);
         if (!active) {
@@ -164,8 +170,14 @@ public:
         }
         if (!active) {
             // (whether or not the screen's pair is followed: a pair not found - turned otherwise than the engine has it, a
-            //  field read wrong - is still in the air, and let go it fell by itself for 45 frames on the real game)
-            if (untilLocked && side.pairs == pairsSeen && !lies(f)) return press(now, held = juraic::BTN_DOWN);
+            //  field read wrong - is still in the air, and let go it fell by itself for 45 frames on the real game. So
+            //  too a pair begun unseen, which the screen has not shown: the engine, which knows of no garbage, may have
+            //  put it on a column the game's garbage made higher, the game's pair still in the air - let go, it fell by
+            //  itself once in 31 pairs of rounds drawn so. Not followed on the screen, it is held until a clear picture
+            //  shows nothing above the pieces at rest: held on to the engine's next pair, a few frames late, the button
+            //  reached the next pair as it appeared, 11 times in 44 pairs)
+            const bool unseenInAir = blindFor == pairsSeen && !(side.clear && side.loose == 0);
+            if (untilLocked && (side.pairs == pairsSeen || unseenInAir) && !lies(f)) return press(now, held = juraic::BTN_DOWN);
             untilLocked = false;
             return press(now, held = 0);
         }
@@ -324,13 +336,15 @@ private:
     // the pair shows - the engine may still run a chain the game did not have). Never before that frame: garbage the
     // engine knows nothing of falls first at times, and the pair comes later than the engine foresees it (begun at the
     // frame foreseen, the engine ran the pair down by itself to where it locks, and nothing was pressed while the
-    // game's pair was in the air: in rounds drawn so, pairs left alone 9 times in 32, 1 in 31 after). -1: no pair has
-    // come.
+    // game's pair was in the air: in rounds drawn so, pairs left alone 9 times in 32, 1 in 31 after). Nor more than a
+    // frame after it: the engine, its field made by pairs begun unseen, may wait longer than the game (5 frames late
+    // after three pairs unseen in a row, and the pair was left alone for more than 10 frames, in a round drawn with a
+    // light of 120 frames). -1: no pair has come.
     int64_t appeared(const Tracker& t) const {
         const SideTrack& side = t.side[me];
         if (!following || own.phase == juraic::Phase::Control || side.shiftedAt <= side.spawnedAt + t.pairGap) return -1;
         const int64_t shown = side.shiftedAt + 1;
-        return own.phase == juraic::Phase::Next && own.wait <= 2 ? std::max(next + own.wait - 2, shown) : shown;
+        return own.phase == juraic::Phase::Next && own.wait <= 2 ? std::clamp(next + own.wait - 2, shown, shown + 1) : shown;
     }
     // The next pair has come and the screen does not show it: BLIND_AFTER frames after it appeared, the screen of the own
     // side not read (a light over it). On the real game the screen of 2P read nothing for 30 frames as a pair appeared,
@@ -339,14 +353,15 @@ private:
         const Tracker& t = f.tracker;
         const SideTrack& side = t.side[me];
         const int64_t appears = appeared(t);
-        return pairsSeen > 0 && blindFor < 0 && side.pairs == pairsSeen && appears >= 0 && now >= appears + BLIND_AFTER && !side.clear;
+        return pairsSeen > 0 && blindFor < 0 && side.pairs + side.unseen == pairsSeen && appears >= 0 && now >= appears + BLIND_AFTER && !side.clear;
     }
     // The next pair, begun unseen, of the colours learnt: the engine goes on from where it stopped (a chain it still ran
     // run to its end at once), the pair appearing in the frame it came; the screen puts it right when it shows it.
     void beginBlind(const Follower& f, int64_t now) {
         const Tracker& t = f.tracker;
         const int64_t appears = appeared(t);
-        for (int k = 0; k < 600 && own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control && !own.field.dead(); ++k) {
+        // (as wait: the field dead only as the pair would appear)
+        for (int k = 0; k < 600 && own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control && own.phase != juraic::Phase::Dead; ++k) {
             juraic::Incoming nobody;
             juraic::PlayerEvents e = juraic::advancePlayer(own, nobody, 0, tsumo, rules, t.timing, roundFrame(t, next));
             juraic::settlePlayer(own, rules, t.timing, noGarbage, e);
@@ -354,7 +369,7 @@ private:
         if (own.phase != juraic::Phase::Next) return;
         own.wait = 1;
         next = appears + 1;
-        pairsSeen = t.side[me].pairs + 1;
+        pairsSeen = t.side[me].pairs + t.side[me].unseen + 1;
         blindFor = pairsSeen, blindAt = appears;
         startOwn = own, startNext = next;
         past.clear();
@@ -396,7 +411,10 @@ private:
         const Tracker& t = f.tracker;
         if (following) {
             const int64_t at = now + lag;
-            while (next < at && !(own.phase == juraic::Phase::Next && own.wait <= 2) && !own.field.dead()) {
+            // (the field is dead only as the next pair would appear, as the game tells it: a pair locked where pairs
+            //  appear may go in its chain - stopped there, the engine foresaw no pair, no pair was begun unseen, and the
+            //  game's pair was left alone, in rounds drawn with the screen of 2P lit as pairs appear)
+            while (next < at && !(own.phase == juraic::Phase::Next && own.wait <= 2) && own.phase != juraic::Phase::Dead) {
                 juraic::Incoming nobody;
                 juraic::PlayerEvents e = juraic::advancePlayer(own, nobody, 0, tsumo, rules, t.timing, roundFrame(t, next));
                 juraic::settlePlayer(own, rules, t.timing, noGarbage, e); // (the garbage it does not know of: none)
