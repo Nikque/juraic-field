@@ -4,6 +4,7 @@
 
 ## 1. 今の状態（2026-10-18、引き継ぎ後）
 
+- **0.9.5 に版上げし、`main` に取り込んで公開する作業をした（10 節）。記録・S キーの保存・表のファイル・画面の内部の数字は、CMake の `JURAIC_REALGAME_DEBUG=ON` の組み立てだけに入る。既定の `C:\puyowork\build` では記録が残らない。14 回目以降の記録は、デバッグの組み立て `C:\puyowork\build-rgdebug\Release\JuraicField.exe` で取る。**
 - 枝 `realgame-2p`、`C:\puyowork\puyo-19-chain-generator`。push 済みは `49d37b9` まで。その後のコミットはどれも push していない。push は利用者が言ってから、枝 `realgame-2p` だけ。
 - 3 つ目の窓のコミット（古い順。資料だけのものは省く）:
   - `0fcdd06` 戦の前の窓と戦の 1 組目、AI に渡す先の組（9 回目）
@@ -178,3 +179,19 @@ Tracker は両側の並びを分けていたが、`observeWith` は自分側の�
 修正前のソースを別に組み立てても同じ失敗が起きた。さらに診断用の試験では、1.5 秒で 0 枚、その後 10 秒待つと合計 331 枚を処理した。AI の変更による停止ではなく、Windows の取り込み開始にかかる時間を、その後の処理速度と一緒に測っていた試験の問題だった。
 
 `testReading` を、最初の画像を最大 10 秒待ち、そこから 1.5 秒間に処理した新しい画像が 10 枚を超え、直近の画像から 30 フレーム未満という形に直した。開始後の速度の条件は維持した。15:33 の対象再実行では最初の画像まで 63 ms、その後 1.5 秒で 61 枚、記録の書き込み・停止も通過。実際に仮想パッドを接続する部分は `JURAIC_TEST_VIRTUAL_PAD` を指定していないため省略された。変更したのはこの試験だけなので、既に通った 35 本は繰り返していない。
+
+## 10. 0.9.5 の版上げと公開（2026-10-18 夕方、4 つ目の窓）
+
+利用者の指定で版 0.9.5（「0.95」の指定を今の番号の付け方で読んだ）。push・公開・`main` への取り込みも利用者が許した。
+
+- 実機モードの画面（行の下に橙色で 2 行）・README 日英・CHANGELOG・`はじめに.txt` に「実機を操作する Juraic は、この作品の中の対戦の Juraic より弱くなる」と書いた（利用者の頼み）。
+- **不具合を調べるための部分は、CMake の `JURAIC_REALGAME_DEBUG=ON` の組み立てだけに入る**（利用者が「デバッグ用なので公開版では削除」と決め、外し方は組み立ての設定を選んだ）: 読みの記録（`realgame\<日時>`、1 回 1.5〜2 GB）、S キーの画面の保存、`realgame_layout.txt` の表、画面の内部の数字（読んだ枚数・合わない読み・照らし合わせ・A を押した回数・操作した組・位置を直した回数・遅れと回転・表の基準）。残したもの: 状態の案内、右側の読んだ盤面、`realgame_window.txt`（窓を覚える）、「2P のボタンを押す」の行。`realgame_pad_tests` で両方の組み立てを確かめる（直す前は記録・表・画像の 4 項目で落ちた）。
+- **14 回目以降の記録は `C:\puyowork\build-rgdebug\Release\JuraicField.exe`（`JURAIC_REALGAME_DEBUG=ON`、同じソース）で取る。** `C:\puyowork\build` は公開版と同じ既定の組み立てで、記録は残らない。`build-rgdebug` には `JuraicField.ini` と `realgame_window.txt` を写した。組み立て直しは `cmake --build C:/puyowork/build-rgdebug --config Release --target juraic_field_game realgame_pad_tests`。
+- `play/realgame_win.h` の注記 3 か所から、実機を動かすプログラムの名前を除いた。過去のコミット文 3 か所には残っている（履歴は書き換えていない）。
+- コミット `62f7bf3`（Version 0.9.5、枝）、`e7e5ee3`（`main` への取り込み。`HANDOFF_realgame*`・`PROMPT_realgame*` 11 本を除いた。枝との違いはこの 11 本だけ）、注釈つきのタグ `v0.9.5`（`e7e5ee3`）。`main`・`realgame-2p`・タグを名前で push した。`main` の作業ツリーは `C:\puyowork\wt-main095`。
+- 確かめ: `tidy_verify2.ps1 v095 …` が `ALL OK (v095)`（変更前のコード）、記録を外した後の `v095b` が `ALL OK (v095b)`（16:27〜16:52。チェックサム 4 本、`ai_tests`、`verify_build` 43 行、ctest 36 本。`realgame_virtual_pad` は窓の読みが通り、仮想のパッドの実接続は省略）。
+- 配布物: `C:\puyowork\artifacts\juraic-field-v0.9.5-windows-x64.zip`（84,944,972 バイト、台本 `bench\make_release_zip_095.ps1`。SDL3・ViGEmClient のライセンスと 47 連鎖の見本を足し、自己試験 -7 も流す）。`bench\zip_readme_template.txt`・`linux_readme_template.txt`・`mac_readme_template.txt` を直した（実機モードの節、ライセンスの一覧、測定の例の日付を「{DATE} の版」から「2026-10-14 の版」へ。前の形は `*.0.9.4.txt`）。
+- **タグのビルド機（Mac run 39109432038）で `realgame_screen_read` が落ちた**（`with the engine ahead of the game, a pair takes 73 frames, with the lag right 52, put elsewhere 2 times, brought where the AI chose 34 of 34`）。`realgame_tests` はこれまで Mac で流したことがなかった（ビルド機は `main`・`linux`・タグだけで動く）。元: 試験の `draw`（146 行）と `stepRound`（232 行）が、乱数を関数の引数の中・`|` の両側で 2 回取っていた。評価の順番は C++ で決まっておらず、MSVC と GCC は同じ順、clang は逆。g++ で clang の順に固定した写しが、Mac と同じ数で落ちた。→ `9e0297a`: 1 つずつ取る形（MSVC・GCC の順）。`realgame_tests` の出力は MSVC でも g++ でも直す前と同じ（秒数を除く）。製品のコードは変わらないので、タグ `v0.9.5` は `e7e5ee3` のまま動かさず、`main` に取り込んで（`b73812d`）push し、`main` の Mac のビルドで試験とチェックサムを確かめた。
+- **公開した（17:38、Latest）: https://github.com/Nikque/juraic-field/releases/tag/v0.9.5**。添付 6 個（Windows の zip、Linux の tar.gz、Mac の zip、Android の APK と説明、`SHA256SUMS-v0.9.5.txt`）。本文 `C:\puyowork\artifacts\release-notes-v0.9.5.md`、集めた所 `C:\puyowork\artifacts\v0.9.5`。公開後の語の確かめ（`release_download_check.ps1`）で CHANGELOG の「道具」（公開の文に入れない語）が見つかり、`5f6682c`（「ツール」に）→ `main` `aa9ac8a` → zip・tar.gz・Mac の zip・一覧を作り直して差し替えた（17:42）。タグのソースの CHANGELOG にはこの語が残る（タグは動かしていない）。落とし直し: 6 個とも一覧と同じ、Windows の zip の自己テスト 0・3003、Linux の tar.gz を展開して 3003、Mac の zip の実行権。APK は公開用の鍵で署名（証明書 `d818408a…0cb6`、`apksigner` v2）、版 0.9.5、エミュレーターで起動（タグの Android run 39109432034）。Mac の配布物は `main` `b73812d` の run 39111348915（全段通過、チェックサム 4 本が Windows と同じ）から。Linux は WSL で ctest 28 本。Linux・Mac の配布物に 47 連鎖の見本は入っていない（台本の一覧が前のまま。GUI は Windows だけ）。
+- `main` に `realgame-2p` をまた取り込むとき、引き継ぎ資料（`HANDOFF_realgame*`・`PROMPT_realgame*`）は `main` で消してあるので、変えた分が「変更と削除」の衝突になる。`main` では消したままにする。
+- **残件（調べていない）: 乱数の並びを変えると、試験の別の項目が落ちる。** 232 行の 2 つの乱数を逆の順にした写し（`B2`）では `seed 41, 2240x1260, frame 948, side 1: the own field is not observed` が落ちた。clang の順の写し（`A`）では「エンジンが実機より先」の形で 1 組 73 フレーム（遅れが合えば 52）。決まった乱数の並びでたまたま通っている所がある、ということ。読みと Driver の弱さか、試験の条件の厳しさかは未確認。写しの作り方: `%USERPROFILE%\AppData\Local\Temp\claude\D--edaxwork\6120005f-6574-4677-aca6-3253aa3657f2\scratchpad\order_variants.py`（消えていたら、146 行と 232 行の 2 つの乱数の順を入れ替えるだけ）、WSL の `~/rgt/src`（`play` などはリポジトリへのリンク）で `g++ -std=c++20 -O2 -pthread -I<リポジトリ>`。
