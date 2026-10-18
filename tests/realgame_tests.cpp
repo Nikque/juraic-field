@@ -1220,6 +1220,7 @@ struct DriveCounts {
     long downAtSpawn = 0; // pairs of 2P that took the down button in the frame they appeared (sent before they were seen)
     long leftAlone = 0;   // times a pair of 2P in the air took no button for 10 frames in a row (left to fall by itself)
     long control = 0;     // frames a pair of 2P was in play (Phase::Control)
+    std::vector<int64_t> appeared; // the frames of the clock pairs of 2P appeared in
 };
 
 // A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
@@ -1234,12 +1235,14 @@ struct DriveCounts {
 // 4.6% of the frames of a record of the real game, the next frame called twice). crowdedLate: a turn taken in the frame
 // of a move, or up to three frames after another turn, is shown that many frames late, the pair drawn the way it was
 // before the first of them (the real game in its eighth record: the way before such a turn still shown 5 or 6 frames
-// after it in a fifth of the pictures of those frames).
+// after it in a fifth of the pictures of those frames). litAsAppears: one pair of 2P in three lit from 8 frames before it
+// appears, for that many frames. garbageAsLit: that many pieces of garbage fall on 2P before each of those pairs (sent
+// as the pair before is locked: the engine of the driver, which knows of no garbage, foresees the pair sooner).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
                        int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0,
-                       int litAsAppears = 0) {
+                       int litAsAppears = 0, int garbageAsLit = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -1324,12 +1327,13 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         }
         if (movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, movedHidden);
         // (from the frame a pair appears in, until the frames take buttons the driver sent once it had begun that pair)
-        if (e[1].spawned) ++spawns, leftOver = true;
+        if (e[1].spawned) ++spawns, leftOver = true, n.appeared.push_back(clock);
         if (leftOver && d.played >= spawns && from >= begunAt) leftOver = false;
         if (leftOver && (buttons[1] & BTN_DOWN)) ++n.downAtSpawn, leftOver = false;
         if (hidden && e[1].control.rotated && r.player[1].phase == Phase::Control) hideFor = hidden;
         // (a pair the AI found no placement for - the field full - is not counted)
         if (e[1].locked && target >= 0) n.locks += 1, n.hits += placementId(r.player[1].pair.placement()) == target;
+        if (garbageAsLit && e[1].locked && spawns % 3 == 2) r.player[1].incoming.confirmed += garbageAsLit;
         ++n.frames;
     }
     n.corrected += d.corrected, n.played += d.played;
@@ -1569,7 +1573,30 @@ static void testPairsLitAsTheyAppear() {
     check(lit.locks >= 40 && lit.leftAlone == 0,
           "with the screen of 2P lit as a pair appears, pairs of 2P left to fall by themselves " + std::to_string(lit.leftAlone) + " times (" + std::to_string(lit.locks) + " pairs)");
     check(lit.hits * 100 >= lit.locks * 90, "with the screen of 2P lit as a pair appears, pairs brought where the AI chose " + std::to_string(lit.hits) + " of " + std::to_string(lit.locks));
-    std::cout << "the screen of 2P lit as a pair appears: no pair left alone, " << lit.hits << " of " << lit.locks << " where the AI chose\n";
+    // Garbage falls on 2P before each of the pairs lit, which the engine does not know of: it foresees the pair sooner
+    // than it comes. A pair begun unseen is begun as it appears, after the window of the next pairs moved on (begun at
+    // the frame foreseen, the engine ran it down by itself to where it locks while the game's pair was in the air).
+    DriveCounts fallen;
+    std::vector<std::pair<int64_t, std::string>> notes;
+    for (int k = 0; k < 2; ++k) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(120 + uint64_t(k), 5, false, 2500, fallen, &notes, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 30, 6);
+    }
+    int unseen = 0, off = 0;
+    const std::string begun = "begun unseen: the screen not read, the engine had it appear in frame ";
+    for (const auto& [at, line] : notes) {
+        const size_t i = line.find(begun);
+        if (i == std::string::npos) continue;
+        const int64_t foreseen = std::atoll(line.c_str() + i + begun.size());
+        int64_t nearest = 1 << 30;
+        for (const int64_t frame : fallen.appeared) nearest = std::min(nearest, std::abs(frame - foreseen));
+        ++unseen, off += nearest > Driver::BLIND_SLACK;
+    }
+    check(unseen >= 5 && off == 0, "with garbage falling on 2P before a pair its screen is lit for, " + std::to_string(off) + " pairs of " + std::to_string(unseen) +
+                                       " begun unseen are begun more than " + std::to_string(Driver::BLIND_SLACK) + " frames from where they appeared");
+    std::cout << "the screen of 2P lit as a pair appears: no pair left alone, " << lit.hits << " of " << lit.locks << " where the AI chose; with garbage before it, "
+              << unseen << " pairs begun unseen as they appeared\n";
 }
 
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------

@@ -321,11 +321,16 @@ private:
     // The frame the next pair appeared in (as the screen would show it first), when the window of the next pairs has
     // moved on since the last pair appeared (it moves on only after that pair is put): as the engine foresees it, waiting
     // for it, or else the frame after the window stood still moved on (on the real game it stands still a frame before
-    // the pair shows - the engine may still run a chain the game did not have). -1: no pair has come.
+    // the pair shows - the engine may still run a chain the game did not have). Never before that frame: garbage the
+    // engine knows nothing of falls first at times, and the pair comes later than the engine foresees it (begun at the
+    // frame foreseen, the engine ran the pair down by itself to where it locks, and nothing was pressed while the
+    // game's pair was in the air: in rounds drawn so, pairs left alone 9 times in 32, 1 in 31 after). -1: no pair has
+    // come.
     int64_t appeared(const Tracker& t) const {
         const SideTrack& side = t.side[me];
         if (!following || own.phase == juraic::Phase::Control || side.shiftedAt <= side.spawnedAt + t.pairGap) return -1;
-        return own.phase == juraic::Phase::Next && own.wait <= 2 ? next + own.wait - 2 : side.shiftedAt + 1;
+        const int64_t shown = side.shiftedAt + 1;
+        return own.phase == juraic::Phase::Next && own.wait <= 2 ? std::max(next + own.wait - 2, shown) : shown;
     }
     // The next pair has come and the screen does not show it: BLIND_AFTER frames after it appeared, the screen of the own
     // side not read (a light over it). On the real game the screen of 2P read nothing for 30 frames as a pair appeared,
