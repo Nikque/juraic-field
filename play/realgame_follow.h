@@ -178,6 +178,11 @@ private:
         const int more = count(t.resting) - count(t.under);
         if ((more == 2 || more == 1) && contains(t.resting, t.under)) {
             if (m.lying && m.index == t.pairs - 1 && t.resting == m.with) return;
+            // The pair lying with both pieces shown, read with one of them missing (a piece that moves drawn over it):
+            // still where it lay, unless the screen shows it so in the reading after too (its other piece in the 13th
+            // row). Taken from one picture, a placement into the 13th row would keep a piece the game does not have.
+            if (more == 1 && m.lying && m.index == t.pairs - 1 && count(m.with) - count(t.under) == 2 && contains(m.with, t.resting) && at == t.changedAt)
+                return;
             const juraic::GameField base = withHidden(t.under, m.core.field), seen = shown(t.resting);
             const unsigned legal = juraic::legalPlacements(base);
             for (juraic::Cell child = 0; child <= juraic::MAX_COLORS; ++child) {

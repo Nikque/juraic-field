@@ -924,6 +924,73 @@ static void testRow13Kept() {
     std::cout << "a pair put with a piece in the 13th row, which the screen does not show, is found and the piece kept\n";
 }
 
+// A pair lying with both pieces shown, then one picture of it with a piece missing (a piece that moves drawn over it,
+// as in a lock or the first picture of a chain), where a placement with the other piece in the 13th row of a column
+// twelve high fits too: the pair is still where it lay, and nothing is put in the 13th row. The same picture read in
+// readings in a row is the pair as the screen shows it, its other piece in the 13th row.
+static void testLyingPieceHidden() {
+    for (const int partials : {1, 3}) {
+        Reading empty;
+        for (SideRead& side : empty.side) {
+            for (auto& column : side.point)
+                for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+            side.next[0] = {5, 5}, side.next[1] = {1, 2};
+            side.nextRead[0] = side.nextRead[1] = true;
+        }
+        const auto window = [](Reading r, Pair next, Pair after) {
+            for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+            return r;
+        };
+        Follower f;
+        int64_t at = 50000;
+        for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+        // 2P's field: the second column twelve high, the third two high, the fourth eleven (a pair lifted on it reaches
+        // the 13th row of the second; colours in turn: nothing clears).
+        Reading base = empty;
+        for (int y = 0; y < 12; ++y) base.side[1].point[1][2 * y] = base.side[1].point[1][2 * y + 1] = Cell(1 + y % 2);
+        for (int y = 0; y < 11; ++y) base.side[1].point[3][2 * y] = base.side[1].point[3][2 * y + 1] = Cell(1 + y % 2);
+        for (int y = 0; y < 2; ++y) base.side[1].point[2][2 * y] = base.side[1].point[2][2 * y + 1] = Cell(3 + y % 2);
+        for (int k = 0; k < 5; ++k) f.step(base, at++);
+        // The first pair (5 5) appears and comes to rest upright on the third column, in its third and fourth rows.
+        Reading first = window(base, {1, 2}, {3, 3});
+        first.side[1].point[SPAWN_X][23] = 5;
+        for (int k = 0; k < 3; ++k) f.step(first, at++);
+        check(f.tracker.side[1].pairs == 1, "the first pair is not seen");
+        Reading landed = window(base, {1, 2}, {3, 3});
+        for (int k = 4; k < 8; ++k) landed.side[1].point[2][k] = 5;
+        for (int k = 0; k < 4; ++k) f.step(landed, at++);
+        check(f.model[1].lying && f.model[1].at.x == 2 && f.model[1].at.dir == UP, "the pair lying upright on the third column is not found");
+        // Its upper piece not shown: as the pair lying across the second and third columns, one piece in the 13th row of
+        // the second.
+        Reading partial = landed;
+        partial.side[1].point[2][6] = partial.side[1].point[2][7] = EMPTY;
+        for (int k = 0; k < partials; ++k) f.step(partial, at++);
+        // A piece at rest under it not shown (a piece that moves): the pair is locked where it lay.
+        Reading locked = partials == 1 ? landed : partial;
+        locked.side[1].point[1][22] = locked.side[1].point[1][23] = EMPTY;
+        f.step(locked, at++);
+        check(f.model[1].followed == 0, "the pair is not locked where it lay");
+        for (int k = 0; k < 6; ++k) f.step(partials == 1 ? landed : partial, at++);
+        Reading next = window(partials == 1 ? landed : partial, {3, 3}, {4, 4});
+        next.side[1].point[SPAWN_X][23] = 1;
+        f.step(next, at++);
+        check(f.tracker.spawned[1] && f.tracker.side[1].pairs == 2, "the second pair is not seen");
+        int row13 = 0;
+        for (int x = 0; x < W; ++x) row13 += f.model[1].core.field.f.get(x, 12) != EMPTY;
+        ai::Observation o;
+        check(f.observe(1, f.rules, o), "nothing is observed as the second pair appears");
+        if (partials == 1) {
+            check(row13 == 0 && f.misses == 0, "one picture of the pair lying with a piece missing puts a piece in the 13th row");
+            check(o.self().field.f == f.model[1].core.field.f && o.self().field.f.get(2, 3) == 5 && o.self().field.f.get(1, 12) == EMPTY,
+                  "the AI is shown a piece in the 13th row that the pair lying did not put there");
+        } else {
+            check(row13 == 1 && f.model[1].core.field.f.get(1, 12) == 5 && f.misses == 0,
+                  "the pair shown with a piece missing in readings in a row is not taken with its other piece in the 13th row");
+        }
+    }
+    std::cout << "one picture of a pair lying with a piece missing does not move it into the 13th row; readings in a row do\n";
+}
+
 // The AI that plays 2P of the real game learns its third pair only as the pair appears (the window moves until then),
 // so its second choice comes after the pair has set out: while it is on its way the pair goes straight down where that
 // loses nothing (PlacementAgent::holdSecond) - for the AI the driver is given and the one that takes over from it.
@@ -1152,6 +1219,7 @@ struct DriveCounts {
     long turnsFound = 0; // rounds that ended with the driver turning the other way round (the pad turns so)
     long downAtSpawn = 0; // pairs of 2P that took the down button in the frame they appeared (sent before they were seen)
     long leftAlone = 0;   // times a pair of 2P in the air took no button for 10 frames in a row (left to fall by itself)
+    long control = 0;     // frames a pair of 2P was in play (Phase::Control)
 };
 
 // A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
@@ -1244,6 +1312,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         const int8_t columnBefore = r.player[1].pair.x;
         alone = r.player[1].phase == Phase::Control && buttons[1] == 0 ? alone + 1 : 0;
         if (alone == 10) ++n.leftAlone;
+        n.control += r.player[1].phase == Phase::Control;
         r.step(buttons, e);
         if (turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = turnShownLate;
         if (crowdedLate && e[1].control.rotated && r.player[1].phase == Phase::Control) {
@@ -1345,14 +1414,17 @@ static void testDriver() {
     // them put right, the buttons in flight were played again for the wrong frames and the pair sent to and fro - 125
     // times in 27 pairs, a pair 92 frames against 64 (on the real game a pair took 80 frames, 57 for a player). A
     // pair where the engine has it a frame or two before or after is put nowhere else. (A light over the field of 2P in 4
-    // frames of 12.)
+    // frames of 12.) The frames a pair is in play are set against each other: the frames of the round besides - chains,
+    // garbage, the round over sooner when 2P loses - are as the choices of the two AIs make them (with the pictures
+    // drawn otherwise, 2P lost the round of the lag right at its 1736th frame, nothing chained: 52 frames a pair against
+    // 73 with the engine ahead, 19 frames in play for each).
     {
         DriveCounts right, ahead;
         driveRound(106, 5, false, 2500, right, nullptr, nullptr, -1, false, 0, nullptr, true, 4);
         driveRound(106, 5, false, 2500, ahead, nullptr, nullptr, 3, false, 0, nullptr, true, 4);
-        const double perRight = double(right.frames) / double(std::max(1L, right.locks)), perAhead = double(ahead.frames) / double(std::max(1L, ahead.locks));
+        const double perRight = double(right.control) / double(std::max(1L, right.locks)), perAhead = double(ahead.control) / double(std::max(1L, ahead.locks));
         check(right.locks >= 20 && ahead.locks >= 20 && perAhead <= perRight * 1.15 && ahead.corrected <= 10 && ahead.hits * 10 >= ahead.locks * 9,
-              "with the engine ahead of the game, a pair takes " + std::to_string(int(perAhead)) + " frames, with the lag right " + std::to_string(int(perRight)) + ", put elsewhere " +
+              "with the engine ahead of the game, a pair is in play " + std::to_string(perAhead) + " frames, with the lag right " + std::to_string(perRight) + ", put elsewhere " +
                   std::to_string(ahead.corrected) + " times, brought where the AI chose " + std::to_string(ahead.hits) + " of " + std::to_string(ahead.locks));
     }
     // The AI or its level changed on the screen of the mode while the AI plays (it plays from the moment the window of
@@ -1676,6 +1748,7 @@ int main(int argc, char** argv) {
         testChainAfterMissedLanding();
         testPairsAfterLight();
         testRow13Kept();
+        testLyingPieceHidden();
         testSecondChoiceHeld();
         testDriver();
         testTapsHeld();
