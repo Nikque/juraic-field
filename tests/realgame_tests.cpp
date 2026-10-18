@@ -143,7 +143,12 @@ static Drawn draw(Canvas& c, const Layout& l, const Round& r, bool ready, Rng& n
             int h[W];
             p.field.heights(h);
             const int x = int(noise.below(W));
-            if (h[x] < 11) piece(c, l, d, x, float(h[x]) + 1.f + 0.5f * float(noise.below(4)), l.colors[noise.below(5)].cell);
+            if (h[x] < 11) {
+                // (one after the other: the order in which the arguments of a call are worked out is not fixed by C++)
+                const Cell colour = l.colors[noise.below(5)].cell;
+                const float half = 0.5f * float(noise.below(4));
+                piece(c, l, d, x, float(h[x]) + 1.f + half, colour);
+            }
             const int y = int(noise.below(W));
             if (h[y] && noise.below(2)) {
                 const float cx = d.left + (float(y) + 0.5f) * d.cellWidth, cy = d.bottom - (float(h[y]) - 0.5f) * d.cellHeight;
@@ -229,7 +234,12 @@ static void stepRound(Round& r, ai::Agent* const agents[2], ai::Observation& o, 
             ai::observe(r, s, o);
             buttons[s] = agents[s]->frame(o);
         } else {
-            if (hands.below(4) == 0) held[s] = uint8_t(hands.below(32) | (hands.below(3) ? BTN_DOWN : 0));
+            if (hands.below(4) == 0) {
+                // (one after the other, as above)
+                const uint8_t move = uint8_t(hands.below(32));
+                const bool down = hands.below(3) != 0;
+                held[s] = uint8_t(move | (down ? BTN_DOWN : 0));
+            }
             buttons[s] = held[s];
         }
     }
