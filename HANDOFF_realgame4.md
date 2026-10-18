@@ -4,6 +4,8 @@
 
 ## 1. 今の状態（2026-10-18、引き継ぎ後）
 
+- **13 節（2026-10-19 朝、7・8 つ目の窓）: 長い光の間の下の押し残しを Driver で直し（窓の動き始めで下を離す）、追加の試験で見つけた放置（寝たと見た組が宙に戻る）も直した。16 通りで放置 0・押し残し 26 → 0。最後のソースで rg29 まで通過。push はしていない。**
+
 - **12 節（2026-10-18 夜、6 つ目の窓）: 11.3 の残り 4 件と、調べる中で見つけた弱さ 5 つを、落ちる試験を先に確かめて直した。push はしていない。**
 
 - **0.9.5 に版上げし、`main` に取り込んで公開する作業をした（10 節）。記録・S キーの保存・表のファイル・画面の内部の数字は、CMake の `JURAIC_REALGAME_DEBUG=ON` の組み立てだけに入る。既定の `C:\puyowork\build` では記録が残らない。14 回目以降の記録は、デバッグの組み立て `C:\puyowork\build-rgdebug\Release\JuraicField.exe` で取る。**
@@ -341,3 +343,82 @@ Tracker は両側の並びを分けていたが、`observeWith` は自分側の�
 - `tidy_verify2.ps1 rg27 checksums_x3only_d20.txt`（10 月 19 日 02:32〜02:46）: `ALL OK (rg27)`（X3 のチェックサム 4 本が同じ、`ai_tests`、`verify_build` 43 行に悪い行なし、ctest 36 本すべて 1 回目で通過）。組み立ては最後のソース（`realgame_drive.h` 23:19:38）の後の 23:20 のもの。
 - この節の直しと試験と 12 節は、この資料と同じコミット（`git log -1 -- play/realgame_read.h`）。push はしていない。
 - 道具（`C:\puyowork\bench\tmp\realgame-tools\order\w6\`、WSL から `/mnt/c/...` で使う）: `mk6.sh <名>`（今の試験から写し 7 つと揺れの道具を `~/rgt/src/<名>` に作る）、`bld6.sh <名> <添え字> <写し…>`（`shake_*` は揺れの道具、ほかは落ちても進む形の試験として `~/rgt/bin3` に組み立てる）、`run6.sh <名> <写し…>`（流して `FAILED` を拾う）、`one.sh <名> <試験の名前>`（リポジトリの試験をそのまま）、`mid.sh <名> <sed の式>`（今のソースの `realgame_drive.h` を 1 か所変えて光の試験を流す。`~/rgt/head/tests/das.cpp` が要る）、`spawns.sh`（全記録の `rgspawns` を `~/rgt/head` と今のソースで比べる。`spcmp.py` で集める）、`rgnum.cpp`（両側の並びの合い方。`RG_ROUND=<戦>` で番号ごと、`RG_TFROM`/`RG_TTO`/`RG_TSIDE` で片側の Tracker を絵ごとに）、`matrix.sh <揺れの道具> <名>`（12.6 の 16 通り）、`shake_tracker2.py`・`shake_das.py`・`shake_miscount.py`（揺れの道具に Tracker の数・下の押し残し・数のずれの印字を足す）、`tsum.py`（Tracker の印字の変わり目だけ）、`patch_rounds.py`（`playAndRead` の絵ごとの印字）、`patch_das.py`（光の試験の数の印字）。直す前のソースは `git archive 3a12fbf ai core game generator play | tar -x -C ~/rgt/head` で作り直す（この窓の `~/rgt/head` などは `~/rgt/_trash-2026-10-19` に移した）。
+
+## 13. 長い光の間の下の押し残し（2026-10-19 朝、7 つ目の窓）
+
+基準は `0accb8e`（開始時の HEAD `d772407` は引き継ぎプロンプトの追加だけ）。最初に 2 節・12 節を全文読み、16 通りを元の道具で流し直した。放置 0、下の押し残し 26、数のずれ 0 を再現した。対戦の測定は流していない。以下は `driveRound` と同じ作り物の対戦。
+
+### 13.1 元と直し
+
+- 種 120・おじゃま 6 個・光 50 フレームの例。9 組目は 1653 で着地するが、光で盤面が読めず、Driver は 1677 まで下を送る。パッドの遅れは 5 フレームで、この最後の下が 1681 に出た 10 組目に届く。エンジンは着地・次の組を数フレーム遅く見込んでいる。
+- 窓は 1674（次の組が出る 7 フレーム前）から動いて両方が読めなくなる。1678 で新しい窓を読み、Tracker が止まった窓を確定するのは 1680。確定を待つと入力の遅れに間に合わない。Driver はそれまで、窓の動き始めを下を離す合図に使っていなかった。
+- Driver だけを直した（以下の 13.3 は最初の候補の比較。13.6 の追加修正の後に測り直し、同じ数だった: 13.7）。今の組を始めた後に止まった窓を読めていて、エンジンが組を置いた後に両方の窓が読めなくなったら、下を一時的に離す（`windowReadAt`・`windowPauseAt`）。離すのは `Timing::nextSlide`（今の版は 8）フレームまで。`untilLocked` は消さないので、窓がただ隠れただけで盤面・窓とも着地を確定しなければ、下を再開する。次の組には前の一時停止を持ち越さない（`startNext` と比べる）。戦が変われば窓の時刻も戻す。
+- Tracker・Follower は変更していない。全記録の Tracker の流し直しは今回は行っていない。
+
+### 13.2 落ちる試験と押し残しの物差し
+
+- `testLongLights` を先に追加。光 50/80/120 × おじゃま 0/6 × 種 120/121 の 12 通りで、放置・押し残し・数のずれを確かめる（光 30 は既存の `testPairsLitAsTheyAppear`）。修正前は光 120・おじゃま無しで押し残し 3 回となって落ちた（`w7/red.txt`）。
+- `testWindowReleaseBounded` は、エンジンだけが置き終え、画面は読めないまま、窓だけが長く読めなくなる形。8 フレーム離した後に下を再開することを確かめた。
+- 途中の候補は元の集計で 26 → 1。残る 1 は押し残しでなく試験の誤りだった（種 120・おじゃま 6・光 80、2149）。16 組目は 2141 に出て、2145 に見えないまま始まり、この組のために送った `<v` が 2149 に届く。同じ 2149 に画面で見えた同じ組を始め直し、試験の `begunAt` が 2145 → 2149 に上書きされたため、正しい入力を「始める前の入力」と数えていた。候補と古い集計で `testLongLights` が光 80・おじゃま 6 の 1 回で落ちることを確認した（`w7/focused.txt`）。
+- `driveRound` の集計を修正。作り物の実際の組が出てから最初に操作を始めた時刻（`firstBegunAt`）を保存し、同じ組の始め直しでは上書きしない。組が出る前に送った下は従来どおり数える。新しい物差しで基準版も流し直し、基準版の 26 回が変わらないことを確認した。
+- 道具の `one.sh`・`keepgoing.py` は落ちても最後に `all realgame tests passed` を出す。上記の落ちた試験と写しの合否は、必ず `FAILED` も確認する。
+
+### 13.3 16 通りの比較（同じ物差し）
+
+各行は種 120・121 の合計。基準版 `0accb8e` の製品ソースと修正後の製品ソースを別のフォルダーに保存し、同じ修正済み集計を組み込んで比較した。
+
+| おじゃま | 光（フレーム） | 放置（前 → 後） | 次の組への下の押し残し（前 → 後） | 数のずれ（前 → 後） |
+|---|---|---|---|---|
+| なし | 30 | 0 → 0 | 0 → 0 | 0 → 0 |
+| なし | 50 | 0 → 0 | 0 → 0 | 0 → 0 |
+| なし | 80 | 0 → 0 | 0 → 0 | 0 → 0 |
+| なし | 120 | 0 → 0 | 3 → 0 | 0 → 0 |
+| 6 個 | 30 | 0 → 0 | 0 → 0 | 0 → 0 |
+| 6 個 | 50 | 0 → 0 | 4 → 0 | 0 → 0 |
+| 6 個 | 80 | 0 → 0 | 7 → 0 | 0 → 0 |
+| 6 個 | 120 | 0 → 0 | 12 → 0 | 0 → 0 |
+| 合計 | | 0 → 0 | 26 → 0 | 0 → 0 |
+
+### 13.4 午後の 2 記録の識別と残り
+
+`events.txt` の冒頭の組み立て情報と、戦の開始・見えないままの開始・選び直しの行数だけを確認した。
+
+| 記録 | 組み立て | 戦の開始 | `begun unseen` | `choice renewed` |
+|---|---|---:|---:|---:|
+| `20261018-142336` | Oct 18 2026 09:38:19 | 6 | 6 | 0 |
+| `20261018-153737` | Oct 18 2026 15:02:45 | 6 | 8 | 24 |
+
+- 後者は 6 節の組み立て時刻と一致。どちらが 14 回目か利用者に尋ね、回答は「わかりません」。番号は未確定のまま。6 節の詳細調査（`rgidle` の E など）はまだ実施していない。
+- 両方とも 12 節の夜の修正より前の記録なので、12 節・今回の Driver 修正の実機での効果は確かめられない。新しい記録で 6 節の順に調べることが残る。利用者にプレイ中の時刻のメモは頼まない。
+- 12.7 の 4・5（1P の数え違い、`outOfSight` の 20 フレーム）は変更していない。記録で問題が見えたときに扱う。
+
+### 13.5 最終確認と道具
+
+- MSVC Release は警告 0。Windows の `realgame_tests.exe C:\puyowork\build` は全件通過。`realgame_pad_tests` は窓の読み取りが通り、仮想パッドの実接続は設定が無いため省略（77）。
+- 上の 2 行と次の 2 つは、13.6 の追加修正の前のソースの結果。WSL・並び 7 つ（`w7/checks/`）は全部通過。`tidy_verify2.ps1 rg28 checksums_x3only_d20.txt`（05:57 の組み立て）は 06:26:29 に `ALL OK (rg28)`（チェックサム 4 本、`ai_tests`、`verify_build` 43 行に悪い行なし、ctest 36 本通過）。最後のソースの確かめは 13.7。
+
+- Windows の出力: `C:\puyowork\bench\out\rg28_manual_build.txt`・`rg28_manual_realgame.txt`・`rg28_manual_pad.txt`・`rg28_tidy_run.txt`、および `tidy_rg28_*.txt`。
+- 台本: `C:\puyowork\bench\tmp\realgame-tools\order\w7\compare.sh`（基準版・修正後と同じ集計で 16 通り）、`verify.sh`（並び 7 つと WSL の無加工の試験）。既存の w6 の道具も利用。
+- WSL の資料: `~/rgt/w7/`。`red.txt`・`focused.txt`（落ちる試験）、`trace_before.txt`・`trace_try1_last.txt`（上記のフレーム）、`matrix_measure_before.txt`・`matrix_measure_after.txt`（比較表）、`checks/`（写し 7 つと無加工の試験、組み立ての出力）、`before/`・`after/`（比較に使った製品ソース）。16 通りごとの詳細出力は `~/rgt/mx/w7measure_{before,after}_*.txt`。
+- 不要ファイルの削除はしていない。push はしていない。
+### 13.6 追加試験で見つかった放置
+
+- 並びの種 27、光 80・おじゃま 0、種 121 で放置 1 回。`testLongLights` は `light 80, garbage 0: 1 pairs left alone in 74 locks` で落ちた。基準版 `0accb8e` と最初の候補の両方で 2896 に同じ放置を再現（`w7/extra27_{before,after}_121.txt`）。今回の窓の一時停止が新しく生んだものではない。
+- 37 組目は 2865 に出て、2868 に見えないまま開始。光の後に 2880 に同じ組を画面から始め直す。2883 で着地と見て下を離すが、実際の組は以前の回転・移動を受けてまだ宙にある。2887 以降も画面に宙の組が見えているのに、`untilLocked` を消したままなので再開しない。詳細は `w7/trace27.txt`。
+- 落ちる試験を確認した後、Driver に、エンジンが置き終えた同じ組（`following`、同じ組番号、`inHand`）が読める画面で宙に見えたとき（`!pairLying(side.pair, side.under)`）、`untilLocked` を再び立てる修正を追加した。Tracker・Follower は変更していない。
+- 13.3 の 16 通り、13.5 の Windows 単独試験、写し 7 つ（`checks/`）、rg28 は、この追加の前のソースの結果。
+- 追加修正後の該当 2 ケースは放置 0（種 120: 38 組・38 当たり、種 121: 36 組・35 当たり）。`extra27_final_*.txt`。
+
+### 13.7 追加修正の後の確かめ（2026-10-19 朝、8 つ目の窓）
+
+- 追加修正後の 16 通り（`w7/matrix_final.txt`、詳細 `mx/w7final_*.txt`）は、最初の候補（`matrix_measure_after.txt`）と全行同じ（`diff` で一致）。基準版 `0accb8e` との比べは 13.3 の表のまま（放置 0 → 0、次の組への下の押し残し 26 → 0、数のずれ 0 → 0）。追加修正はこの 16 通りの数を変えない。
+- 追加修正後の製品ソースで、写し 7 つと WSL の無加工の試験（`w7/finalchecks/`、台本 `verify_final.sh`）はすべて `FAILED` 0・`all realgame tests passed`・終了コード 0（06:21）。試験は次の 1 戦を足す前のもの。
+- 追加修正を落とす試験がリポジトリに無かった（落ちたのは並びを変えた写しの種 27 だけ）。`driveRound` に揺れの乱数の流れ `noiseStream`（既定 7、写しの種 27 は 27）を末尾の引数として足し、`testLongLights` の最後に種 121・光 80・おじゃま 0・流れ 27 の 1 戦を入れた。`testLongLights` だけを組み立てて、立て直しの行ありで通り、その行を外すと `light 80, noise 27: 1 pairs left alone in 36 locks` で落ちることを確かめた（`w7/arm_with.txt`・`arm_without.txt`、台本 `w7/arm_check.sh`）。
+- 引数にしたので、写しを作る `order\variants3.py` は既定値 `uint64_t noiseStream = 7)` も salt の値に替えるようにした（古いソースでは何も変わらない）。
+- 最後のソース（この 1 戦を足した後）: MSVC Release は警告 0・終了コード 0（`bench\out\rg29_manual_build.txt`）。
+- 作業フォルダーが替わって前の窓のツール呼び出しが中断し、06:29 に始めた Windows の `realgame_tests.exe`（PID 51432）は出力を受ける側が無くなった。止めずに置き、出力をファイルへ直接書く形でもう 1 本流した（`rg29_manual_realgame2.txt`）。1 本目は出力を残さずに終わった。
+- 最後のソースの Windows: `realgame_tests.exe C:\puyowork\build` は `all realgame tests passed`・終了コード 0・`FAILED` 0（`rg29_manual_realgame2.txt`）。`realgame_pad_tests` は窓の読みが通り、仮想パッドの実接続は省略（77、`rg29_manual_pad.txt`）。
+- 前の窓（作業フォルダー `D:\edaxwork`）の一時ファイルのうち、立て直しの確かめの結果と写し 7 つの集計は `order\w7\from-old-window\` に移した。空の出力・止めた見張りの出力・差分の控えは `C:\puyowork\_trash-2026-10-19\old-window-D-edaxwork\` に移した。会話の記録（アプリが管理する `.jsonl`）は動かしていない。
+- 最後のソースの写し 7 つと WSL 本体（`w7/finalchecks2/`、台本 `verify_final2.sh`、見張り `wait_final2.sh`、06:28〜06:39）: 8 本すべて `FAILED` 0・`all realgame tests passed`・組み立ての出力 0 行、`realgame_tests` の終了コード 0（`order\w7\finalchecks2_summary.txt`）。salt の写し 3 つは `noiseStream` の既定値も 17/27/37 に替わっていることを確かめた。`tidy_verify2.ps1 rg29 checksums_x3only_d20.txt`（06:37 の組み立て、最後のソースの後）は 07:03:44 に `ALL OK (rg29)`（X3 のチェックサム 4 本が同じ、`ai_tests`、`verify_build` 43 行に悪い行なし、ctest 36 本通過。仮想パッドは省略）。出力は `bench\out\rg29_tidy_run.txt`・`tidy_rg29_*.txt`。
+- 以上で、追加修正と足した試験を含む最後のソースの確かめ（16 通り、写し 7 つ、WSL 本体、MSVC Release 警告 0、Windows の単独試験とパッドの試験、rg29）はすべて済み、放置 0。この節までをコミットした（push はしていない）。
+- 残り: 12.7 の 2〜5 と 13.4（実機の新しい記録での確かめ、午後の 2 記録の番号、1P の数え違い、`outOfSight`）。Tracker は変えていないので、12.6 の全記録の流し直しは要らない。

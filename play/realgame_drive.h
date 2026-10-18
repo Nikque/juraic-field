@@ -141,6 +141,7 @@ public:
         if (t.rounds != round || counted < pairsSeen - (blindFor >= 0 ? 1 : 0)) {
             if (t.rounds != round) {
                 following = untilLocked = false;
+                windowReadAt = windowPauseAt = -1;
                 own = juraic::Player{};
                 past.clear();
             }
@@ -164,6 +165,7 @@ public:
             blindFor = -1;
         }
         keepShot(f);
+        if (side.nextRead[0] && side.nextRead[1] && side.nextStill >= t.windowStill) windowReadAt = t.frame;
         if (!active) {
             wait(f, now);
             if (blindDue(f, now)) beginBlind(f, now);
@@ -177,7 +179,19 @@ public:
             //  shows nothing above the pieces at rest: held on to the engine's next pair, a few frames late, the button
             //  reached the next pair as it appeared, 11 times in 44 pairs)
             const bool unseenInAir = blindFor == pairsSeen && !(side.clear && side.loose == 0);
-            if (untilLocked && (side.pairs == pairsSeen || unseenInAir) && !lies(f)) return press(now, held = juraic::BTN_DOWN);
+            // A pair read as lying can lift again while earlier buttons arrive. Resume its down button when a clear
+            // picture shows it in the air; one such pair was left for 10 frames after a light of 80 frames.
+            if (following && side.pairs == pairsSeen && side.inHand && side.clear && side.pair.seen && !pairLying(side.pair, side.under)) untilLocked = true;
+            if (untilLocked && (side.pairs == pairsSeen || unseenInAir) && !lies(f)) {
+                // The window starts moving before the next pair appears. Release while it moves: waiting for it to
+                // stand still sent the old down button to 26 next pairs in 16 rounds with lights of 30 to 120 frames.
+                // An unread window alone cannot prove a lock. Keep untilLocked, and resume after nextSlide frames if
+                // neither the field nor the window has confirmed it (a window hidden for longer must not leave a pair).
+                if (!side.nextRead[0] && !side.nextRead[1] && windowReadAt > startNext && windowReadAt > windowPauseAt)
+                    windowPauseAt = t.frame;
+                if (windowPauseAt >= startNext && now < windowPauseAt + t.timing.nextSlide) return press(now, held = 0);
+                return press(now, held = juraic::BTN_DOWN);
+            }
             untilLocked = false;
             return press(now, held = 0);
         }
@@ -238,6 +252,7 @@ private:
     // pair as the button would come) the down button is held. The engine ahead of the game, or its pictures not to be
     // read just then, the pair let go of it fell on slowly by itself (seen on the real game: 100 frames for one pair).
     bool untilLocked = false;
+    int64_t windowReadAt = -1, windowPauseAt = -1; // last stable window, and the bounded release when it became unread
     std::unique_ptr<juraic::ai::Agent> nextAgent; // (replaceAgent)
     juraic::Rng noGarbage{1, 1}; // (settlePlayer lets garbage fall by it: there is none in the engine)
 

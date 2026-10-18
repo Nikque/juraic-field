@@ -1299,17 +1299,18 @@ struct DriveCounts {
 // after it in a fifth of the pictures of those frames). litAsAppears: one pair of 2P in three lit from 8 frames before it
 // appears, for that many frames. garbageAsLit: that many pieces of garbage fall on 2P before each of those pairs (sent
 // as the pair before is locked: the engine of the driver, which knows of no garbage, foresees the pair sooner).
+// noiseStream: the stream of the random noise on the pictures (another stream, the same round read otherwise).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
                        int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0,
-                       int litAsAppears = 0, int garbageAsLit = 0) {
+                       int litAsAppears = 0, int garbageAsLit = 0, uint64_t noiseStream = 7) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
     r.start(rules, seed);
     Canvas canvas(1280, 720, l);
-    Rng noise(seed, 7), shake(seed, 9), skipper(seed, 11);
+    Rng noise(seed, noiseStream), shake(seed, 9), skipper(seed, 11);
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
     const std::unique_ptr<ai::Agent> other = ai::makeAgent("x3", narrow);
@@ -1332,6 +1333,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     int oldFor = 0, hideFor = 0, spawns = 0; // (spawns: pairs of 2P that have appeared in the round)
     int lastTurn = -100;                     // the frame of the round the pair of 2P last turned in
     int64_t begunAt = -1;                    // the frame of the clock the driver began its last pair in
+    int64_t appearedAt = -1, firstBegunAt = -1; // the current pair's appearance and first start (a later restart keeps it)
     bool leftOver = false;                   // the pair of 2P that appeared last still takes buttons sent before it was begun
     uint8_t oldDir = 0;
     int alone = 0; // frames in a row the pair of 2P in the air took no button
@@ -1391,8 +1393,9 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         }
         if (movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, movedHidden);
         // (from the frame a pair appears in, until the frames take buttons the driver sent once it had begun that pair)
-        if (e[1].spawned) ++spawns, leftOver = true, n.appeared.push_back(clock);
-        if (leftOver && d.played >= spawns && from >= begunAt) leftOver = false;
+        if (e[1].spawned) ++spawns, leftOver = true, n.appeared.push_back(clock), appearedAt = clock, firstBegunAt = -1;
+        if (leftOver && firstBegunAt < 0 && begunAt >= appearedAt) firstBegunAt = begunAt;
+        if (leftOver && firstBegunAt >= 0 && from >= firstBegunAt) leftOver = false;
         if (leftOver && (buttons[1] & BTN_DOWN)) ++n.downAtSpawn, leftOver = false;
         if (hidden && e[1].control.rotated && r.player[1].phase == Phase::Control) hideFor = hidden;
         // (a pair the AI found no placement for - the field full - is not counted)
@@ -1679,6 +1682,72 @@ static void testPairsLitAsTheyAppear() {
               << " pairs seen counted as the round gave them; with garbage before it, " << unseen << " pairs begun unseen as they appeared, none left alone\n";
 }
 
+// An unread window may be a missing picture rather than the next pair. The release must expire while the field is
+// still unread, without losing the instruction to hold the current pair down.
+static void testWindowReleaseBounded() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 5}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    Driver d;
+    std::vector<int> waits;
+    d.agent = std::make_unique<EarlyAgent>(&waits);
+    d.lag = 5, d.takeLag = false;
+    int64_t at = 50000;
+    for (int k = 0; k < 40; ++k, ++at) f.step(empty, at), d.tick(f, at);
+    Reading first = empty;
+    first.side[1].next[0] = {1, 2}, first.side[1].next[1] = {3, 3};
+    first.side[1].point[SPAWN_X][23] = 5;
+    f.step(first, at), d.tick(f, at), ++at;
+    check(d.played == 1 && d.playing(), "the pair for the missing-window test was not begun");
+    Reading hidden = first;
+    hidden.side[1].unsure = 1;
+    for (int k = 0; k < 100 && d.playing(); ++k, ++at) f.step(hidden, at), d.tick(f, at);
+    check(!d.playing(), "the engine did not lock the pair for the missing-window test");
+    hidden.side[1].nextRead[0] = hidden.side[1].nextRead[1] = false;
+    for (int k = 0; k < f.tracker.timing.nextSlide + 4; ++k, ++at) {
+        f.step(hidden, at);
+        const uint8_t b = d.tick(f, at);
+        check(b == (k < f.tracker.timing.nextSlide ? 0 : BTN_DOWN),
+              "a missing window does not give a bounded release at frame " + std::to_string(k));
+    }
+    std::cout << "an unread window releases briefly, then holds the pair again when no lock was confirmed\n";
+}
+
+// Longer lights cover a pair through its lock and the next window moving on. The down button for that pair must end
+// before the next pair takes it, even when garbage has made the engine's field and timing different from the screen.
+static void testLongLights() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    for (const int garbage : {0, 6}) {
+        for (const int light : {50, 80, 120}) {
+            DriveCounts n;
+            for (const uint64_t seed : {120, 121}) {
+                auto a = ai::makeAgent("x3", narrow);
+                Driver::prepare(a.get());
+                driveRound(seed, 5, false, 2500, n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, light, garbage);
+            }
+            const std::string where = "light " + std::to_string(light) + ", garbage " + std::to_string(garbage) + ": ";
+            check(n.locks >= 20 && n.leftAlone == 0, where + std::to_string(n.leftAlone) + " pairs left alone in " + std::to_string(n.locks) + " locks");
+            check(n.downAtSpawn == 0, where + std::to_string(n.downAtSpawn) + " pairs took the previous pair's down button");
+            check(n.miscounted == 0, where + std::to_string(n.miscounted) + " pairs miscounted");
+        }
+    }
+    // (the noise of another stream: a pair read as lying where it locks was lifted again by the buttons still on their
+    //  way, and the screen showed it in the air for 10 frames with no button)
+    DriveCounts lifted;
+    auto a = ai::makeAgent("x3", narrow);
+    Driver::prepare(a.get());
+    driveRound(121, 5, false, 2500, lifted, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 80, 0, 27);
+    check(lifted.locks >= 20 && lifted.leftAlone == 0, "light 80, noise 27: " + std::to_string(lifted.leftAlone) + " pairs left alone in " + std::to_string(lifted.locks) + " locks");
+    check(lifted.downAtSpawn == 0 && lifted.miscounted == 0, "light 80, noise 27: the down button carried to the next pair or a pair miscounted");
+    std::cout << "long lights: no pair left alone, no down button carried to the next pair, no pair miscounted\n";
+}
+
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------
 
 static void testMenus() {
@@ -1860,6 +1929,8 @@ int main(int argc, char** argv) {
         testDriver();
         testTapsHeld();
         testPairsLitAsTheyAppear();
+        testLongLights();
+        testWindowReleaseBounded();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
         testMenus();
