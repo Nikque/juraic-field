@@ -92,6 +92,7 @@ public:
     // next. 1: a frame each (the fastest; the default).
     int tapHold = 1;
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
+    int64_t revisedChoices = 0; // choices discarded because their field or known pairs changed
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
     // after it has appeared, and falls by itself, before the first button moves it. The wait ends earlier when
     // one more frame of it would lock the pair or take the placement chosen out of its reach. Frames a pair
@@ -125,6 +126,7 @@ public:
         againLog.clear();
         path.buttons.clear();
         step = 0, last = 0, target = -1, idle = 0;
+        revising = false;
     }
 
     uint8_t frame(const Observation& o) override {
@@ -133,6 +135,31 @@ public:
         uint8_t b = 0;
         if (late && p.phase != Phase::Control) finish(); // the pair came to rest before its choice was made
         if (second && p.phase != Phase::Control && p.phase != Phase::Next) endSecond(-1); // ... before its second choice came
+        if (p.phase == Phase::Next || p.phase == Phase::Control) {
+            if (!revising && (thought || late || second) && !sameChoice(o)) {
+                revising = true, ++revisedChoices;
+                target = -1, step = 0;
+                path.buttons.clear();
+            }
+            if (revising) {
+                // A search owns the agent's working data until it returns. Keep sending input, then discard its result
+                // before beginning a choice of the corrected field. No old result may become the new pair's target.
+                if (!made() || (again_.valid() && again_.wait_for(std::chrono::seconds(0)) != std::future_status::ready))
+                    return last = p.phase == Phase::Control || p.wait == 1 ? BTN_DOWN : 0;
+                finish();
+                revising = false;
+                target = -1, step = 0;
+                path.buttons.clear();
+                if (p.phase == Phase::Control) {
+                    Observation fresh = o;
+                    Player& q = fresh.player[fresh.me];
+                    q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+                    think(fresh);
+                    late = true;
+                    if (!lateScript) lateLog.push_back(int(p.moves)), lateLog.push_back(0);
+                }
+            }
+        }
         if (p.phase == Phase::Next && !p.field.dead()) {
             if (!thought && (p.wait == 1 || p.wait <= ahead)) {
                 think(o);
@@ -185,7 +212,7 @@ public:
         if (late) {
             if (!lateScript) ++lateLog.back();
             if (idle > 0) --idle; // (slow hands: the pair is left alone in this frame anyway)
-            return ++lateFrames, last = 0;
+            return ++lateFrames, last = holdSecond ? BTN_DOWN : 0;
         }
         // (not while a second choice is being worked out: it works with the members of the class)
         if (p.phase == Phase::Control && target >= 0 && !second && !again_.valid()) airborne(o, coming, target, path.frames() - step);
@@ -242,6 +269,24 @@ protected:
     Rng rng{0};
 
 private:
+    // A new observation may correct a field or a pair already used by a choice. Newly revealed pairs alone use
+    // the ordinary second-choice policy; changed ones invalidate the choice even when the number known is unchanged.
+    void rememberChoice(const Observation& o) {
+        choiceField = o.self().field;
+        choiceIndex = o.self().nextPair;
+        choiceCount = 0;
+        for (int i = choiceIndex; choiceCount < 3 && o.mine().known(i); ++i) choicePairs[choiceCount++] = o.mine().pair(i);
+    }
+    bool sameChoice(const Observation& o) const {
+        const int index = o.self().nextPair - (o.self().phase == Phase::Control ? 1 : 0);
+        if (index != choiceIndex || !(choiceField == o.self().field)) return false;
+        for (int k = 0; k < choiceCount; ++k) {
+            if (!o.mine().known(index + k)) return false;
+            const Pair a = choicePairs[k], b = o.mine().pair(index + k);
+            if (a.axis != b.axis || a.child != b.child) return false;
+        }
+        return true;
+    }
     // The placements choose() is offered.
     unsigned offered(const Observation& o) {
         const Player& p = o.self();
@@ -266,6 +311,7 @@ private:
     void think(const Observation& o) {
         if (again_.valid()) again_.get(), again_ = std::future<int>(); // (a second choice whose pair had come to rest: its thread must have ended)
         thought = true, chosen = -1;
+        rememberChoice(o);
         asked = pending = second = false, shownAtThink = o.mine().count();
         const Player& p = o.self();
         const unsigned legal = offered(o);
@@ -287,6 +333,7 @@ private:
         const unsigned legal = offered(o);
         if (!legal || chosen < 0) return;
         ++againBegun;
+        rememberChoice(o);
         second = true, secondId = -1, secondFrames = 0, secondMove = int(o.self().moves);
         choosingAgain = true;
         if (thinking == Thinking::Free) {
@@ -406,6 +453,10 @@ private:
     int idle = 0; // handWait: the frames the pair in the air is still left alone
     uint8_t last = 0;
     bool thought = false; // the pair that appears next has its placement, or a thread at work on it
+    bool revising = false;
+    GameField choiceField;
+    int choiceIndex = -1, choiceCount = 0;
+    Pair choicePairs[3]{};
     bool late = false;    // Free: the pair is in the air and its placement is not made yet
     int lateLeft = 0;     // lateScript: the frames the pair still waits
     int chosen = -1;      // the placement, when it was worked out at once; -1 = none is legal

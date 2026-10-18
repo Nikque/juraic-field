@@ -67,6 +67,7 @@ public:
     }
 
     void step(const Reading& r, int64_t at) {
+        const SideTrack previous[2] = {tracker.side[0], tracker.side[1]};
         tracker.step(r, at);
         if (tracker.rounds != round) {
             round = tracker.rounds;
@@ -77,6 +78,8 @@ public:
             const SideTrack& t = tracker.side[s];
             SideModel& m = model[s];
             if (tracker.spawned[s]) {
+                if (!m.lying && m.known && previous[s].pairs == t.pairs - 1 && m.followed < t.pairs - 2)
+                    recover(s, previous[s], at);
                 if (m.lying) lock(s, at);
                 // A new pair: the pieces it appears over, against the game (only garbage may have come above them).
                 if (m.known && m.followed == t.pairs - 2) {
@@ -201,6 +204,33 @@ private:
             if (!contains(t.resting, shown(m.base)) || count(t.resting) > count(shown(m.base)) + 2) lock(s, at);
             else m.lying = false;
         }
+    }
+
+    // A landing hidden by an animation can be identified later by the field the next pair appears over. Only a
+    // resolved chain whose visible result matches (with possible garbage above it) is accepted. Distinct placements
+    // must put the same coloured pieces before resolving, or the move is ambiguous and stays unknown.
+    void recover(int s, const SideTrack& before, int64_t at) {
+        SideModel& m = model[s];
+        if (!before.colors.axis || !before.colors.child) return;
+        const juraic::GameField base = withHidden(before.under, m.core.field);
+        const juraic::GameField seen = shown(tracker.side[s].under);
+        const unsigned legal = juraic::legalPlacements(base);
+        int found = -1;
+        juraic::GameField placed;
+        for (int id = 0; id < juraic::PLACEMENTS; ++id) {
+            if (!(legal >> id & 1)) continue;
+            juraic::PlayerCore core = m.core;
+            juraic::Incoming other;
+            const juraic::TurnResult result = move(core, other, base, juraic::placement(id), before.colors, at);
+            if (!result.chains || !fits(seen, shown(core.field))) continue;
+            juraic::GameField candidate = base;
+            juraic::place(candidate, juraic::placement(id), before.colors);
+            if (found >= 0 && !(candidate == placed)) return;
+            found = id, placed = candidate;
+        }
+        if (found < 0) return;
+        m.base = base, m.at = juraic::placement(found), m.colors = before.colors, m.index = before.pairs - 1;
+        lock(s, at);
     }
 
     // The pair of side s that lay is locked where it lay: its move as the game makes it.

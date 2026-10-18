@@ -1032,10 +1032,16 @@ inline void observeWith(const Tracker& t, int me, const juraic::Rules& rules, co
     // The pairs shown (one not known, of a round not followed from its beginning: of the first colour in play), and no
     // other: before the pair of `me` appears the window shows it and the one after it; the pair after those is learnt
     // from the window when it has appeared, and the AI is then asked for its second choice (PlacementAgent::again).
-    const size_t count = std::max(t.pairsLearnt(), size_t(o.player[me].nextPair + 1));
-    o.tsumo.pairs.assign(count, Pair{o.rules.palette[0], o.rules.palette[0]});
-    for (size_t i = 0; i < t.pairsLearnt(); ++i)
-        if (t.knows(me, int(i))) o.tsumo.pairs[i] = t.pairOf(me, int(i));
+    // The sides can have counted their pairs differently. Keep their own window readings separate in the
+    // observation too; pairOf borrows from the other side only where this side has no reading of its own.
+    o.ownTsumo = true;
+    for (int s = 0; s < 2; ++s) {
+        ai::SeenTsumo& pairs = s == 0 ? o.tsumo : o.tsumo1;
+        const size_t count = std::max(t.pairsLearnt(), size_t(o.player[s].nextPair + 1));
+        pairs.pairs.assign(count, Pair{o.rules.palette[0], o.rules.palette[0]});
+        for (size_t i = 0; i < t.pairsLearnt(); ++i)
+            if (t.knows(s, int(i))) pairs.pairs[i] = t.pairOf(s, int(i));
+    }
 }
 
 inline bool observeSpawn(const Tracker& t, int me, const juraic::Rules& rules, juraic::ai::Observation& o) {

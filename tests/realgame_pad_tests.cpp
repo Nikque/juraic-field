@@ -93,6 +93,20 @@ static void testReading() {
         wchar_t self[MAX_PATH];
         GetModuleFileNameW(nullptr, self, MAX_PATH);
         check(_wcsicmp(play::windowProgram(w).c_str(), self) == 0 && play::findProgramWindow(self) == w, "a window is not found by its program");
+        // Starting the Windows capture can take longer than the interval used to check its ongoing rate.
+        // Wait for its first picture separately, then require fresh pictures over the same 1.5 seconds.
+        const DWORD waitingAt = GetTickCount();
+        int64_t before = 0;
+        while (GetTickCount() - waitingAt < 10000) {
+            {
+                const play::RealGameMode::Hold hold(m.state);
+                before = m.pictures;
+            }
+            if (before > 0) break;
+            pumpFor(w, 50);
+        }
+        const DWORD startupMs = GetTickCount() - waitingAt;
+        check(before > 0, "the first picture does not arrive within 10 seconds");
         pumpFor(w, 1500);
         int64_t pictures = 0;
         bool open = false;
@@ -101,13 +115,14 @@ static void testReading() {
             pictures = m.pictures, open = m.record.isOpen();
         }
         m.pump();
-        check(pictures > 10 && m.framesWithout < 30, "the pictures are not followed on the thread of the play");
+        check(pictures - before > 10 && m.framesWithout < 30, "the pictures are not followed on the thread of the play");
         check(open, "the record of the reading is not open");
         const std::filesystem::path recorded = m.record.folder();
         m.stopReading();
         check(m.reading == play::RealGameMode::Reading::Off && !m.record.isOpen(), "reading does not stop");
         check(std::filesystem::file_size(recorded / "readings.bin", ignored) > 1000, "the readings are not written to the record");
-        std::printf("a window read: %lld pictures followed on the thread of the play in 1.5 s\n", (long long)pictures);
+        std::printf("a window read: first picture after %lu ms; %lld fresh pictures followed on the thread of the play in 1.5 s\n", startupMs,
+                    (long long)(pictures - before));
     }
     DestroyWindow(w);
     std::filesystem::remove_all(folder, ignored);

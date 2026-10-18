@@ -138,6 +138,11 @@ public:
         }
         if (!agent) return held = 0;
         if (t.rounds != round || side.pairs < pairsSeen - (blindFor >= 0 ? 1 : 0)) {
+            if (t.rounds != round) {
+                following = untilLocked = false;
+                own = juraic::Player{};
+                past.clear();
+            }
             round = t.rounds, pairsSeen = 0, blindFor = -1;
             agent->startRound(me, seed++);
             stop();
@@ -365,7 +370,11 @@ private:
     bool play(const Follower& f, bool send) {
         juraic::ai::Observation o;
         f.observeAt(me, rules, own, next, o);
+        const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(agent.get());
+        const int64_t revisions = placing ? placing->revisedChoices : 0;
         const uint8_t wanted = uint8_t(agent->frame(o) & ~juraic::BTN_DROP);
+        if (placing && placing->revisedChoices != revisions)
+            note(next, "2P pair " + std::to_string(pairsSeen) + " choice renewed: the field or known pairs changed");
         if (send) held = wanted;
         juraic::Incoming nobody;
         juraic::advancePlayer(own, nobody, held, tsumo, rules, f.tracker.timing, roundFrame(f.tracker, next));

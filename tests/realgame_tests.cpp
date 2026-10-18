@@ -931,9 +931,153 @@ static void testSecondChoiceHeld() {
     std::cout << "the AI playing 2P goes straight down while its second choice is on its way\n";
 }
 
-// What the AI is shown before its pair appears (observeWith, the own side as the driver follows it, waiting for the
-// pair): the pairs the screen has shown and no other. The window shows the pair that comes and the one after it; the
-// pair after those is learnt when the pair has appeared, and the AI is then asked for its second choice.
+// A corrected field or known pair invalidates a choice, including a choice still running on another thread.
+static void testChoiceAfterCorrection() {
+    struct Choosing : ai::PlacementAgent {
+        std::atomic<int> choices{0};
+        std::atomic<bool> blocked{false}, entered{false};
+        int choose(const ai::Observation& o, Pair pair, unsigned) override {
+            ++choices;
+            entered = true;
+            while (blocked) std::this_thread::yield();
+            return o.self().field.f.empty() && pair.axis == 1 ? 0 : 1;
+        }
+        ~Choosing() override { blocked = false; finish(); }
+    };
+    ai::Observation o;
+    o.me = 1;
+    o.tsumo.pairs = {{1, 2}, {3, 4}, {2, 1}};
+    Player& p = o.player[1];
+    p.phase = Phase::Next, p.wait = 8;
+    Choosing a;
+    a.ahead = 10;
+    a.startRound(1, 1);
+    a.frame(o);
+    check(a.choices == 1, "the first choice was not made");
+    p.field.f.set(5, 0, GARBAGE);
+    p.wait = 1;
+    a.frame(o);
+    check(a.choices == 2 && a.targetPlacement() == 1, "a choice of the field before garbage fell is used on the corrected field");
+    a.startRound(1, 2);
+    p.field = {}, p.wait = 8;
+    a.frame(o);
+    o.tsumo.pairs[0] = {3, 2};
+    p.wait = 1;
+    a.frame(o);
+    check(a.choices == 4 && a.targetPlacement() == 1, "a choice of other pair colours is used after the colours are corrected");
+    // An unfinished choice of the old field cannot block the pad or be used when it returns.
+    Choosing slow;
+    slow.ahead = 10, slow.thinking = ai::Thinking::Free, slow.holdSecond = true;
+    slow.startRound(1, 3);
+    slow.blocked = true;
+    o.tsumo.pairs[0] = {1, 2};
+    p.field = {}, p.wait = 8;
+    slow.frame(o);
+    while (!slow.entered) std::this_thread::yield();
+    p.field.f.set(5, 0, GARBAGE), p.wait = 1;
+    const uint8_t held = slow.frame(o);
+    check(held != 0, "the pair is left alone while a stale asynchronous choice is being replaced");
+    p.phase = Phase::Control, p.nextPair = 1, p.colors = {1, 2}, p.pair = spawnPair(o.timing);
+    for (int k = 0; k < 20; ++k)
+        check(slow.frame(o) != 0, "the pair is left alone during an unfinished stale choice");
+    slow.blocked = false;
+    for (int k = 0; k < 100000 && slow.targetPlacement() < 0; ++k) {
+        slow.frame(o);
+        std::this_thread::yield();
+    }
+    check(slow.choices == 2 && slow.targetPlacement() == 1, "the asynchronous choice of the old field survives its correction");
+    std::cout << "choices are renewed after the field or pair colours change, without waiting for an unfinished choice\n";
+}
+
+static void testViewsOfBothSides() {
+    Tracker t;
+    t.pairsOf[0] = {{1, 2}, {2, 3}, {3, 4}};
+    t.pairsOf[1] = {{3, 4}, {4, 1}, {1, 2}};
+    t.knownOf[0] = t.knownOf[1] = {1, 1, 1};
+    ai::Observation o;
+    for (int me = 0; me < 2; ++me) {
+        observeWith(t, me, Rules{}, nullptr, 0, o);
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 3; ++k) {
+                const Pair got = o.pairsOf(s).pair(k), expected = t.pairOf(s, k);
+                check(got.axis == expected.axis && got.child == expected.child, "the AI sees the other side's window through its own pair numbering");
+            }
+    }
+    std::cout << "the AI sees the pairs of both sides as each side's window showed them\n";
+}
+
+static void testPredictionResetAtRound() {
+    struct Watching : ai::PlacementAgent {
+        GameField lastField;
+        uint8_t frame(const ai::Observation& o) override {
+            lastField = o.self().field;
+            return PlacementAgent::frame(o);
+        }
+        int choose(const ai::Observation&, Pair, unsigned legal) override { return std::countr_zero(legal); }
+    };
+    Follower f;
+    f.tracker.rounds = 1, f.tracker.roundStart = 0;
+    f.tracker.pairsOf[1] = {{1, 2}, {3, 4}};
+    f.tracker.knownOf[1] = {1, 1};
+    f.tracker.side[1].pairs = 1;
+    f.tracker.side[1].spawnedAt = 0;
+    f.model[1].known = true;
+    Driver d;
+    auto agent = std::make_unique<Watching>();
+    Watching* watching = agent.get();
+    d.agent = std::move(agent);
+    for (int at = 0; at < 100; ++at) {
+        f.tracker.frame = at;
+        d.tick(f, at);
+    }
+    check(watching->lastField.f.count() == 2, "the previous round has no predicted placement");
+    f.tracker.rounds = 2, f.tracker.roundStart = 100, f.tracker.frame = 101;
+    f.tracker.side[1] = {};
+    f.model[1] = {};
+    d.tick(f, 101);
+    check(watching->lastField.f.empty(), "the AI is shown the previous round's predicted field after a new round begins");
+    std::cout << "a new round discards the previous round's predicted field\n";
+}
+
+static void testChainAfterMissedLanding() {
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        Reading r;
+        for (SideRead& side : r.side) {
+            for (auto& column : side.point)
+                for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+            side.next[0] = {1, 2}, side.next[1] = {3, 4};
+            side.nextRead[0] = side.nextRead[1] = true;
+        }
+        Follower f;
+        int64_t at = 50000;
+        for (int k = 0; k < 40; ++k) f.step(r, at++);
+        for (int k = 0; k < 6; ++k) r.side[1].point[0][k] = 1;
+        if (scenario != 1)
+            for (int k = 0; k < 12; ++k) r.side[1].point[1][k] = GARBAGE;
+        for (int k = 0; k < 5; ++k) f.step(r, at++);
+        r.side[1].next[0] = {3, 4}, r.side[1].next[1] = {2, 2};
+        r.side[1].point[SPAWN_X][23] = 1;
+        for (int k = 0; k < 4; ++k) f.step(r, at++);
+        check(f.tracker.side[1].pairs == 1, "the firing pair was not seen");
+        // The landing and the whole chain are hidden. Only its result and the next pair are seen.
+        at += 120;
+        for (int k = 0; k < 6; ++k) r.side[1].point[0][k] = k < 2 ? 2 : EMPTY;
+        if (scenario == 2) r.side[1].point[0][0] = r.side[1].point[0][1] = 5;
+        r.side[1].point[SPAWN_X][23] = 3;
+        r.side[1].next[0] = {2, 2}, r.side[1].next[1] = {4, 4};
+        for (int k = 0; k < 4; ++k) f.step(r, at++);
+        check(f.tracker.side[1].pairs == 2, "the pair after the hidden chain was not seen");
+        if (scenario != 0) {
+            check(f.model[1].followed < 0, "an ambiguous or mismatching field was accepted as a recovered placement");
+            continue;
+        }
+        check(f.model[1].followed == 0 && f.model[1].chains == 1, "a chain whose landing was hidden is lost even though its resulting field identifies the move");
+        check(f.model[1].core.scoring.score == 40, "the hidden chain's score was not recovered");
+    }
+    std::cout << "a hidden landing is recovered from the next field only when its resolved move is identified\n";
+}
+
+// Before the pair appears, the AI sees only the pairs the screen has shown. The third pair is learnt afterwards.
 static void testShownPairsOnly() {
     Reading empty;
     for (SideRead& side : empty.side) {
@@ -1516,6 +1660,10 @@ int main(int argc, char** argv) {
         testPairsSeenOnce();
         testWindowBeforeRound();
         testShownPairsOnly();
+        testChoiceAfterCorrection();
+        testViewsOfBothSides();
+        testPredictionResetAtRound();
+        testChainAfterMissedLanding();
         testPairsAfterLight();
         testRow13Kept();
         testSecondChoiceHeld();
