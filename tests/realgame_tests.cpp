@@ -1016,7 +1016,8 @@ struct DriveCounts {
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
-                       int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0) {
+                       int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0,
+                       int litAsAppears = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -1048,6 +1049,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     bool leftOver = false;                   // the pair of 2P that appeared last still takes buttons sent before it was begun
     uint8_t oldDir = 0;
     int alone = 0; // frames in a row the pair of 2P in the air took no button
+    int litFor = 0; // litAsAppears: frames the light over 2P stays
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
         if (oldFor > 0 || hideFor > 0) {
             Round shown = r;
@@ -1057,10 +1059,14 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         } else {
             draw(canvas, l, r, false, noise, quietLanding);
         }
-        if (f % 12 < lit) {
+        // (litAsAppears: one pair of 2P in three lit from 8 frames before it appears, for that many frames - on the real game
+        //  the screen of 2P read nothing for 30 frames as a pair appeared)
+        if (litAsAppears && r.player[1].phase == Phase::Next && r.player[1].wait == 8 && spawns % 3 == 2) litFor = litAsAppears;
+        if (f % 12 < lit || litFor > 0) {
             // (a light over the field of 2P: nothing of it is read in this picture)
             const SideLayout& s = l.side[1];
             canvas.fill(s.left, s.bottom - 2 * s.cellHeight, s.left + s.cellWidth, s.bottom - s.cellHeight, LIGHT);
+            if (litFor > 0) --litFor;
         }
         follow.step(read(canvas.picture(), l), clock);
         if (later && f == laterAt) d.replaceAgent(std::move(later)); // (another AI chosen on the screen of the mode)
@@ -1319,6 +1325,27 @@ static void testTapsHeld() {
               << " of " << crowded.locks << "\n";
 }
 
+// The screen of 2P not to be read as a pair appears (a light over it, 30 frames: the real game in its thirteenth record,
+// third round). The driver begins no pair the screen has not shown, and the engine, which foresees the pair, stops two
+// frames before it (it may come later: garbage the engine does not know of falls first) - so the pair fell by itself
+// until the screen showed it, seen late. Once the window has moved on (the pair has come) and the time the engine
+// foresaw has gone by with the screen not read, the driver begins the pair it foresees, of the colours learnt; the
+// screen puts it right when it shows it.
+static void testPairsLitAsTheyAppear() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts lit;
+    for (int k = 0; k < 2; ++k) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(120 + uint64_t(k), 5, false, 2500, lit, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 30);
+    }
+    check(lit.locks >= 40 && lit.leftAlone == 0,
+          "with the screen of 2P lit as a pair appears, pairs of 2P left to fall by themselves " + std::to_string(lit.leftAlone) + " times (" + std::to_string(lit.locks) + " pairs)");
+    check(lit.hits * 100 >= lit.locks * 90, "with the screen of 2P lit as a pair appears, pairs brought where the AI chose " + std::to_string(lit.hits) + " of " + std::to_string(lit.locks));
+    std::cout << "the screen of 2P lit as a pair appears: no pair left alone, " << lit.hits << " of " << lit.locks << " where the AI chose\n";
+}
+
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------
 
 static void testMenus() {
@@ -1494,6 +1521,7 @@ int main(int argc, char** argv) {
         testSecondChoiceHeld();
         testDriver();
         testTapsHeld();
+        testPairsLitAsTheyAppear();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
         testMenus();

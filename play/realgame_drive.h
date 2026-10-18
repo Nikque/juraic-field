@@ -51,6 +51,9 @@ public:
     // What the real game shows of a move and of a turn of its pair, frames after it took them (its records: the column
     // of the frame before in a picture, the way of the child of two frames before, sometimes three).
     static constexpr int MOVE_SHOWN = 1, TURN_SHOWN = 2;
+    // A pair begun unseen (beginBlind): this many frames after the engine foresaw it, and taken again from the screen
+    // when the screen shows it more than BLIND_SLACK frames from then.
+    static constexpr int BLIND_AFTER = 3, BLIND_SLACK = 8;
     // A turn taken in the frame of a move or just after another turn is shown later still: the way before it was seen 5
     // or 6 frames after it in a fifth of the pictures of those frames of the eighth record (8 frames twice). A picture of
     // the pair turned the way the engine had it up to TURN_LATEST frames before puts nothing right.
@@ -134,19 +137,27 @@ public:
             noted = -2;
         }
         if (!agent) return held = 0;
-        if (t.rounds != round || side.pairs < pairsSeen) {
-            round = t.rounds, pairsSeen = 0;
+        if (t.rounds != round || side.pairs < pairsSeen - (blindFor >= 0 ? 1 : 0)) {
+            round = t.rounds, pairsSeen = 0, blindFor = -1;
             agent->startRound(me, seed++);
             stop();
             shots.clear(); // (a pair of the round before is not fitted: its pictures may be cut short)
         }
         if (side.pairs > pairsSeen) {
-            pairsSeen = side.pairs;
+            pairsSeen = side.pairs, blindFor = -1;
             begin(f, side);
+        } else if (blindFor >= 0 && side.pairs == blindFor && t.spawned[me]) {
+            // (the screen shows the pair begun unseen: taken from it if it came at another time than foreseen, or the
+            //  engine has put it already)
+            blindFor = -1;
+            if (!active || std::abs(side.spawnedAt - blindAt) > BLIND_SLACK) begin(f, side);
         }
         keepShot(f);
         if (!active) {
             wait(f, now);
+            if (blindDue(f, now)) beginBlind(f, now);
+        }
+        if (!active) {
             // (whether or not the screen's pair is followed: a pair not found - turned otherwise than the engine has it, a
             //  field read wrong - is still in the air, and let go it fell by itself for 45 frames on the real game)
             if (untilLocked && side.pairs == pairsSeen && !lies(f)) return press(now, held = juraic::BTN_DOWN);
@@ -196,6 +207,8 @@ private:
     uint8_t held = 0;
     int round = -1, pairsSeen = 0;
     int begunRound = -1; // the round of the last pair begun (the engine's field is of it)
+    int blindFor = -1;      // the pair begun unseen, until the screen shows it (-1: none)
+    int64_t blindAt = -1;   // ... the frame the engine had it appear
     int64_t checked = -1;
     int noted = -2; // the placement last noted (notes)
     int64_t steeredSeen = 0, againSeen = 0; // the agent's counts of the nearest placements taken and the second choices taken, as last noted
@@ -296,6 +309,53 @@ private:
         bool same = true;
         // (the frames from the picture to now have passed: the agent decides them, the game took what was held)
         const int64_t at = t.frame + lag; // (at least the frames the picture is behind)
+        while (active && next < at) same = play(f, false) && same;
+        if (!same) steer(f);
+    }
+
+    // The frame the next pair appeared in (as the screen would show it first), when the window of the next pairs has
+    // moved on since the last pair appeared (it moves on only after that pair is put): as the engine foresees it, waiting
+    // for it, or else the frame after the window stood still moved on (on the real game it stands still a frame before
+    // the pair shows - the engine may still run a chain the game did not have). -1: no pair has come.
+    int64_t appeared(const Tracker& t) const {
+        const SideTrack& side = t.side[me];
+        if (!following || own.phase == juraic::Phase::Control || side.shiftedAt <= side.spawnedAt + t.pairGap) return -1;
+        return own.phase == juraic::Phase::Next && own.wait <= 2 ? next + own.wait - 2 : side.shiftedAt + 1;
+    }
+    // The next pair has come and the screen does not show it: BLIND_AFTER frames after it appeared, the screen of the own
+    // side not read (a light over it). On the real game the screen of 2P read nothing for 30 frames as a pair appeared,
+    // and nothing played the pair until the screen showed it.
+    bool blindDue(const Follower& f, int64_t now) const {
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        const int64_t appears = appeared(t);
+        return pairsSeen > 0 && blindFor < 0 && side.pairs == pairsSeen && appears >= 0 && now >= appears + BLIND_AFTER && !side.clear;
+    }
+    // The next pair, begun unseen, of the colours learnt: the engine goes on from where it stopped (a chain it still ran
+    // run to its end at once), the pair appearing in the frame it came; the screen puts it right when it shows it.
+    void beginBlind(const Follower& f, int64_t now) {
+        const Tracker& t = f.tracker;
+        const int64_t appears = appeared(t);
+        for (int k = 0; k < 600 && own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control && !own.field.dead(); ++k) {
+            juraic::Incoming nobody;
+            juraic::PlayerEvents e = juraic::advancePlayer(own, nobody, 0, tsumo, rules, t.timing, roundFrame(t, next));
+            juraic::settlePlayer(own, rules, t.timing, noGarbage, e);
+        }
+        if (own.phase != juraic::Phase::Next) return;
+        own.wait = 1;
+        next = appears + 1;
+        pairsSeen = t.side[me].pairs + 1;
+        blindFor = pairsSeen, blindAt = appears;
+        startOwn = own, startNext = next;
+        past.clear();
+        checked = -1;
+        active = true, following = false, untilLocked = false;
+        ++played;
+        noted = -2;
+        note(f.tracker.frame, "2P pair " + std::to_string(pairsSeen) + " begun unseen: the screen not read, the engine had it appear in frame " + std::to_string(appears) +
+                                  ", lag " + std::to_string(lag));
+        bool same = true;
+        const int64_t at = now + lag;
         while (active && next < at) same = play(f, false) && same;
         if (!same) steer(f);
     }
