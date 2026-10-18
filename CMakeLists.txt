@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(juraic_field VERSION 0.9.2 LANGUAGES CXX)
+project(juraic_field VERSION 0.9.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
@@ -17,7 +17,9 @@ endif()
 add_library(juraic_engine STATIC
     generator/generator.cpp
     generator/runner.cpp
+    generator/grid_runner.cpp
     generator/generator.h
+    generator/grid_field.h generator/grid_generator.h generator/run_loop.h
     core/field_bits.h core/bit_field.h core/reach.h core/rng.h
     app/console_output.h)
 find_package(Threads REQUIRED)
@@ -44,9 +46,20 @@ endif()
 
 if(MSVC)
     # The playable game (Direct2D, XAudio2). One self-contained executable.
-    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h game/link.h)
+    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_capture_win.h play/realgame_pad_win.h play/realgame_log.h play/realgame_menu.h game/link.h)
     set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
-    target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32)
+    target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32 d3d11 dxgi dwmapi)
+    # The pad the mode of the real game presses 2P with: the client of the driver ViGEmBus (third_party/ViGEmClient, MIT).
+    add_library(vigem_client STATIC third_party/ViGEmClient/src/ViGEmClient.cpp)
+    target_include_directories(vigem_client PUBLIC third_party/ViGEmClient/include PRIVATE third_party/ViGEmClient/src)
+    target_link_libraries(vigem_client PUBLIC setupapi)
+    target_link_libraries(juraic_field_game PRIVATE vigem_client)
+    # The parts of that mode for finding faults (play/realgame_win.h): the record of each reading, a table read from
+    # realgame_layout.txt, the key S that saves a picture of the real game, and the counters on the screen of the mode.
+    option(JURAIC_REALGAME_DEBUG "Build the parts of the mode of the real game for finding faults" OFF)
+    if(JURAIC_REALGAME_DEBUG)
+        target_compile_definitions(juraic_field_game PRIVATE JURAIC_REALGAME_DEBUG=1)
+    endif()
     # The pads of Sony and Nintendo are read through SDL 3 (play/pad.h), built as a static library and found by
     # CMAKE_PREFIX_PATH. Without it they are read as raw controllers of Windows, as every pad other than Xbox pads.
     find_package(SDL3 CONFIG)
@@ -110,6 +123,11 @@ target_link_libraries(ai_match PRIVATE Threads::Threads)
 # One player by the beam search: how large a chain, how fast.
 add_executable(ai_toko tools/ai_toko.cpp tools/toko_game.h ai/build.h ai/detect.h ai/params.h)
 target_link_libraries(ai_toko PRIVATE Threads::Threads)
+# A saved picture of the real game's window read with a table (play/realgame_read.h).
+add_executable(realgame_read tools/realgame_read.cpp play/realgame_read.h)
+# Speed and success rate of the search on the 10 x 19 field.
+add_executable(grid_bench tools/grid_bench.cpp)
+target_link_libraries(grid_bench PRIVATE juraic_engine)
 # Tuning of the weights with one player.
 add_executable(ai_tune tools/ai_tune.cpp tools/toko_game.h ai/build.h ai/detect.h ai/params.h)
 target_link_libraries(ai_tune PRIVATE Threads::Threads)
@@ -121,10 +139,15 @@ if(BUILD_TESTING)
     add_executable(core_tests tests/core_tests.cpp)
     target_link_libraries(core_tests PRIVATE juraic_engine)
     add_test(NAME core_and_generator COMMAND core_tests)
-    add_executable(core_tests_portable tests/core_tests.cpp generator/generator.cpp generator/runner.cpp)
+    add_executable(core_tests_portable tests/core_tests.cpp generator/generator.cpp generator/runner.cpp generator/grid_runner.cpp)
     target_compile_definitions(core_tests_portable PRIVATE JURAIC_FORCE_PORTABLE)
     target_link_libraries(core_tests_portable PRIVATE Threads::Threads)
     add_test(NAME core_and_generator_portable COMMAND core_tests_portable)
+    # The field of any size and the template search: against the 6 x 13 engine
+    # and against a cell-by-cell reference on 10 x 19.
+    add_executable(grid_tests tests/grid_tests.cpp)
+    target_link_libraries(grid_tests PRIVATE juraic_engine)
+    add_test(NAME grid_field_and_search COMMAND grid_tests)
 
     # Move-level game rules (game/): cell-by-cell checks, and a log that the
     # independent Python simulator replays.
@@ -150,6 +173,10 @@ if(BUILD_TESTING)
     add_executable(ai_tests tests/ai_tests.cpp ai/observe.h ai/duel.h ai/input.h ai/detect.h ai/params.h ai/build.h ai/gaze.h ai/value.h ai/exchange.h ai/pace.h ai/tactics.h ai/level.h)
 target_link_libraries(ai_tests PRIVATE Threads::Threads)
     add_test(NAME ai COMMAND ai_tests)
+    # The reading of the real game's screen (play/realgame_read.h, realgame_follow.h), with pictures drawn from rounds of this program.
+    add_executable(realgame_tests tests/realgame_tests.cpp play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_log.h play/realgame_menu.h ai/observe.h ai/agents.h)
+    target_link_libraries(realgame_tests PRIVATE Threads::Threads)
+    add_test(NAME realgame_screen_read COMMAND realgame_tests "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME ai_match_same_result COMMAND ai_match --self-test)
     add_test(NAME ai_toko_same_result COMMAND ai_toko --self-test)
     add_test(NAME ai_tune_same_result COMMAND ai_tune --self-test)
@@ -186,6 +213,17 @@ target_link_libraries(ai_tests PRIVATE Threads::Threads)
             target_link_libraries(pad_tests PRIVATE SDL3::SDL3 windowsapp xinput)
             add_test(NAME game_pads COMMAND pad_tests)
         endif()
+        if(MSVC)
+            # The virtual pad of the mode of the real game (play/realgame_win.h): plugged in only with
+            # JURAIC_TEST_VIRTUAL_PAD=1 set, skipped otherwise.
+            add_executable(realgame_pad_tests tests/realgame_pad_tests.cpp play/realgame_win.h play/realgame_pad_win.h)
+            target_link_libraries(realgame_pad_tests PRIVATE vigem_client windowsapp d3d11 dxgi dwmapi user32)
+            if(JURAIC_REALGAME_DEBUG)
+                target_compile_definitions(realgame_pad_tests PRIVATE JURAIC_REALGAME_DEBUG=1)
+            endif()
+            add_test(NAME realgame_virtual_pad COMMAND realgame_pad_tests)
+            set_tests_properties(realgame_virtual_pad PROPERTIES SKIP_RETURN_CODE 77)
+        endif()
     endif()
     if(Python3_Interpreter_FOUND)
         if(WIN32)
@@ -214,6 +252,11 @@ target_link_libraries(ai_tests PRIVATE Threads::Threads)
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_all_chains.py"
                 "$<TARGET_FILE:random_19_chain>" "${CMAKE_CURRENT_SOURCE_DIR}/config.ini")
         set_tests_properties(all_chain_lengths PROPERTIES TIMEOUT 300)
+        # The same for the 10 x 18 field: chain lengths 1 to 47.
+        add_test(NAME all_chain_lengths_10x18
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_all_wide.py"
+                "$<TARGET_FILE:random_19_chain>" "${CMAKE_CURRENT_SOURCE_DIR}/config.ini")
+        set_tests_properties(all_chain_lengths_10x18 PROPERTIES TIMEOUT 1500)
     endif()
 endif()
 

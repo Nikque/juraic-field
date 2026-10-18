@@ -16,6 +16,11 @@
 //
 // The path is exact: it is made with stepPair itself, so playing its buttons
 // from the same state locks the pair in its last frame.
+//
+// tapHold above 1: every tap is pressed that many frames and let go as many
+// before the next (for a game played through a pad whose frames now and then
+// take the buttons of the frame before or after: a tap is then neither lost
+// nor run into the next one; below the auto-repeat's delay).
 #include "../game/control.h"
 #include <algorithm>
 #include <functional>
@@ -33,6 +38,7 @@ struct InputPath {
 class InputPlanner {
 public:
     int maxStates = 1024;
+    int tapHold = 1; // frames a tap is pressed, and let go before the next (1: the fastest)
 
     // `from` is the pair before the first frame of the path (PairControl::held =
     // the buttons of the frame before). For a pair that is about to appear:
@@ -64,10 +70,15 @@ public:
                 out.buttons.push_back(b);
                 stepPair(p, field, b, timing, speedPercent);
             };
-            if (rootRelease) press(0);
+            if (rootRelease)
+                for (int k = 0; k < tapHold; ++k) press(0);
             for (size_t i = macros.size(); i-- > 0;) {
-                if (macros[i] != WAIT) press(TAPS[macros[i]]);
-                press(0);
+                if (macros[i] == WAIT) {
+                    press(0);
+                    continue;
+                }
+                for (int k = 0; k < tapHold; ++k) press(TAPS[macros[i]]);
+                for (int k = 0; k < tapHold; ++k) press(0);
             }
         }
         if (!p.locked) finish(field, p, target, timing, speedPercent, clean, out.softDropRows, &out.buttons);
@@ -102,10 +113,11 @@ private:
 
     // The straight way from p: returns the frames until the pair locks at the
     // target, 0 when it locks elsewhere. clean = nothing got in its way.
-    static int finish(const GameField& field, PairControl p, Placement target, const Timing& timing, int speedPercent, bool& clean,
-                      int& soft, std::vector<uint8_t>* buttons) {
+    int finish(const GameField& field, PairControl p, Placement target, const Timing& timing, int speedPercent, bool& clean, int& soft,
+               std::vector<uint8_t>* buttons) const {
         clean = true;
         soft = 0;
+        if (tapHold > 1) return finishHeld(field, p, target, timing, speedPercent, clean, soft, buttons);
         for (int frame = 1; frame <= MAX_FRAMES; ++frame) {
             uint8_t b = BTN_DOWN;
             const uint8_t turn = turnButton(p.dir, target.dir);
@@ -115,6 +127,37 @@ private:
             const ControlEvents e = stepPair(p, field, b, timing, speedPercent);
             if (((b & (BTN_CW | BTN_CCW)) && !e.rotated) || ((b & (BTN_LEFT | BTN_RIGHT)) && !e.moved) || e.kicked || e.quickTurned)
                 clean = false;
+            soft += e.dropBonus;
+            if (buttons) buttons->push_back(b);
+            if (e.locked) return p.x == target.x && p.dir == target.dir ? frame : 0;
+        }
+        return 0;
+    }
+
+    // finish with taps of tapHold frames, let go as many frames between them.
+    int finishHeld(const GameField& field, PairControl p, Placement target, const Timing& timing, int speedPercent, bool& clean, int& soft,
+                   std::vector<uint8_t>* buttons) const {
+        constexpr uint8_t KIND[2] = {BTN_CW | BTN_CCW, BTN_LEFT | BTN_RIGHT};
+        int on[2] = {0, 0}, off[2] = {tapHold, tapHold}; // frames each kind of tap has been pressed / let go in a row
+        for (int k = 0; k < 2; ++k)
+            if (p.held & KIND[k]) on[k] = tapHold, off[k] = 0; // (a tap held as the way begins: let go first)
+        for (int frame = 1; frame <= MAX_FRAMES; ++frame) {
+            uint8_t b = BTN_DOWN;
+            const uint8_t want[2] = {turnButton(p.dir, target.dir), uint8_t(p.x < target.x ? BTN_RIGHT : p.x > target.x ? BTN_LEFT : 0)};
+            for (int k = 0; k < 2; ++k) {
+                if (p.held & KIND[k]) {
+                    if (on[k] < tapHold) b |= uint8_t(p.held & KIND[k]);
+                } else if (want[k] && off[k] >= tapHold) {
+                    b |= want[k];
+                }
+            }
+            const uint8_t pressed = uint8_t(b & ~p.held);
+            const ControlEvents e = stepPair(p, field, b, timing, speedPercent);
+            if (((pressed & KIND[0]) && !e.rotated) || ((pressed & KIND[1]) && !e.moved) || e.kicked || e.quickTurned) clean = false;
+            for (int k = 0; k < 2; ++k) {
+                if (b & KIND[k]) ++on[k], off[k] = 0;
+                else ++off[k], on[k] = 0;
+            }
             soft += e.dropBonus;
             if (buttons) buttons->push_back(b);
             if (e.locked) return p.x == target.x && p.dir == target.dir ? frame : 0;
@@ -164,8 +207,7 @@ private:
         Node root{from, -1, 0, WAIT};
         rootRelease = (from.held & TAP_BUTTONS) || from.moveWait;
         if (rootRelease) {
-            stepPair(root.pair, field, 0, timing, speedPercent);
-            root.frames = 1;
+            for (int k = 0; k < tapHold && !root.pair.locked; ++k) stepPair(root.pair, field, 0, timing, speedPercent), ++root.frames;
             if (root.pair.locked) return;
         }
         nodes.push_back(root);
@@ -174,7 +216,7 @@ private:
             bool clean;
             int soft;
             const int rest = finish(field, root.pair, target, timing, speedPercent, clean, soft, nullptr);
-            if (rest && (!best || 1 + rest < best)) best = 1 + rest, bestNode = 0;
+            if (rest && (!best || root.frames + rest < best)) best = root.frames + rest, bestNode = 0;
         }
         // The earliest the pair of a state can lock at the target: two frames per
         // column, and one frame per half cell down to the row where it locks
@@ -196,14 +238,9 @@ private:
             const int parent = int(uint32_t(top));
             for (uint8_t macro = 0; macro <= WAIT; ++macro) {
                 Node n{nodes[size_t(parent)].pair, parent, nodes[size_t(parent)].frames, macro};
-                if (macro != WAIT) {
-                    stepPair(n.pair, field, TAPS[macro], timing, speedPercent);
-                    ++n.frames;
-                }
-                if (!n.pair.locked) {
-                    stepPair(n.pair, field, 0, timing, speedPercent);
-                    ++n.frames;
-                }
+                if (macro != WAIT)
+                    for (int k = 0; k < tapHold && !n.pair.locked; ++k) stepPair(n.pair, field, TAPS[macro], timing, speedPercent), ++n.frames;
+                for (int k = 0; k < (macro == WAIT ? 1 : tapHold) && !n.pair.locked; ++k) stepPair(n.pair, field, 0, timing, speedPercent), ++n.frames;
                 if (n.pair.locked) {
                     if (n.pair.x == target.x && n.pair.dir == target.dir && (!best || n.frames < best))
                         nodes.push_back(n), best = n.frames, bestNode = int(nodes.size()) - 1;

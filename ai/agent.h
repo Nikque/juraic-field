@@ -55,6 +55,7 @@ public:
     // waited there wait as long here, so that the buttons are those of the game. Null = no pair waits.
     const std::vector<int>* lateScript = nullptr;
     int64_t rerouted = 0;   // pairs whose chosen placement had no path from where they appeared, and that went to another (for tools)
+    int64_t steered = 0;    // pairs sent to the nearest placement they could still reach, no way leading to the chosen one any more (steer, a late choice; for tools)
     int lastWanted = -1, lastTaken = -1; // ... the last of them
     // true: a placement is offered to choose() only when the pair has a path to it from where it
     // appears. (legalPlacements follows the rule of reach of core/reach.h; on a field with columns
@@ -87,7 +88,11 @@ public:
     // no second choice 160.) false: the pair sets out for the first choice at once (the default:
     // Params::thinkHold 0).
     bool holdSecond = false;
+    // The taps of the buttons it gives (InputPlanner::tapHold): pressed this many frames, let go as many before the
+    // next. 1: a frame each (the fastest; the default).
+    int tapHold = 1;
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
+    int64_t revisedChoices = 0; // choices discarded because their field or known pairs changed
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
     // after it has appeared, and falls by itself, before the first button moves it. The wait ends earlier when
     // one more frame of it would lock the pair or take the placement chosen out of its reach. Frames a pair
@@ -97,6 +102,23 @@ public:
 
     ~PlacementAgent() override { finish(); }
 
+    // The pair in play is not where the buttons this agent gave would have brought it (an agent that plays a game
+    // through another program, whose buttons reach that game late or not at all): the way to the placement chosen is
+    // planned again from where `o` shows the pair. No way left to it: the pair goes to the placement nearest to it that
+    // it can still reach (as a choice that came after the pair had fallen behind a column); none: down where it is.
+    void steer(const Observation& o) {
+        planner.tapHold = tapHold;
+        if (o.self().phase != Phase::Control || late || target < 0) return;
+        step = 0;
+        const Player& p = o.self();
+        if (planner.plan(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) return;
+        const int best = nearest(o, p.pair, target);
+        if (best >= 0 && planner.plan(p.field, p.pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best, ++steered;
+        else path.buttons.clear();
+    }
+    // The placement the pair in play is brought to (-1: none yet).
+    int targetPlacement() const { return target; }
+
     void startRound(int, uint64_t seed) override {
         finish();
         rng = Rng(seed, AGENT_STREAM);
@@ -104,13 +126,40 @@ public:
         againLog.clear();
         path.buttons.clear();
         step = 0, last = 0, target = -1, idle = 0;
+        revising = false;
     }
 
     uint8_t frame(const Observation& o) override {
+        planner.tapHold = tapHold;
         const Player& p = o.self();
         uint8_t b = 0;
         if (late && p.phase != Phase::Control) finish(); // the pair came to rest before its choice was made
         if (second && p.phase != Phase::Control && p.phase != Phase::Next) endSecond(-1); // ... before its second choice came
+        if (p.phase == Phase::Next || p.phase == Phase::Control) {
+            if (!revising && (thought || late || second) && !sameChoice(o)) {
+                revising = true, ++revisedChoices;
+                target = -1, step = 0;
+                path.buttons.clear();
+            }
+            if (revising) {
+                // A search owns the agent's working data until it returns. Keep sending input, then discard its result
+                // before beginning a choice of the corrected field. No old result may become the new pair's target.
+                if (!made() || (again_.valid() && again_.wait_for(std::chrono::seconds(0)) != std::future_status::ready))
+                    return last = p.phase == Phase::Control || p.wait == 1 ? BTN_DOWN : 0;
+                finish();
+                revising = false;
+                target = -1, step = 0;
+                path.buttons.clear();
+                if (p.phase == Phase::Control) {
+                    Observation fresh = o;
+                    Player& q = fresh.player[fresh.me];
+                    q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+                    think(fresh);
+                    late = true;
+                    if (!lateScript) lateLog.push_back(int(p.moves)), lateLog.push_back(0);
+                }
+            }
+        }
         if (p.phase == Phase::Next && !p.field.dead()) {
             if (!thought && (p.wait == 1 || p.wait <= ahead)) {
                 think(o);
@@ -163,7 +212,7 @@ public:
         if (late) {
             if (!lateScript) ++lateLog.back();
             if (idle > 0) --idle; // (slow hands: the pair is left alone in this frame anyway)
-            return ++lateFrames, last = 0;
+            return ++lateFrames, last = holdSecond ? BTN_DOWN : 0;
         }
         // (not while a second choice is being worked out: it works with the members of the class)
         if (p.phase == Phase::Control && target >= 0 && !second && !again_.valid()) airborne(o, coming, target, path.frames() - step);
@@ -220,6 +269,24 @@ protected:
     Rng rng{0};
 
 private:
+    // A new observation may correct a field or a pair already used by a choice. Newly revealed pairs alone use
+    // the ordinary second-choice policy; changed ones invalidate the choice even when the number known is unchanged.
+    void rememberChoice(const Observation& o) {
+        choiceField = o.self().field;
+        choiceIndex = o.self().nextPair;
+        choiceCount = 0;
+        for (int i = choiceIndex; choiceCount < 3 && o.mine().known(i); ++i) choicePairs[choiceCount++] = o.mine().pair(i);
+    }
+    bool sameChoice(const Observation& o) const {
+        const int index = o.self().nextPair - (o.self().phase == Phase::Control ? 1 : 0);
+        if (index != choiceIndex || !(choiceField == o.self().field)) return false;
+        for (int k = 0; k < choiceCount; ++k) {
+            if (!o.mine().known(index + k)) return false;
+            const Pair a = choicePairs[k], b = o.mine().pair(index + k);
+            if (a.axis != b.axis || a.child != b.child) return false;
+        }
+        return true;
+    }
     // The placements choose() is offered.
     unsigned offered(const Observation& o) {
         const Player& p = o.self();
@@ -244,6 +311,7 @@ private:
     void think(const Observation& o) {
         if (again_.valid()) again_.get(), again_ = std::future<int>(); // (a second choice whose pair had come to rest: its thread must have ended)
         thought = true, chosen = -1;
+        rememberChoice(o);
         asked = pending = second = false, shownAtThink = o.mine().count();
         const Player& p = o.self();
         const unsigned legal = offered(o);
@@ -265,6 +333,7 @@ private:
         const unsigned legal = offered(o);
         if (!legal || chosen < 0) return;
         ++againBegun;
+        rememberChoice(o);
         second = true, secondId = -1, secondFrames = 0, secondMove = int(o.self().moves);
         choosingAgain = true;
         if (thinking == Thinking::Free) {
@@ -356,8 +425,15 @@ private:
             return;
         }
         // The pair cannot get there any more: the choice came when it had fallen behind a column.
-        // It goes to the placement it can still reach whose two pieces come down nearest to the
-        // columns chosen; of equal ones the one with the smaller number.
+        const int best = nearest(o, pair, id);
+        if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best, ++steered;
+        else path.buttons.clear();
+    }
+    // The placement `pair` can still reach whose two pieces come down nearest to the columns of placement `id`; of equal
+    // ones the one with the smaller number. -1: none.
+    int nearest(const Observation& o, const PairControl& pair, int id) {
+        const Player& p = o.self();
+        const unsigned legal = legalPlacements(p.field);
         const Placement want = placement(id);
         int best = -1, bestApart = 0;
         for (int other = 0; other < PLACEMENTS; ++other) {
@@ -368,8 +444,7 @@ private:
             InputPath there;
             if (planner.plan(p.field, pair, t, o.timing, o.rules.speedPercent, there)) best = other, bestApart = apart;
         }
-        if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best;
-        else path.buttons.clear();
+        return best;
     }
 
     InputPlanner planner;
@@ -378,6 +453,10 @@ private:
     int idle = 0; // handWait: the frames the pair in the air is still left alone
     uint8_t last = 0;
     bool thought = false; // the pair that appears next has its placement, or a thread at work on it
+    bool revising = false;
+    GameField choiceField;
+    int choiceIndex = -1, choiceCount = 0;
+    Pair choicePairs[3]{};
     bool late = false;    // Free: the pair is in the air and its placement is not made yet
     int lateLeft = 0;     // lateScript: the frames the pair still waits
     int chosen = -1;      // the placement, when it was worked out at once; -1 = none is legal

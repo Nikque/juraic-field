@@ -82,6 +82,7 @@ Japanese, with a short part in English).
 | 対戦（2 人） | two players on one PC |
 | 対戦（人 対 AI） | a person (1P) against the AI Juraic |
 | 観戦（AI 対 AI） | two AIs to watch |
+| 実機の 2P を Juraic が操作 | Windows only: Juraic plays 2P of the real game through a virtual pad (see below) |
 | ネット対戦（人 対 人） | two people on two PCs, connected directly (see below) |
 | リプレイを見る | play a saved replay |
 | 設定 | rules, controls, AI, display and sound |
@@ -162,6 +163,24 @@ five, and as numbers ("★ won / needed") beyond that.
   to play the same moves in every run - are not in this repository.
 - Parts of the AI follow Ama: see [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt).
 
+## Juraic playing 2P of the real game (Windows, a trial)
+
+- In an offline match of two players of the real game, running on the same PC, the program reads the real game's
+  window and Juraic plays 2P through a virtual pad. 1P is a person. It does not work in online matches.
+- 実機の 2P を Juraic が操作 in the menu looks for the real game's window, takes the place of 2P, chooses its
+  character and kind of controls, and plays 2P once a match begins. The kind and the level of the AI can be changed
+  on that screen (each time it opens they start from those of the 2P side in the settings).
+- The virtual pad needs the driver ViGEmBus, which is not included: install it yourself.
+- **Juraic in this mode is weaker than Juraic in the matches of this program.** It knows the fields and the pairs
+  only by reading the real game's screen, which it sometimes reads wrong or cannot read for a while; the presses of
+  the pad reach the real game late, and the way they are pressed and the timing differ from this program's matches.
+  The strength of the levels and the measurement above do not hold in this mode, and no rate of wins against the
+  real game has been measured.
+- The parts for finding faults - the record of each reading (in `realgame\<date and time>` next to the executable;
+  it can take more than 2 GB at a time), the key S that saves a picture of the real game, the table read from
+  `realgame_layout.txt` and the counters on the screen - are built only with `JURAIC_REALGAME_DEBUG=ON` in CMake;
+  the released packages have none of them.
+
 ## Matches over a network
 
 - Two PCs are connected directly. One opens a room (部屋を立てる), the other enters the address of that PC and
@@ -211,6 +230,7 @@ Do not show the outside address in a stream or in public, and take the forwardin
 A C++20 program that randomly generates boards (three to five colours) which fire an exact
 chain of 1 to 19 waves when one last pair is placed. The URL of every board found is appended to
 `19chain_urls.txt`. The shipped settings generate 100 new 19-chain boards of 76 pieces in four colours.
+With the field set to 10 columns × 18 rows it generates chains of 1 to 47 waves ("10 × 18 fields" below).
 
 All board work is done on bitboards: one 16-bit lane per column, six columns in one SSE register,
 three registers for the colour code (48 bytes per board). The same core (`core/`) is used by solo play,
@@ -219,7 +239,7 @@ versus play and the AI.
 ### Windows GUI
 
 `JuraicFieldGenerator.exe` offers settings, asynchronous generation with cancellation, a result list, a
-6×13 board and chain playback. The CLI (`random_19_chain.exe` / `run.cmd`) remains available. See
+6×13 or 10×19 board and chain playback. The CLI (`random_19_chain.exe` / `run.cmd`) remains available. See
 [GUI_README.md](GUI_README.md) (Japanese) for usage and [URL_FORMATS.md](URL_FORMATS.md) for the simulator URLs.
 The board editor supports five colours, garbage, point, hard and iron pieces and fixed walls; these
 special kinds are never generated.
@@ -318,14 +338,15 @@ order, so **the same settings give the same boards in the same order for any thr
 
 | Key | Meaning | Shipped |
 | --- | --- | --- |
-| `target_chain` | number of waves, 1-19 | 19 |
+| `field_columns`, `field_rows` | columns and rows that clear (one hidden row above them): 6 and 12, or 10 and 18 | 6, 12 |
+| `target_chain` | number of waves, 1-19 (1-47 on 10 × 18) | 19 |
 | `target_success_count` | new unique boards to save in this run | 100 |
 | `initial_seed` | random seed (unsigned 64-bit) | 20261004 |
 | `color_count` | 3, 4 or 5 | 4 |
 | `beam_width` | boards kept per step | 48 |
 | `restarts` | maximum number of independent attempts | 100000 |
 | `candidates_per_parent` | children kept per board | 2 |
-| `min_extra_pieces` / `max_extra_pieces` | range of extra pieces, at most `78 - 4 * target_chain` | 0 / 0 |
+| `min_extra_pieces` / `max_extra_pieces` | range of extra pieces, at most `78 - 4 * target_chain` (`188 - 4 * target_chain` on 10 × 18) | 0 / 0 |
 | `threads` | search threads, 0 = automatic (half of the logical processors) | 0 |
 
 The first six keys are required.
@@ -346,6 +367,53 @@ Other work was running on the machine, so the numbers are indicative.
 
 v0.3.0 also searched for a build sequence from an empty board, so this is not a like-for-like comparison.
 See [BENCHMARK.md](BENCHMARK.md) (Japanese).
+
+### 10 × 18 fields
+
+With `field_columns = 10` and `field_rows = 18` in `config.ini` (in the GUI: "10列×18段" under "盤面") the
+generator works on a field of 10 columns:
+
+- the lower 18 rows connect and clear; the 19th row is hidden: it never connects or clears but falls when the
+  pieces below it disappear; nothing is put into a 20th row;
+- pairs appear in the fifth column, and the game is over when the fifth or the sixth column reaches the 18th
+  row: those two cells are empty after the chain and before the last pair;
+- the reach rule is the one above with the rows moved (17 or lower: passable; 19: never; 18: only while the
+  axis piece is lifted into the 19th row);
+- 1 to 47 chains: before the last pair the fifth and sixth columns hold at most 17 pieces, so a board holds at
+  most `8 × 19 + 2 × 17 + 2 = 188` pieces, `188 / 4 = 47` waves; extra pieces up to `188 - 4 * target_chain`.
+
+No simulator site shows a field of this size, so no URL is written; instead a **board code** is appended to
+`boards_10x18.txt` (and used to skip duplicates): `10x18:` and the 190 cells from the 19th row down, each
+row left to right, as `.` (empty) and `R G B Y P`. The output lists `field=10x18` before the board and a
+`board code:` line instead of the URL. The GUI shows, plays and edits these boards.
+
+The search is the same backward insertion, on a field type with one 32-bit word per column
+(`generator/grid_field.h`) and the same steps written for any field (`generator/grid_generator.h`); on
+6 × 13 that search finds, attempt by attempt, exactly the boards of the 6 × 13 search
+(`tests/grid_tests.cpp`). Boards with at most 20 cells to spare follow a plan: before the last 12 steps the
+columns more than two away from the fifth and sixth are filled and room for the last steps is kept next to
+them; in the last 12 steps the new group goes near the top there; at every step the boards with the least
+room, weighted by the distance from the fifth and sixth columns, are kept. For 47 chains in four colours,
+attempts without the plan found 0 boards of 300, with it 50 of 200 (`tools/grid_bench.cpp`; the numbers
+behind every value are in `generator/grid_field.h`).
+
+Speed (2026-10-17, same machine and settings as above, 100 boards each, all checked by the independent verifier):
+47 chains of 188 pieces in four colours 10.98 s on one thread (9.1/s) and 1.13 s on 16 threads (88/s); in
+five colours 4.50 s and 0.58 s; 40 chains in four colours 0.56 s on 16 threads.
+
+Three colours leave few insertions whose colour none of their neighbours has, so for three colours the plan
+is changed (`Grid10x19ThreeColors`): no room is kept next to the fifth and sixth columns (the whole board
+counts as next to them), boards on which the next step can insert nothing are dropped, steps in height between
+neighbouring columns weigh heavily when boards are kept (a deep narrow gap takes upright groups of four only),
+and four times as many boards are kept in the last six steps. 46 chains in three colours: 0 of 300 attempts
+with the plan of four colours, 119 of 300 with this one; 47 chains: 100 boards in 323 s on one thread, 33 s
+on 16 threads. In four and five colours this plan finds more boards an attempt but fewer a second, so it is
+used for three colours only.
+
+Of the 555 settings of 1 to 47 chains × three to five colours × extra pieces (none, one, the largest number,
+a range up to it), one board each within 20000 attempts or 60 seconds (2026-10-17, four threads; three colours
+measured again with the plan of v0.9.4): every setting in four and five colours was found, and in three
+colours every setting but those with the largest number of extra pieces for 8, 9, 19, 20, 22 and 24-27 chains.
 
 ## Build and test
 
@@ -428,10 +496,10 @@ The game has self tests that need no window:
 | `play/` | the game itself: screen, sound, input, settings, replays, network; the parts of Windows (Direct2D, XAudio2, Media Foundation, Win32) and of Linux (SDL 3, a drawing engine of its own, `raster.h`) apart by `#ifdef` |
 | `generator/`, `app/`, `gui/` | the chain board generator: the search, the CLI, the Windows GUI and editor |
 | `media/` | the pictures and the music that come with the game, how they were made, and the font of the Linux version (`fonts/`) |
-| `third_party/` | the libraries of one file the Linux version uses (stb, dr_libs) and their licences |
+| `third_party/` | the libraries of one file the Linux version uses (stb, dr_libs), ViGEmClient the Windows version uses for its virtual pad, and their licences |
 | `tests/`, `tools/` | the tests; matches between AIs (`ai_match`), measuring and tuning tools, benchmarks |
 | `examples/`, `benchmarks/` | examples of the generator and the record of its speed measurements |
-| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic; SDL 3 also in the Windows version) |
+| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic; SDL 3 also in the Windows version) and of ViGEmClient in the Windows version |
 
 ## License
 
@@ -443,5 +511,6 @@ The game has self tests that need no window:
   [licenses/Ama-LICENSE.txt](licenses/Ama-LICENSE.txt).
 - The Linux version contains SDL 3 (zlib License), stb (MIT or public domain), dr_libs (public domain or MIT-0)
   and BIZ UDPGothic (SIL Open Font License 1.1); their licences are in `licenses/`. The Windows version contains
-  SDL 3 as well, for reading controllers.
+  SDL 3 as well, for reading controllers, and ViGEmClient (MIT License) for the virtual pad of the mode in which Juraic
+  plays 2P of the real game (the driver ViGEmBus, BSD-3-Clause, is not included: the user installs it).
 - No warranty.
