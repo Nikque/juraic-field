@@ -726,7 +726,7 @@ struct App {
             if (m.pressing()) m.stopPress();
             else if (!m.pressLater(error)) say(error);
         }
-        if (pressed('S') && m.reading == RealGameMode::Reading::On) m.keepNext();
+        if (RealGameMode::DEBUG_PARTS && pressed('S') && m.reading == RealGameMode::Reading::On) m.keepNext();
         if (nav(NAV_BACK) || (ok && m.row == RealGameMode::ROW_BACK)) {
             audio.play(SND_SELECT);
             m.leave();
@@ -1465,7 +1465,11 @@ struct App {
             gfx.text(rows[i], 64, y, 260, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
             gfx.text(values[i], 320, y, 300, 34, 1, i == RealGameMode::ROW_LEVEL ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 1);
         }
-        // What is known of the reading.
+        // The AI is weaker here than in the matches of this program.
+        gfx.text(L"注意: 実機を操作する Juraic は、この作品の中の対戦の Juraic より弱くなります。", 44, 330, 620, 20, 0, rgb(240, 196, 110));
+        gfx.text(L"（画面の読み違い、操作の遅れ、実機との押し方や時間の違いがあるため）", 44, 350, 620, 20, 0, rgb(240, 196, 110));
+        // What is known of the reading (its counters only with the parts for finding faults).
+        const bool debug = RealGameMode::DEBUG_PARTS;
         std::vector<std::wstring> lines;
         if (m.reading == RealGameMode::Reading::Off) {
             lines.push_back(L"読んでいません。「読み始める」で、実機の窓をまた探します。");
@@ -1474,16 +1478,18 @@ struct App {
             lines.push_back(m.autoRead ? std::wstring(L"実機の窓を探しています。実機の窓をクリックして前に出すと、それを読みます（次からは自分で見つけます）。")
                                        : L"実機の窓をクリックして前に出してください（あと " + std::to_wstring(seconds) + L" 秒）。");
         } else {
-            lines.push_back(L"読んでいる窓の中身: " + std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) + L"（表の基準 " + std::to_wstring(m.layout.baseWidth) + L" × " +
-                            std::to_wstring(m.layout.baseHeight) + L"）");
-            const int64_t span = m.firstFrame >= 0 ? m.tracker.frame - m.firstFrame : 0;
-            lines.push_back(L"読んだ画面: " + std::to_wstring(m.pictures) + L" 枚" + (span >= 60 ? L"（1 秒に " + std::to_wstring(int((m.pictures - 1) * 60 / span)) + L" 枚）" : L""));
+            lines.push_back(L"読んでいる窓の中身: " + std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) +
+                            (debug ? L"（表の基準 " + std::to_wstring(m.layout.baseWidth) + L" × " + std::to_wstring(m.layout.baseHeight) + L"）" : L""));
             if (m.framesWithout > 60) lines.push_back(L"画面が来ていません（窓が最小化されていませんか）");
-            lines.push_back(m.layoutOwn ? L"表: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"表: 組み込みの値（実機の画像から測ったもの）");
-            if (!m.layoutError.empty()) lines.push_back(std::wstring(RealGameMode::LAYOUT_FILE) + L" を読めませんでした: " + m.layoutError);
-            lines.push_back(L"前と合わない読み: " + std::to_wstring(m.tracker.doubts) + L" 回" + (m.tracker.fromStart ? L"" : L"（対戦の初めから読んでいません）"));
-            lines.push_back(L"置いた所が分かった組: " + std::to_wstring(m.follow.placements) + L"　止めた予告: " + std::to_wstring(m.follow.held) + L" 回");
-            lines.push_back(L"計算した盤面と画面の照らし合わせ: " + std::to_wstring(m.follow.checks) + L" 回中 " + std::to_wstring(m.follow.misses) + L" 回合わない");
+            if (debug) {
+                const int64_t span = m.firstFrame >= 0 ? m.tracker.frame - m.firstFrame : 0;
+                lines.push_back(L"読んだ画面: " + std::to_wstring(m.pictures) + L" 枚" + (span >= 60 ? L"（1 秒に " + std::to_wstring(int((m.pictures - 1) * 60 / span)) + L" 枚）" : L""));
+                lines.push_back(m.layoutOwn ? L"表: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"表: 組み込みの値（実機の画像から測ったもの）");
+                if (!m.layoutError.empty()) lines.push_back(std::wstring(RealGameMode::LAYOUT_FILE) + L" を読めませんでした: " + m.layoutError);
+                lines.push_back(L"前と合わない読み: " + std::to_wstring(m.tracker.doubts) + L" 回" + (m.tracker.fromStart ? L"" : L"（対戦の初めから読んでいません）"));
+                lines.push_back(L"置いた所が分かった組: " + std::to_wstring(m.follow.placements) + L"　止めた予告: " + std::to_wstring(m.follow.held) + L" 回");
+                lines.push_back(L"計算した盤面と画面の照らし合わせ: " + std::to_wstring(m.follow.checks) + L" 回中 " + std::to_wstring(m.follow.misses) + L" 回合わない");
+            }
         }
         if (m.pressing() && m.pressSeconds())
             lines.push_back(L"あと " + std::to_wstring(m.pressSeconds()) + L" 秒で 2P の仮想のパッドが " + RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] +
@@ -1494,13 +1500,13 @@ struct App {
                              : m.menu == realgame::Menu::Players      ? L"にんずうセレクト"
                              : m.menu == realgame::Menu::Characters   ? L"キャラクターセレクト（2P を決めます）"
                                                                       : L"キャラクターセレクト（2P は決まりました）") +
-                            L"　仮想のパッドが A を押した回数: " + std::to_wstring(m.presser.presses));
+                            (debug ? L"　仮想のパッドが A を押した回数: " + std::to_wstring(m.presser.presses) : std::wstring()));
         if (m.record.isOpen())
             lines.push_back(L"記録: " + m.record.folder().wstring() + L"（画像 " + std::to_wstring(m.record.picturesTaken()) + L" 枚）");
         if (m.pad.running())
             lines.push_back(L"仮想のパッド: 差し込み中（XInput " + std::to_wstring(m.pad.xinputSlot() + 1) + L" 番）" +
-                            (m.playing ? L"　操作した組: " + std::to_wstring(m.driver.played) + L"　画面で位置を直した回数: " + std::to_wstring(m.driver.corrected) : L""));
-        if (m.playing)
+                            (debug && m.playing ? L"　操作した組: " + std::to_wstring(m.driver.played) + L"　画面で位置を直した回数: " + std::to_wstring(m.driver.corrected) : L""));
+        if (debug && m.playing)
             lines.push_back(L"遅れ: " + std::to_wstring(m.driver.lag) + L" フレーム（" +
                             (m.driver.lags.empty() ? std::wstring(L"まだ測れていません") : L"画面から " + std::to_wstring(m.driver.lags.size()) + L" 回測った") + L"）　回転: " +
                             (m.driver.turnsSwapped ? L"二つの回転を入れ替えて送っています" : L"そのまま送っています"));
@@ -1539,7 +1545,7 @@ struct App {
                                   L"この画面を開くと Juraic が実機の窓を読み始め、2P の欄・キャラクター・操作の種類を選び、対戦が始まると 2P を操作します。",
                                   L"AI とレベルは開くたびに設定の 2P 側から始まります。仮想のパッドには ViGEmBus のドライバーが要ります。"};
         for (int i = 0; i < 3; ++i) gfx.text(notes[i], 0, 592 + float(i) * 18, CANVAS_W, 18, 0, rgb(150, 158, 186), 0);
-        gfx.text(L"↑↓ で選ぶ　←→ で変える　Enter で決定　S で今の実機の画面を保存　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
+        gfx.text(debug ? L"↑↓ で選ぶ　←→ で変える　Enter で決定　S で今の実機の画面を保存　Esc で戻る" : L"↑↓ で選ぶ　←→ で変える　Enter で決定　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
     }
 #endif
     void drawLobby() {

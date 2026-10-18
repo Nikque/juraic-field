@@ -9,6 +9,12 @@
 // (play/realgame_follow.h). And the play: the AI plays 2P (play/realgame_drive.h) through a pad of the driver ViGEmBus
 // (play/realgame_pad_win.h), plugged in when the AI first plays or the person first presses it by hand to pick it for 2P
 // in the real game's menus, and kept plugged in until the mode is left.
+// The parts for finding faults are built only with JURAIC_REALGAME_DEBUG=1 (CMake: JURAIC_REALGAME_DEBUG=ON): the
+// record of each reading (play/realgame_log.h), a table read from LAYOUT_FILE, a picture of the real game kept when
+// asked for (the key S), and the counters of the reading and the play on the screen of the mode.
+#ifndef JURAIC_REALGAME_DEBUG
+#define JURAIC_REALGAME_DEBUG 0
+#endif
 #include "../ai/level.h"
 #include "realgame_capture_win.h"
 #include "realgame_drive.h"
@@ -113,9 +119,9 @@ struct RealGameMode {
 
     // ---- the play ----
     // The frames from a button of the pad to the picture of the real game that shows it taken, which the AI begins with
-    // (Driver::lag): measured through Steam on the real game, 6. The way of the two turns it begins with
+    // (Driver::lag): measured on the real game, 6. The way of the two turns it begins with
     // (Driver::turnsSwapped): the other way round, B sent for a turn to the right - so the real game turned its pair in
-    // all six of its records through Steam and the virtual pad. The driver then takes the lag and the way of the turns
+    // all six of its records through the virtual pad. The driver then takes the lag and the way of the turns
     // that fit the pictures (Driver::fit).
     int lag = 6;
     bool turnsSwapped = true;
@@ -125,7 +131,7 @@ struct RealGameMode {
 
     // A press of a button of the pad, asked for to pick it for 2P in the real game's menus (there a pad becomes 2P by a
     // press of its own): PRESS_WAIT frames after it is asked, the button is held PRESS_HOLD frames. In the wait the
-    // person brings the real game's window to the front: Steam, which takes in the pad as a controller of its own, gives
+    // person brings the real game's window to the front: the program that runs the real game takes in the pad as its own and gives
     // the real game its buttons only while that window is in front. No key of this program presses the pad.
     static constexpr int PRESS_WAIT = 5 * 60, PRESS_HOLD = 6, PRESS_BUTTONS = 3;
     static constexpr USHORT PRESS_BUTTON_BITS[PRESS_BUTTONS] = {XUSB_GAMEPAD_A, XUSB_GAMEPAD_B, XUSB_GAMEPAD_START};
@@ -246,8 +252,10 @@ struct RealGameMode {
     HWND notTheGame = nullptr;
     static constexpr int CHOOSE_FRAMES = 10 * 60;
     int chooseLeft = 0;
-    // The table: the file LAYOUT_FILE in the folder of one's own files when there is one (read when reading begins),
-    // otherwise the one built in (realgame::measuredLayout).
+    // The parts for finding faults (JURAIC_REALGAME_DEBUG) are built in.
+    static constexpr bool DEBUG_PARTS = JURAIC_REALGAME_DEBUG != 0;
+    // The table: with DEBUG_PARTS the file LAYOUT_FILE in the folder of one's own files when there is one (read when
+    // reading begins), otherwise the one built in (realgame::measuredLayout).
     static constexpr const wchar_t* LAYOUT_FILE = L"realgame_layout.txt";
     realgame::Layout layout = realgame::measuredLayout();
     bool layoutOwn = false;
@@ -260,7 +268,8 @@ struct RealGameMode {
     int64_t firstFrame = -1;    // the frame of the clock of the first of them
     int framesWithout = 0;      // frames of the clock since a picture last came
 
-    // The record of the reading (play/realgame_log.h): in the folder of one's own files, realgame\<date and time>.
+    // The record of the reading (play/realgame_log.h), with DEBUG_PARTS: in the folder of one's own files,
+    // realgame\<date and time>. Without them it is never opened, and what is offered to it is dropped.
     realgame::Record record;
     std::wstring recordError; // (it could not be made: the reading goes on without it)
 
@@ -271,7 +280,7 @@ struct RealGameMode {
         layout = realgame::measuredLayout(), layoutOwn = false, layoutError.clear();
         std::error_code ignored;
         const std::filesystem::path file = folder / LAYOUT_FILE;
-        if (std::filesystem::exists(file, ignored)) {
+        if (DEBUG_PARTS && std::filesystem::exists(file, ignored)) {
             std::string why;
             realgame::Layout own;
             if (realgame::loadLayout(file, own, &why)) layout = own, layoutOwn = true;
@@ -296,7 +305,7 @@ struct RealGameMode {
                   std::to_string(layout.baseHeight) + "\n";
         header += "lag " + std::to_string(lag) + " to begin with, the press " + PRESS_RECORD_NAMES[pressButton] + "\n";
         header += "each line: the frame of the clock (1/60 s), then what happened\n";
-        if (!record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作れませんでした（" + (folder / L"realgame").wstring() + L"）";
+        if (DEBUG_PARTS && !record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作れませんでした（" + (folder / L"realgame").wstring() + L"）";
         notes.clear();
         const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table, menus); }, error);
         reading = started ? Reading::On : Reading::Off;
@@ -324,8 +333,9 @@ struct RealGameMode {
         framesWithout = last < 0 ? framesWithout + 1 : int(clockFrame() - last);
     }
 
-    // The next picture kept as it is, to be saved (savedPicture).
+    // The next picture kept as it is, to be saved (savedPicture). Nothing without DEBUG_PARTS.
     void keepNext() {
+        if (!DEBUG_PARTS) return;
         std::lock_guard<std::mutex> hold(lock);
         saveWanted = true, savedReady = false;
     }

@@ -82,6 +82,7 @@ Japanese, with a short part in English).
 | 対戦（2 人） | two players on one PC |
 | 対戦（人 対 AI） | a person (1P) against the AI Juraic |
 | 観戦（AI 対 AI） | two AIs to watch |
+| 実機の 2P を Juraic が操作 | Windows only: Juraic plays 2P of the real game through a virtual pad (see below) |
 | ネット対戦（人 対 人） | two people on two PCs, connected directly (see below) |
 | リプレイを見る | play a saved replay |
 | 設定 | rules, controls, AI, display and sound |
@@ -161,6 +162,24 @@ five, and as numbers ("★ won / needed") beyond that.
   for measuring). The tools of that measurement - the program that seats Ama as an opponent, and the Ama made
   to play the same moves in every run - are not in this repository.
 - Parts of the AI follow Ama: see [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt).
+
+## Juraic playing 2P of the real game (Windows, a trial)
+
+- In an offline match of two players of the real game, running on the same PC, the program reads the real game's
+  window and Juraic plays 2P through a virtual pad. 1P is a person. It does not work in online matches.
+- 実機の 2P を Juraic が操作 in the menu looks for the real game's window, takes the place of 2P, chooses its
+  character and kind of controls, and plays 2P once a match begins. The kind and the level of the AI can be changed
+  on that screen (each time it opens they start from those of the 2P side in the settings).
+- The virtual pad needs the driver ViGEmBus, which is not included: install it yourself.
+- **Juraic in this mode is weaker than Juraic in the matches of this program.** It knows the fields and the pairs
+  only by reading the real game's screen, which it sometimes reads wrong or cannot read for a while; the presses of
+  the pad reach the real game late, and the way they are pressed and the timing differ from this program's matches.
+  The strength of the levels and the measurement above do not hold in this mode, and no rate of wins against the
+  real game has been measured.
+- The parts for finding faults - the record of each reading (in `realgame\<date and time>` next to the executable;
+  it can take more than 2 GB at a time), the key S that saves a picture of the real game, the table read from
+  `realgame_layout.txt` and the counters on the screen - are built only with `JURAIC_REALGAME_DEBUG=ON` in CMake;
+  the released packages have none of them.
 
 ## Matches over a network
 

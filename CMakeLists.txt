@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(juraic_field VERSION 0.9.4 LANGUAGES CXX)
+project(juraic_field VERSION 0.9.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
@@ -54,6 +54,12 @@ if(MSVC)
     target_include_directories(vigem_client PUBLIC third_party/ViGEmClient/include PRIVATE third_party/ViGEmClient/src)
     target_link_libraries(vigem_client PUBLIC setupapi)
     target_link_libraries(juraic_field_game PRIVATE vigem_client)
+    # The parts of that mode for finding faults (play/realgame_win.h): the record of each reading, a table read from
+    # realgame_layout.txt, the key S that saves a picture of the real game, and the counters on the screen of the mode.
+    option(JURAIC_REALGAME_DEBUG "Build the parts of the mode of the real game for finding faults" OFF)
+    if(JURAIC_REALGAME_DEBUG)
+        target_compile_definitions(juraic_field_game PRIVATE JURAIC_REALGAME_DEBUG=1)
+    endif()
     # The pads of Sony and Nintendo are read through SDL 3 (play/pad.h), built as a static library and found by
     # CMAKE_PREFIX_PATH. Without it they are read as raw controllers of Windows, as every pad other than Xbox pads.
     find_package(SDL3 CONFIG)
@@ -212,6 +218,9 @@ target_link_libraries(ai_tests PRIVATE Threads::Threads)
             # JURAIC_TEST_VIRTUAL_PAD=1 set, skipped otherwise.
             add_executable(realgame_pad_tests tests/realgame_pad_tests.cpp play/realgame_win.h play/realgame_pad_win.h)
             target_link_libraries(realgame_pad_tests PRIVATE vigem_client windowsapp d3d11 dxgi dwmapi user32)
+            if(JURAIC_REALGAME_DEBUG)
+                target_compile_definitions(realgame_pad_tests PRIVATE JURAIC_REALGAME_DEBUG=1)
+            endif()
             add_test(NAME realgame_virtual_pad COMMAND realgame_pad_tests)
             set_tests_properties(realgame_virtual_pad PROPERTIES SKIP_RETURN_CODE 77)
         endif()

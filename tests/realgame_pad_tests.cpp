@@ -3,15 +3,21 @@
 //     a press that picked it for 2P and when the AI stops - and it is pulled out as the mode is left;
 //  2. a press asked for (to pick it for 2P in the real game's menus) holds the chosen button PRESS_HOLD frames after
 //     PRESS_WAIT frames, as XInput reads the pad, and nothing before or after; it can be called off.
-//  0. reading a window (one made here): its pictures are followed on the thread of the play, the record is written,
-//     and reading stops with the thread ended (this part plugs in no pad and runs always);
+//  0. reading a window (one made here): its pictures are followed on the thread of the play, and reading stops with the
+//     thread ended (this part plugs in no pad and runs always). The parts for finding faults are there only in a build
+//     with JURAIC_REALGAME_DEBUG=1: the record is written, a table in the file LAYOUT_FILE is read, and a picture asked
+//     for (the key S) is kept; in any other no file of a record is made, the file of a table is not read, and nothing
+//     is kept;
 //  3. reading a window that shows the real game's screen of the players with the row of 2P to take (the colours of its
-//     points): the pad, plugged in as reading begins, presses A, and the record tells so.
+//     points): the pad, plugged in as reading begins, presses A, and the record (when one is kept) tells so.
 // Parts 1 and 2 plug a pad of the driver ViGEmBus into this machine, which a running game would see: they run only with
 // JURAIC_TEST_VIRTUAL_PAD=1 set and the driver installed, and are skipped otherwise (exit code 77).
 #define NOMINMAX
 #include <windows.h>
 #include <xinput.h>
+#ifndef JURAIC_REALGAME_DEBUG
+#define JURAIC_REALGAME_DEBUG 0
+#endif
 #include "../play/realgame_win.h"
 #include <cstdio>
 #include <cstdlib>
@@ -82,6 +88,8 @@ static void testReading() {
     const std::filesystem::path folder = std::filesystem::path(temp) / L"juraic-realgame-read-test";
     std::error_code ignored;
     std::filesystem::remove_all(folder, ignored);
+    std::filesystem::create_directories(folder, ignored);
+    std::ofstream(folder / play::RealGameMode::LAYOUT_FILE) << "not a table\n";
     {
         play::RealGameMode m;
         m.padOnReading = false;
@@ -89,6 +97,8 @@ static void testReading() {
         const bool started = m.startReading(w, folder, "a window made by the test", error);
         if (!started) std::wprintf(L"the capture did not start: %ls\n", error.c_str());
         check(started, "a window is not read");
+        check(!m.layoutOwn && m.layoutError.empty() == !JURAIC_REALGAME_DEBUG,
+              JURAIC_REALGAME_DEBUG ? "the file of a table is not read" : "the file of a table is read in a build without the parts for finding faults");
         // (the window found again by its program, as the real game's is found when the screen of the mode opens)
         wchar_t self[MAX_PATH];
         GetModuleFileNameW(nullptr, self, MAX_PATH);
@@ -116,11 +126,19 @@ static void testReading() {
         }
         m.pump();
         check(pictures - before > 10 && m.framesWithout < 30, "the pictures are not followed on the thread of the play");
-        check(open, "the record of the reading is not open");
+        check(open == (JURAIC_REALGAME_DEBUG != 0), JURAIC_REALGAME_DEBUG ? "the record of the reading is not open" : "a record of the reading is open in a build that keeps none");
+        m.keepNext();
+        pumpFor(w, 500);
+        std::vector<uint8_t> kept;
+        int keptWidth = 0, keptHeight = 0;
+        const bool keptOne = m.savedPicture(kept, keptWidth, keptHeight);
+        check(keptOne == (JURAIC_REALGAME_DEBUG != 0) && (keptOne || !m.savePending()),
+              JURAIC_REALGAME_DEBUG ? "a picture asked for is not kept" : "a picture asked for is kept in a build without the parts for finding faults");
         const std::filesystem::path recorded = m.record.folder();
         m.stopReading();
         check(m.reading == play::RealGameMode::Reading::Off && !m.record.isOpen(), "reading does not stop");
-        check(std::filesystem::file_size(recorded / "readings.bin", ignored) > 1000, "the readings are not written to the record");
+        if (JURAIC_REALGAME_DEBUG) check(std::filesystem::file_size(recorded / "readings.bin", ignored) > 1000, "the readings are not written to the record");
+        else check(!std::filesystem::exists(folder / L"realgame", ignored), "the folder of the records is made in a build that keeps none");
         std::printf("a window read: first picture after %lu ms; %lld fresh pictures followed on the thread of the play in 1.5 s\n", startupMs,
                     (long long)(pictures - before));
     }
@@ -201,7 +219,7 @@ int main() {
         std::ifstream events(recorded / "events.txt", std::ios::binary);
         const std::string text((std::istreambuf_iterator<char>(events)), std::istreambuf_iterator<char>());
         events.close();
-        check(seen == play::realgame::Menu::PlayersWaiting && presses >= 1 && text.find("the pad of 2P presses A") != std::string::npos,
+        check(seen == play::realgame::Menu::PlayersWaiting && presses >= 1 && (!JURAIC_REALGAME_DEBUG || text.find("the pad of 2P presses A") != std::string::npos),
               "on the screen of the players with the row of 2P to take, the pad does not press A");
         std::printf("the screen of the players read from a window: the pad pressed A %d times in 2 s\n", presses);
         DestroyWindow(w);
