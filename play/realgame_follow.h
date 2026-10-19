@@ -33,6 +33,7 @@ struct SideModel {
     juraic::GameField base;   // the field it appeared over
     juraic::GameField with;   // ... and it put there
     int sends = 0;            // the garbage its chain would send
+    int inAir = 0;            // clear readings in a row with one piece more at rest and a piece of a colour in the air
 };
 
 class Follower {
@@ -176,8 +177,24 @@ private:
         SideModel& m = model[s];
         // (one piece more when the other went into the 13th or 14th row, which the screen does not show)
         const int more = count(t.resting) - count(t.under);
+        // The pair seen whole in the twelve rows, one piece of it at rest - or a piece of a colour shown in the air above
+        // the pieces at rest: the other is in the air over a lower column (turned on the ground, to split as it locks),
+        // not in the 13th row. A pair lying is taken out of it when two readings in a row show so (a light beginning over
+        // the field, or the first picture of its chain, showed pieces in the air in one picture, and the lying pair was
+        // lost). Not once the window has moved on: the next pair, about to appear, is seen where pairs appear before it
+        // is counted. (Taken as lying so, on the real game, the down button was let go: a turn on its way lifted one
+        // pair into the air, and another, turned out of the 13th row, lay 28 frames before it locked.)
+        const bool whole = t.inHand && t.pair.seen && !t.pair.childHidden;
+        const bool coming = t.shiftedAt > t.spawnedAt + tracker.pairGap;
+        m.inAir = more == 1 && contains(t.resting, t.under) && (whole || (!coming && colouredAbove(tracker.last.side[s], t.resting) > 0)) ? m.inAir + 1 : 0;
         if ((more == 2 || more == 1) && contains(t.resting, t.under)) {
-            if (m.lying && m.index == t.pairs - 1 && t.resting == m.with) return;
+            const bool was = m.lying && m.index == t.pairs - 1;
+            const bool lain = was && t.resting == m.with;
+            if (m.inAir >= (was ? 2 : 1)) {
+                m.lying = false;
+                return;
+            }
+            if (lain) return;
             // The pair lying with both pieces shown, read with one of them missing (a piece that moves drawn over it):
             // still where it lay, unless the screen shows it so in the reading after too (its other piece in the 13th
             // row). Taken from one picture, a placement into the 13th row would keep a piece the game does not have.

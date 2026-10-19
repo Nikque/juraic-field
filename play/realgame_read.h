@@ -637,6 +637,15 @@ inline bool pairLying(const PairSeen& p, const juraic::GameField& under) {
     return ah == 2 * h[ax] || ch == 2 * h[cx];
 }
 
+// Points of `read` that show a piece of a colour (not garbage) above the pieces of `base`.
+inline int colouredAbove(const SideRead& read, const juraic::GameField& base) {
+    int h[juraic::W], n = 0;
+    base.heights(h);
+    for (int x = 0; x < juraic::W; ++x)
+        for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && read.point[x][k] != juraic::GARBAGE;
+    return n;
+}
+
 // ---- frame after frame ------------------------------------------------------------------------------------------
 
 // Every piece of `part` is in `whole` (the pieces of a pair lying on it, or garbage, may be above them).

@@ -142,6 +142,7 @@ public:
         //  past those it has counted, and stays so when the window moving on - not its count - tells it has been put.)
         if (t.rounds != round) {
             following = untilLocked = false;
+            liftedFor = -1;
             windowReadAt = windowPauseAt = -1;
             own = juraic::Player{};
             past.clear();
@@ -183,6 +184,21 @@ public:
             // A pair read as lying can lift again while earlier buttons arrive. Resume its down button when a clear
             // picture shows it in the air; one such pair was left for 10 frames after a light of 80 frames.
             if (following && side.pairs == pairsSeen && side.inHand && side.clear && side.pair.seen && !pairLying(side.pair, side.under)) untilLocked = true;
+            // So too, the window not moved on since the pair appeared, a pair Follower no longer finds lying, or takes as
+            // put with no chain and nothing of it at rest: a clear picture that shows pieces of a colour above the pieces
+            // at rest shows it in the air still (read lying, lifted by a turn on its way, let go by Tracker on a picture
+            // of the turn: on the real game it fell by itself for 35 frames; turned out of the 13th row over a lower
+            // column, another lay 28 frames before it locked). Held down until Follower finds it lying - put, until a
+            // clear picture shows nothing of a colour above the pieces at rest. Not once pieces of the field it appeared
+            // over have gone, nor for pieces in the air with a pair put at rest: a chain Follower did not reckon (held
+            // so, the button went on to the next pair, 5 times in the records).
+            const SideModel& m = f.model[me];
+            if (following && side.pairs == pairsSeen && side.clear && side.shiftedAt <= side.spawnedAt + t.pairGap && contains(side.resting, side.under)) {
+                const bool put = m.followed == pairsSeen - 1;
+                const bool air = colouredAbove(t.last.side[me], side.resting) > 0;
+                if (air && (put ? m.chains == 0 && side.resting == side.under : !m.lying)) untilLocked = true, liftedFor = pairsSeen;
+                else if (!air && put && liftedFor == pairsSeen) untilLocked = false, liftedFor = -1;
+            }
             if (untilLocked && (side.pairs == pairsSeen || unseenInAir) && !lies(f)) {
                 // The window starts moving before the next pair appears. Release while it moves: waiting for it to
                 // stand still sent the old down button to 26 next pairs in 16 rounds with lights of 30 to 120 frames.
@@ -254,6 +270,7 @@ private:
     // pair as the button would come) the down button is held. The engine ahead of the game, or its pictures not to be
     // read just then, the pair let go of it fell on slowly by itself (seen on the real game: 100 frames for one pair).
     bool untilLocked = false;
+    int liftedFor = -1; // the pair held down again as a clear picture showed pieces of a colour in the air after it was put
     int64_t windowReadAt = -1, windowPauseAt = -1; // last stable window, and the bounded release when it became unread
     std::unique_ptr<juraic::ai::Agent> nextAgent; // (replaceAgent)
     juraic::Rng noGarbage{1, 1}; // (settlePlayer lets garbage fall by it: there is none in the engine)

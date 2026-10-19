@@ -1861,6 +1861,210 @@ static void testWindowAlikeUnderWords() {
     std::cout << "a window of two pairs alike read otherwise for three pictures: the pair that comes after it is begun\n";
 }
 
+// A pair over a gap: its child on a higher column, its axis in the air over a lower one (turned on the ground, before it
+// locks and splits). One piece more than the field it appeared over is at rest, which a placement with the other piece
+// in the 13th row of the higher column fits too - but the screen shows the other piece in the air. So too with the pair
+// let go by Tracker before (a picture read wrong under it). Once that piece has come down the pair is found where it was
+// put.
+static void testPairOverAGap() {
+    for (const bool letGo : {false, true}) {
+        Reading empty;
+        for (SideRead& side : empty.side) {
+            for (auto& column : side.point)
+                for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+            side.next[0] = {5, 4}, side.next[1] = {1, 2};
+            side.nextRead[0] = side.nextRead[1] = true;
+        }
+        Follower f;
+        int64_t at = 50000;
+        for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+        // 2P's field: the third column eight high, the fourth eleven (colours in turn: nothing clears).
+        Reading base = empty;
+        for (int y = 0; y < 8; ++y) base.side[1].point[2][2 * y] = base.side[1].point[2][2 * y + 1] = Cell(1 + y % 2);
+        for (int y = 0; y < 11; ++y) base.side[1].point[3][2 * y] = base.side[1].point[3][2 * y + 1] = Cell(2 - y % 2);
+        for (int k = 0; k < 5; ++k) f.step(base, at++);
+        for (SideRead& side : base.side) side.next[0] = {1, 2}, side.next[1] = {3, 3};
+        Reading first = base;
+        first.side[1].point[SPAWN_X][23] = 5;
+        for (int k = 0; k < 3; ++k) f.step(first, at++);
+        check(f.tracker.side[1].pairs == 1, "the pair over a gap does not appear");
+        const std::string how = letGo ? " (let go by Tracker)" : "";
+        if (letGo) {
+            // The top of the fourth column read otherwise, the pair not seen: Tracker lets the pair go.
+            Reading wrong = base;
+            wrong.side[1].point[3][21] = 3;
+            for (int k = 0; k < 2; ++k) f.step(wrong, at++);
+            check(!f.tracker.side[1].inHand, "the pair over a gap is not let go");
+        }
+        // In the 12th row, its child to the right on the fourth column, its axis over the third.
+        Reading over = base;
+        over.side[1].point[2][22] = over.side[1].point[2][23] = 5;
+        over.side[1].point[3][22] = over.side[1].point[3][23] = 4;
+        for (int k = 0; k < 4; ++k) f.step(over, at++);
+        check(letGo || f.tracker.side[1].pair.seen, "the pair over a gap is not seen");
+        check(!f.model[1].lying, "a pair over a gap, its axis in the air, is taken as lying with a piece in the 13th row" + how);
+        // The axis comes down on the third column: the pair was put there with its child to the right.
+        Reading split = base;
+        split.side[1].point[2][16] = split.side[1].point[2][17] = 5;
+        split.side[1].point[3][22] = split.side[1].point[3][23] = 4;
+        for (int k = 0; k < 4; ++k) f.step(split, at++);
+        check(f.model[1].lying && f.model[1].at.x == 2 && f.model[1].at.dir == RIGHT, "the pair split over a gap is not found where it was put" + how);
+    }
+    std::cout << "a pair over a gap, a piece of it in the air, is not taken as lying, followed or let go; split, it is found where it was put\n";
+}
+
+// A pair read lying where it locks is lifted again by a turn on its way, Tracker lets it go on a picture of the turn
+// (the piece turning drawn over the column beside it) and Follower takes it as put: the next clear pictures show it in
+// the air. The down button is held again until nothing of a colour is above the pieces at rest, and let go then.
+static void testLiftedAfterLying() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 4}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    Driver d;
+    std::vector<int> waits;
+    d.agent = std::make_unique<EarlyAgent>(&waits);
+    d.lag = 5, d.takeLag = false;
+    int64_t at = 50000;
+    std::vector<uint8_t> sent;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k, ++at) f.step(r, at), sent.push_back(d.tick(f, at));
+    };
+    run(empty, 40);
+    // 2P's field: three pieces of 5 in the first column (the engine puts the pair there, its first placement, and
+    // clears them: it does not foresee the next pair soon), the third column eight high, the fourth nine.
+    Reading base = empty;
+    for (int y = 0; y < 3; ++y) base.side[1].point[0][2 * y] = base.side[1].point[0][2 * y + 1] = 5;
+    for (int y = 0; y < 8; ++y) base.side[1].point[2][2 * y] = base.side[1].point[2][2 * y + 1] = Cell(1 + y % 2);
+    for (int y = 0; y < 9; ++y) base.side[1].point[3][2 * y] = base.side[1].point[3][2 * y + 1] = Cell(2 - y % 2);
+    run(base, 5);
+    for (SideRead& side : base.side) side.next[0] = {1, 2}, side.next[1] = {3, 3};
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 5;
+    run(first, 1);
+    check(d.played == 1 && d.playing(), "the pair to be lifted was not begun");
+    Reading hidden = first;
+    hidden.side[1].unsure = 1;
+    for (int k = 0; k < 100 && d.playing(); ++k) run(hidden, 1);
+    check(!d.playing(), "the engine did not lock the pair to be lifted");
+    // Upright on the third column, its child down.
+    Reading lying = base;
+    lying.side[1].point[2][16] = lying.side[1].point[2][17] = 4;
+    lying.side[1].point[2][18] = lying.side[1].point[2][19] = 5;
+    run(lying, 2);
+    check(f.model[1].lying && f.model[1].at.x == 2 && f.model[1].at.dir == DOWN, "the pair lying upright on the third column is not found");
+    // Turned: kicked up a row, its child drawn over the top of the fourth column.
+    Reading turning = base;
+    turning.side[1].point[2][20] = turning.side[1].point[2][21] = 5;
+    turning.side[1].point[3][17] = 4;
+    run(turning, 2);
+    check(!f.tracker.side[1].inHand && f.model[1].followed == 0, "the pair is not let go and taken as put on the pictures of its turn");
+    // Upright again, a row above where it lay.
+    Reading lifted = base;
+    lifted.side[1].point[2][18] = lifted.side[1].point[2][19] = 4;
+    lifted.side[1].point[2][20] = lifted.side[1].point[2][21] = 5;
+    const size_t from = sent.size();
+    run(lifted, 20);
+    int alone = 0, most = 0;
+    for (size_t i = from; i < sent.size(); ++i) alone = sent[i] ? 0 : alone + 1, most = std::max(most, alone);
+    check(sent[from + 2] & BTN_DOWN && most < 3, "a pair lifted into the air after it was taken as put took no button for " + std::to_string(most) + " frames");
+    // Down where it lay: let go.
+    const size_t landed = sent.size();
+    run(lying, 3);
+    check(sent[landed + 1] == 0 && sent[landed + 2] == 0, "the down button is held on after the pair lifted lies again");
+    // A piece of a colour in the air over the sixth column, the pair at rest where it was put (on the real game pieces
+    // of a chain Follower did not reckon, with the pair at rest, were pressed down on into the next pair): nothing is
+    // pressed.
+    Reading other = lying;
+    other.side[1].point[5][10] = other.side[1].point[5][11] = 3;
+    const size_t still = sent.size();
+    run(other, 6);
+    bool pressed = false;
+    for (size_t i = still; i < sent.size(); ++i) pressed = pressed || sent[i];
+    check(!pressed, "the down button is pressed again for a piece in the air with the pair at rest where it was put");
+    std::cout << "a pair lifted into the air after it was taken as put is held down again until it lies\n";
+}
+
+// A pair lying with its child in the 13th row is turned by a button on its way: its child comes down beside it, in the
+// air over a lower column. The pair no longer lies where it locks and the down button is held again (on the real game
+// such a pair lay 28 frames before it locked); split, it lies where it was put and the button is let go.
+static void testTurnedOverAGap() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 4}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    Driver d;
+    std::vector<int> waits;
+    d.agent = std::make_unique<EarlyAgent>(&waits);
+    d.lag = 5, d.takeLag = false;
+    int64_t at = 50000;
+    std::vector<uint8_t> sent;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k, ++at) f.step(r, at), sent.push_back(d.tick(f, at));
+    };
+    run(empty, 40);
+    // 2P's field: three pieces of 5 in the first column (the engine puts the pair there and clears them), the second
+    // column eleven high, the third eight.
+    Reading base = empty;
+    for (int y = 0; y < 3; ++y) base.side[1].point[0][2 * y] = base.side[1].point[0][2 * y + 1] = 5;
+    for (int y = 0; y < 11; ++y) base.side[1].point[1][2 * y] = base.side[1].point[1][2 * y + 1] = Cell(1 + y % 2);
+    for (int y = 0; y < 8; ++y) base.side[1].point[2][2 * y] = base.side[1].point[2][2 * y + 1] = Cell(2 - y % 2);
+    run(base, 5);
+    for (SideRead& side : base.side) side.next[0] = {1, 2}, side.next[1] = {3, 3};
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 5;
+    run(first, 1);
+    check(d.played == 1 && d.playing(), "the pair to be turned was not begun");
+    Reading hidden = first;
+    hidden.side[1].unsure = 1;
+    for (int k = 0; k < 100 && d.playing(); ++k) run(hidden, 1);
+    check(!d.playing(), "the engine did not lock the pair to be turned");
+    // On the second column in its 12th row, its child up in the 13th.
+    Reading lying = base;
+    lying.side[1].point[1][22] = lying.side[1].point[1][23] = 5;
+    run(lying, 3);
+    check(f.model[1].lying && f.model[1].at.x == 1 && f.model[1].at.dir == UP, "the pair lying with its child in the 13th row is not found");
+    check(sent.back() == 0, "the down button is held on the pair lying with its child in the 13th row");
+    // One picture with a piece of a colour over the third column (a light beginning over the field): lying still.
+    Reading turned = lying;
+    turned.side[1].point[2][22] = turned.side[1].point[2][23] = 4;
+    run(turned, 1);
+    check(f.model[1].lying && f.model[1].at.x == 1 && f.model[1].at.dir == UP, "one picture with a piece in the air takes the pair lying out of the 13th row");
+    run(lying, 2);
+    // Turned: its child to the right, in the air over the third column.
+    const size_t from = sent.size();
+    run(turned, 12);
+    int alone = 0, most = 0;
+    for (size_t i = from; i < sent.size(); ++i) alone = sent[i] ? 0 : alone + 1, most = std::max(most, alone);
+    check(!f.model[1].lying, "the pair turned over a gap is taken as lying still");
+    check(sent[from + 2] & BTN_DOWN && most < 3, "the pair turned over a gap took no button for " + std::to_string(most) + " frames");
+    // Split: its child on the third column.
+    Reading split = lying;
+    split.side[1].point[2][16] = split.side[1].point[2][17] = 4;
+    const size_t landed = sent.size();
+    run(split, 3);
+    check(f.model[1].lying && f.model[1].at.x == 1 && f.model[1].at.dir == RIGHT, "the pair turned and split is not found where it was put");
+    check(sent[landed + 1] == 0 && sent[landed + 2] == 0, "the down button is held on after the pair turned over a gap lies");
+    // A chain Follower did not reckon: two pieces of the third column under the child clear, the child in the air above
+    // them. No pair is in the air: nothing is pressed (held, the button went on to the next pair).
+    Reading chain = split;
+    for (int k = 12; k < 16; ++k) chain.side[1].point[2][k] = EMPTY;
+    const size_t popped = sent.size();
+    run(chain, 10);
+    bool pressed = false;
+    for (size_t i = popped; i < sent.size(); ++i) pressed = pressed || sent[i];
+    check(!pressed, "the down button is pressed again in a chain that was not reckoned");
+    std::cout << "a pair lying with its child in the 13th row, turned over a gap, is held down again until it has split\n";
+}
+
 // The words of an all clear, read as pieces standing still in the air over an empty field (WORDS), are no pieces: the
 // pair that comes under them is counted where pairs appear and seen in play, a pair in front of them is seen where it
 // is, garbage that rises to them does not take them into the pieces at rest, and once they are gone a piece of their
@@ -2195,6 +2399,9 @@ int main(int argc, char** argv) {
         testWindowReleaseBounded();
         testCoveredField();
         testWindowAlikeUnderWords();
+        testPairOverAGap();
+        testLiftedAfterLying();
+        testTurnedOverAGap();
         testWordsRead();
         testSeenAsWindowSettles();
         testWordsBehindPairs();
