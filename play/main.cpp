@@ -12,6 +12,8 @@
 //       n = -6: the end of a match against an AI, the mouse button held down on its level (the steps are counted, and
 //              a window is asked whether it keeps the mouse while the button is down),
 //       n = -7: the screen of the mode that plays the real game's 2P (the Windows build; its rows are checked)
+//       n = -8: the screen before Juraic Arena; n = -9: a match of a running server of the arena as a person, n = -10: the
+//              arena watched (JURAIC_SELFTEST_ARENA = "address:port name token", JURAIC_SELFTEST_ARENA_FRAMES: App::screenshot)
 //       n = -11 to -14: the four parts of the settings
 //              in 8: a match over a line inside the program that delays and loses, saved and played as a replay)
 //   JuraicField.exe --check-replay <file>   self test: play a replay without a window, write <file>.result, exit
@@ -39,6 +41,7 @@
 #include "audio.h"
 #include "input.h"
 #include "media.h"
+#include "arena_play.h"
 #include "netplay.h"
 #include "replay.h"
 #include "session.h"
@@ -63,18 +66,19 @@ namespace {
 
 enum class Screen {
     Menu, Toko, Versus, Replay, Settings, Bindings, NetLobby, Net,
+    ArenaLobby, Arena, // Juraic Arena: the screen before it, and its matches (play/arena_play.h)
 #ifdef _WIN32
     RealGame, // Juraic plays the second player of the real game (play/realgame_win.h)
 #endif
 };
 
 // The items of the menu, in the order they are shown (the mode of the real game is in the Windows build only).
-enum MenuItem { MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH, MENU_REAL_GAME, MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT };
+enum MenuItem { MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH, MENU_REAL_GAME, MENU_NET, MENU_ARENA, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT };
 constexpr MenuItem MENU_ITEMS[] = {MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH,
 #ifdef _WIN32
                                    MENU_REAL_GAME,
 #endif
-                                   MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT};
+                                   MENU_NET, MENU_ARENA, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT};
 constexpr int MENU_COUNT = int(sizeof MENU_ITEMS / sizeof MENU_ITEMS[0]);
 const wchar_t* menuText(MenuItem item) {
     switch (item) {
@@ -84,6 +88,7 @@ const wchar_t* menuText(MenuItem item) {
     case MENU_WATCH: return L"観戦（AI 対 AI）";
     case MENU_REAL_GAME: return L"実機の 2P を Juraic が操作";
     case MENU_NET: return L"ネット対戦（人 対 人）";
+    case MENU_ARENA: return L"対戦場（Juraic Arena）";
     case MENU_REPLAY: return L"リプレイを見る";
     case MENU_SETTINGS: return L"設定";
     case MENU_BINDINGS: return L"操作の割り当て";
@@ -171,6 +176,14 @@ struct App {
     int netQuit = 0;                       // frames left in which a second Esc leaves the match
     std::vector<std::string> ownAddressList; // (looked up when a room is opened)
     std::wstring typed;                    // the characters typed since the last frame (WM_CHAR)
+    // Juraic Arena (play/arena_play.h) and the screen before it: the server (address:port), the name the operator of
+    // the arena registered and its token. The three are kept in the settings file; the token is shown only while F1
+    // has asked for it.
+    ArenaPlay arena;
+    std::wstring arenaServer = L"127.0.0.1:50800", arenaName, arenaToken;
+    int arenaIndex = 0, arenaDevice[2]{};
+    bool arenaEditing = false, showToken = false;
+    int arenaQuit = 0; // frames left in which a second Esc leaves the match (and loses it)
     std::wstring message; // one line shown at the bottom
     int messageTimer = 0;
     bool keyWas[256]{};
@@ -320,6 +333,9 @@ struct App {
             if (key == "netName" && eq + 1 < line.size()) netName = fromUtf8(line.substr(eq + 1)).substr(0, 12);
             if (key == "netAddress") netAddress = fromUtf8(line.substr(eq + 1)).substr(0, 80);
             if (key == "netPort" && v > 0 && v < 65536) netPort = v;
+            if (key == "arenaServer" && eq + 1 < line.size()) arenaServer = fromUtf8(line.substr(eq + 1)).substr(0, 80);
+            if (key == "arenaName") arenaName = fromUtf8(line.substr(eq + 1)).substr(0, 32);
+            if (key == "arenaToken") arenaToken = fromUtf8(line.substr(eq + 1)).substr(0, 64);
             for (int l = 0; l < LAYOUT_COUNT; ++l)
                 for (int a = 0; a < ACT_COUNT; ++a)
                     if (key == std::string(layoutKeys[l]) + "." + std::to_string(a) && v >= 0 && v < 256) input.bind[l][a] = v;
@@ -335,6 +351,7 @@ struct App {
         std::ofstream out(iniPath(), std::ios::app);
         out << "device1=" << input.device[0] << "\ndevice2=" << input.device[1] << '\n';
         out << "netName=" << toUtf8(netName) << "\nnetAddress=" << toUtf8(netAddress) << "\nnetPort=" << netPort << '\n';
+        out << "arenaServer=" << toUtf8(arenaServer) << "\narenaName=" << toUtf8(arenaName) << "\narenaToken=" << toUtf8(arenaToken) << '\n';
         for (int l = 0; l < LAYOUT_COUNT; ++l)
             for (int a = 0; a < ACT_COUNT; ++a) out << layoutKeys[l] << '.' << a << '=' << input.bind[l][a] << '\n';
     }
@@ -344,7 +361,7 @@ struct App {
     // choice for a match or for toko can be listened to there.
     int musicScene() {
         if (musicSceneForced >= 0) return musicSceneForced;
-        if (screen == Screen::Versus || screen == Screen::Net) return MUSIC_VERSUS;
+        if (screen == Screen::Versus || screen == Screen::Net || screen == Screen::Arena) return MUSIC_VERSUS;
         if (screen == Screen::Toko) return MUSIC_TOKO;
         if (screen == Screen::Replay) return viewer.replay.players == 2 ? MUSIC_VERSUS : MUSIC_TOKO;
         if (screen == Screen::Settings && settingInside) {
@@ -655,6 +672,7 @@ struct App {
 #endif
             break;
         case MENU_NET: screen = Screen::NetLobby, lobbyEditing = false; break;
+        case MENU_ARENA: screen = Screen::ArenaLobby, arenaEditing = false; break;
         case MENU_REPLAY: {
             std::filesystem::path path;
             if (openDialog(L"リプレイ\0*.jfreplay\0すべてのファイル\0*.*\0", userDirectory / L"replays", path)) openReplay(path);
@@ -1201,6 +1219,84 @@ struct App {
             say(saveReplay(path, net.replay) ? L"リプレイを保存しました: replays\\" + path.stem().wstring() : L"リプレイを保存できませんでした");
         }
     }
+    // ---- Juraic Arena ----
+    // The screen before it: the server, the own name and its token (a text is typed after Enter on its row, and ended
+    // with Enter or Esc), then a match against whoever the server pairs, or the matches of the arena watched.
+    static constexpr int ARENA_DEFAULT_PORT = 50800;
+    void updateArenaLobby() {
+        if (pressed(VK_F1)) showToken = !showToken;
+        if (arenaEditing) {
+            std::wstring& text = arenaIndex == 0 ? arenaServer : arenaIndex == 1 ? arenaName : arenaToken;
+            const size_t most = arenaIndex == 0 ? 80 : arenaIndex == 1 ? 32 : 64;
+            // (the server takes names of letters, digits, '_' and '-'; addresses and tokens are pasted with Ctrl+V)
+            const auto fits = [&](wchar_t c) { return arenaIndex == 1 ? (iswalnum(c) && c < 127) || c == L'_' || c == L'-' : c > 32 && c < 127; };
+            for (const wchar_t c : typed) {
+                if (c == 8 && !text.empty()) text.pop_back();
+                if (c == 22)
+                    for (const wchar_t p : clipboardText())
+                        if (fits(p) && text.size() < most) text += p;
+                if (c >= 32 && c != 127 && fits(c) && text.size() < most) text += c;
+            }
+            if (pressed(VK_RETURN) | pressed(VK_ESCAPE)) {
+                arenaEditing = false;
+                forgetKeys();
+                saveAll();
+                audio.play(SND_SELECT);
+            }
+            return;
+        }
+        const int count = 6;
+        if (heldStep(NAV_UP, 6, 6)) arenaIndex = (arenaIndex + count - 1) % count, audio.play(SND_MOVE);
+        if (heldStep(NAV_DOWN, 6, 6)) arenaIndex = (arenaIndex + 1) % count, audio.play(SND_MOVE);
+        const bool back = nav(NAV_BACK), ok = nav(NAV_OK);
+        if (back || (ok && arenaIndex == 5)) {
+            audio.play(SND_SELECT);
+            screen = Screen::Menu;
+            return;
+        }
+        if (!ok) return;
+        audio.play(SND_SELECT);
+        if (arenaIndex <= 2) {
+            arenaEditing = true;
+            return;
+        }
+        std::string host;
+        int port = ARENA_DEFAULT_PORT;
+        splitAddress(toUtf8(arenaServer), host, port);
+        if (host.empty()) return say(L"サーバーのアドレスを入れてください");
+        if (arenaIndex == 3 && (arenaName.empty() || arenaToken.empty())) return say(L"名前とトークンを入れてください（対戦場の運営者が登録したもの）");
+        const bool called = arenaIndex == 3 ? arena.play(host, port, toUtf8(arenaName), toUtf8(arenaToken)) : arena.watch(host, port);
+        if (!called) return say(L"サーバーにつながりませんでした: " + arenaServer);
+        chooseDevices(input, pads, 1, arenaDevice);
+        arenaQuit = 0;
+        beginGame();
+        screen = Screen::Arena;
+    }
+    void leaveArena() {
+        arena.leave();
+        arenaQuit = 0;
+        screen = Screen::ArenaLobby;
+    }
+    // A match of the arena, or the arena watched. There is no pause; the keyboard's Esc pressed twice leaves a match
+    // (which loses it: the server counts the rounds left as the other's). Between matches Esc goes back.
+    void updateArena() {
+        const bool esc = pressed(VK_ESCAPE);
+        const bool ok = nav(NAV_OK), start = nav(NAV_START), back = nav(NAV_BACK) | esc;
+        const bool playing = arena.stage == ArenaPlay::Playing && arena.match.on && !arena.match.matchOver;
+        if (arenaQuit) --arenaQuit;
+        if (playing) {
+            if (esc && arenaQuit) return leaveArena();
+            if (esc) arenaQuit = 180;
+        } else {
+            arenaQuit = 0;
+            if (back || (arena.stage == ArenaPlay::Over && ok)) return leaveArena();
+            if (arena.stage == ArenaPlay::Playing && arena.match.matchOver && (ok || start)) arena.again(), beginGame(), audio.play(SND_SELECT);
+        }
+        const int device = arenaDevice[0];
+        const uint8_t buttons = arena.watcher || !arena.match.on ? uint8_t(0)
+                                                                 : personButtons(arena.seat(), actionsOf(device, input, pads, focused), upHeld(device, pads, focused), arena.match.rules.quickDrop);
+        arena.tick(buttons, [&](int seat, const PlayerEvents& e) { sounds(e, arena.match.round.player(seat)); });
+    }
     void updateViewer() {
         Viewer& w = viewer;
         if (nav(NAV_BACK)) {
@@ -1242,6 +1338,8 @@ struct App {
         case Screen::Replay: updateViewer(); break;
         case Screen::NetLobby: updateLobby(); break;
         case Screen::Net: updateNet(); break;
+        case Screen::ArenaLobby: updateArenaLobby(); break;
+        case Screen::Arena: updateArena(); break;
 #ifdef _WIN32
         case Screen::RealGame: updateRealGame(); break;
 #endif
@@ -1255,8 +1353,8 @@ struct App {
     // ---- drawing ----
     void drawMenu() {
         gfx.text(L"Juraic Field", 0, 70, CANVAS_W, 80, 3, rgb(255, 255, 255), 0);
-        // (eleven items, with the mode of the real game: a little closer together, to end above the line of the keys)
-        const float top = MENU_COUNT > 10 ? 152.f : 164.f, gap = MENU_COUNT > 10 ? 43.f : 46.f;
+        // (eleven items or more, with the mode of the real game and the arena: closer together, to end above the line of the keys)
+        const float top = MENU_COUNT > 11 ? 148.f : MENU_COUNT > 10 ? 152.f : 164.f, gap = MENU_COUNT > 11 ? 40.f : MENU_COUNT > 10 ? 43.f : 46.f;
         for (int i = 0; i < MENU_COUNT; ++i) {
             const float y = top + i * gap;
             if (i == menuIndex) gfx.round(rectF(410, y - 1, 870, y + 43), 12, rgb(84, 104, 190));
@@ -1616,6 +1714,78 @@ struct App {
                    n.peer.again ? L"相手の返事を待っています…　Esc で退出" : n.peer.hisAgain ? L"相手がもう一度を希望しています　決定でもう一度　Esc で退出" : L"決定 / 一時停止ボタンでもう一度　Esc で退出");
         else if (n.stage == NetPlay::Connecting) banner(L"次の対戦を始めます…", L"");
     }
+    void drawArenaLobby() {
+        gfx.text(L"対戦場（Juraic Arena）", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
+        const std::wstring hidden(arenaToken.size(), L'●');
+        const std::wstring rows[6] = {L"サーバー", L"名前", L"トークン", L"対局する（相手を待つ）", L"観戦する", L"戻る"};
+        const std::wstring values[6] = {arenaServer.empty() ? L"（未入力）" : arenaServer, arenaName.empty() ? L"（未入力）" : arenaName,
+                                        arenaToken.empty() ? L"（未入力）" : showToken ? arenaToken : hidden, L"", L"", L""};
+        for (int i = 0; i < 6; ++i) {
+            const float y = 140 + float(i) * 52;
+            const bool on = i == arenaIndex;
+            if (on) gfx.round(rectF(220, y - 6, 1060, y + 40), 8, arenaEditing ? rgb(190, 110, 60) : rgb(84, 104, 190));
+            gfx.text(rows[i], 244, y, 400, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
+            gfx.text(values[i] + (on && arenaEditing ? L"_" : L""), 520, y, 520, 34, 1, rgb(255, 255, 255), 1);
+        }
+        const wchar_t* notes[] = {L"AI と人が対局し、レート（Glicko-2）が付く対戦場です。名前とトークンは、対戦場の運営者に登録してもらいます。",
+                                  L"相手はサーバーが決めます（先取 3）。ルールは対戦場のものを使います。対局の記録は対戦場で公開されます。",
+                                  L"対局中は一時停止できません。キーボードの Esc を 2 回押すと退出します（その対局は負けになります）。",
+                                  L"観戦は 3 秒遅れで、今行われている対局を順に映します。"};
+        for (int i = 0; i < 4; ++i) gfx.text(notes[i], 0, 462 + float(i) * 30, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
+        gfx.text(arenaEditing ? L"文字を入力　Backspace で消す　Ctrl+V で貼り付け　Enter / Esc で終わり"
+                              : L"↑↓ で選ぶ　Enter で決定・入力　F1 でトークンを表示 / 隠す　Esc で戻る",
+                 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
+    }
+    void drawArena() {
+        const ArenaPlay& a = arena;
+        const arena::MatchView& m = a.match;
+        if (!a.inMatch()) {
+            gfx.text(a.watcher ? L"対戦場（観戦）" : L"対戦場（Juraic Arena）", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
+            if (a.stage == ArenaPlay::Over) {
+                banner(a.over, L"決定 / Esc で戻る", 1);
+                return;
+            }
+            const wchar_t* state = a.stage == ArenaPlay::Connecting ? L"サーバーにつないでいます…"
+                                   : a.watcher                      ? L"対局が始まるのを待っています…"
+                                                                    : L"対局の相手を待っています…";
+            gfx.text(state, 0, 220, CANVAS_W, 50, 2, rgb(255, 236, 120), 0);
+            gfx.text(a.watcher ? L"対局が始まると、3 秒遅れで映します" : L"相手が見つかると、すぐに始まります（" + arenaName + L"）", 0, 300, CANVAS_W, 34, 1,
+                     rgb(200, 206, 226), 0);
+            gfx.text(L"Esc でやめる", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
+            return;
+        }
+        const auto nameOf = [&](int seat) {
+            const std::wstring who = fromUtf8(m.name[seat]).substr(0, 16) + (m.kind[seat] == "HUMAN" ? L"（人）" : L"（AI）");
+            return std::wstring(seat ? L"2P  " : L"1P  ") + who + L"  " + std::to_wstring(int(m.rating[seat] + 0.5)) +
+                   (!a.watcher && seat == m.seat ? L"（自分）" : L"");
+        };
+        const std::wstring names[2] = {nameOf(0), nameOf(1)};
+        const Round& r = m.round.link.round;
+        const int64_t frame = a.watcher ? std::max(m.round.played(0), m.round.played(1)) : m.round.played(m.seat);
+        const int sets[2] = {0, 0};
+        drawTwo(r, a.view, frame, m.wins, names, m.rules.rules.winsNeeded, sets, 1);
+        gfx.text(std::wstring(a.watcher ? L"観戦（3 秒遅れ）　" : L"対戦場　") + L"遅延 " + std::to_wstring(m.delay) + L" フレーム", 446, 52, 388, 26, 0, rgb(150, 158, 186), 0);
+        // (the result of a round: the seat that won, and the own rating as it moved; at the end of a match the same of the match)
+        const auto winner = [&](const std::string& result) {
+            if (result == "D") return std::wstring(L"引き分け");
+            const int s = result == "1" ? 1 : 0;
+            if (!a.watcher) return std::wstring(s == m.seat ? L"勝ち" : L"負け");
+            return std::wstring(s ? L"2P の勝ち" : L"1P の勝ち");
+        };
+        const auto ratingNote = [&]() {
+            if (a.watcher) return L"レート  1P " + std::to_wstring(int(m.rating[0] + 0.5)) + L"　2P " + std::to_wstring(int(m.rating[1] + 0.5));
+            const int s = m.seat;
+            return L"レート  " + std::to_wstring(int(a.startRating[s] + 0.5)) + L" → " + std::to_wstring(int(m.rating[s] + 0.5));
+        };
+        if (arenaQuit) banner(L"退出しますか？", L"もう一度 Esc で退出（この対局は負けになります）", 2);
+        else if (m.matchOver) {
+            const std::wstring title = m.matchEnd == "left" ? L"相手が退出しました" : m.wins[0] == m.wins[1] ? L"対局の終わり" : winner(m.wins[0] > m.wins[1] ? "0" : "1");
+            banner(a.watcher || m.matchEnd == "left" ? title : title + L"！",
+                   ratingNote() + (a.watcher ? L"　次の対局を待っています…　Esc で戻る" : L"　決定で次の対局へ　Esc で戻る"), 2);
+        } else if (m.roundEnded) banner(winner(m.result), ratingNote(), 2);
+        else if (!a.watcher && a.ready > 0) banner(a.ready > 30 ? L"レディ…" : L"ゴー！", L"");
+        else if (!a.watcher && a.waited > 30) banner(L"通信を待っています…", L"相手の操作が届くまで止まります", 1);
+    }
     void drawToko() {
         const Round& r = toko.game.round;
         const Player& p = r.player[0];
@@ -1729,6 +1899,8 @@ struct App {
         case Screen::Replay: drawViewer(); break;
         case Screen::NetLobby: drawLobby(); break;
         case Screen::Net: drawNet(); break;
+        case Screen::ArenaLobby: drawArenaLobby(); break;
+        case Screen::Arena: drawArena(); break;
 #ifdef _WIN32
         case Screen::RealGame: drawRealGame(); break;
 #endif
@@ -1773,6 +1945,7 @@ struct App {
 #ifdef _WIN32
                  : frames == -7 ? Screen::RealGame
 #endif
+                 : frames == -8 ? Screen::ArenaLobby : frames == -9 || frames == -10 ? Screen::Arena
                  : frames < 0 ? Screen::Settings : frames == 0 ? Screen::Menu : mode == 8 ? Screen::Net : mode >= 2 ? Screen::Versus : Screen::Toko;
         if (frames <= -11 && frames > -11 - SETTING_SECTIONS) {
             // (-11 to -14: the parts of the settings screen, the cursor on the first setting that can be chosen)
@@ -1983,6 +2156,36 @@ struct App {
                 toko.step(mode == 1 && p.phase == Phase::Control ? uint8_t(BTN_DOWN) : uint8_t(0));
             }
             if (settings.prediction) toko.predict();
+        } else if (screen == Screen::Arena) {
+            // A server of Juraic Arena that is running: -9 plays a match there as a person, the buttons from a script; -10
+            // watches. JURAIC_SELFTEST_ARENA = "address:port name token" (a watcher needs the address only). The picture is
+            // taken JURAIC_SELFTEST_ARENA_FRAMES frames into a round (900 when it is not set; 0: at the end of the match).
+            // Result 15: no server, not let in, or nothing to show within ten minutes.
+            std::wistringstream given(selfTestSetting(L"JURAIC_SELFTEST_ARENA"));
+            std::wstring where, who, token;
+            given >> where >> who >> token;
+            const std::wstring at = selfTestSetting(L"JURAIC_SELFTEST_ARENA_FRAMES");
+            const int64_t stopAt = at.empty() ? 900 : std::wcstol(at.c_str(), nullptr, 10);
+            std::string host;
+            int port = ARENA_DEFAULT_PORT;
+            splitAddress(toUtf8(where), host, port);
+            const bool called = !host.empty() && (frames == -9 ? arena.play(host, port, toUtf8(who), toUtf8(token)) : arena.watch(host, port));
+            if (frames == -9) arenaName = who;
+            if (!called) result = 15;
+            ScriptBot bot;
+            const auto began = std::chrono::steady_clock::now();
+            for (int64_t f = 0; called; ++f) {
+                // (at the speed of the screen, sixty frames a second by the clock: the other seat and the server play at it)
+                while (std::chrono::steady_clock::now() < began + std::chrono::microseconds(f * 1000000 / 60)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                const arena::MatchView& m = arena.match;
+                const uint8_t b = arena.inMatch() && !arena.watcher && m.roundOn ? bot(m.round.player(m.seat), f) : uint8_t(0);
+                arena.tick(b, [](int, const PlayerEvents&) {});
+                if (arena.stage == ArenaPlay::Over || std::chrono::steady_clock::now() - began > std::chrono::minutes(10)) {
+                    result = 15;
+                    break;
+                }
+                if (stopAt > 0 ? arena.inMatch() && m.roundOn && !m.roundEnded && std::max(m.round.played(0), m.round.played(1)) >= stopAt : m.matchOver) break;
+            }
         } else if (screen == Screen::Versus && frames == -6) {
             // (the picture is that of the end of the match, as the test above left it)
         } else if (screen == Screen::Versus) {
@@ -2360,10 +2563,11 @@ int main(int argc, char** argv) {
     const std::chrono::nanoseconds frameTime(1000000000 / FPS);
     Clock::time_point next = Clock::now();
     for (;;) {
-        wantTyping(a.window, a.screen == Screen::NetLobby && a.lobbyEditing);
+        wantTyping(a.window, (a.screen == Screen::NetLobby && a.lobbyEditing) || (a.screen == Screen::ArenaLobby && a.arenaEditing));
         handleEvents(a);
         if (a.quit) {
             a.net.leave(); // (the other end of a match is told)
+            a.arena.leave();
             a.saveAll();
             closeWindow(a.window);
             return 0;
@@ -2440,6 +2644,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 a.net.leave(); // (the other end of a match is told)
+                a.arena.leave();
                 a.saveAll();
                 return 0;
             }
