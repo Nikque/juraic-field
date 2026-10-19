@@ -108,6 +108,20 @@ static bool marksFor(const Layout& l, int total, size_t places, std::vector<cons
     return total == 0;
 }
 
+// The words of an all clear as a record of the real game read them over the field of 2P (its pieces drawn in front of
+// them): points 16 to 20 of columns 1 to 6, the lowest first (. nothing, 1 and 4 the colours, g garbage).
+const char* const WORDS[5] = {"..44..", ".4444.", ".1414.", ".44g4.", ".4444."};
+
+static void drawWords(Canvas& c, const Layout& l, const SideLayout& d) {
+    for (int k = 16; k <= 20; ++k)
+        for (int x = 0; x < W; ++x) {
+            const char w = WORDS[k - 16][x];
+            if (w == '.') continue;
+            const float h = pointHeight(k), x0 = d.left + float(x) * d.cellWidth;
+            c.fill(x0, d.bottom - (h + 0.25f) * d.cellHeight, x0 + d.cellWidth, d.bottom - (h - 0.25f) * d.cellHeight, colorOf(l, w == 'g' ? GARBAGE : Cell(w - '0')));
+        }
+}
+
 struct Drawn {
     bool nextShown[2] = {};     // the window stood (not moving)
     Pair next[2][2]{};          // [side][next, next-next]
@@ -118,8 +132,9 @@ struct Drawn {
 // One frame of the round `r` as the screen would show it. `ready`: the screen before the round, the window standing.
 // `noise`: pieces that move in the phases in which the screen shows them moving (a lock, a chain, garbage).
 // quietLanding: a pair that has come to rest whole is drawn still where it lies (the real game shows it so until the
-// next pair, a lock that starts no chain: its records), not as pieces that move.
-static Drawn draw(Canvas& c, const Layout& l, const Round& r, bool ready, Rng& noise, bool quietLanding = false) {
+// next pair, a lock that starts no chain: its records), not as pieces that move. words: the words of an all clear over
+// the field of 2P, behind its pieces (WORDS).
+static Drawn draw(Canvas& c, const Layout& l, const Round& r, bool ready, Rng& noise, bool quietLanding = false, bool words = false) {
     Drawn out;
     std::fill(c.pixels.begin(), c.pixels.end(), uint8_t(0));
     for (int s = 0; s < 2; ++s) {
@@ -127,6 +142,7 @@ static Drawn draw(Canvas& c, const Layout& l, const Round& r, bool ready, Rng& n
         const Player& p = r.player[s];
         const float top = d.bottom - d.shownRows * d.cellHeight;
         c.fill(d.left, top - 3 * d.cellHeight, d.left + W * d.cellWidth, top, ABOVE);
+        if (words && s == 1) drawWords(c, l, d);
         for (int x = 0; x < W; ++x)
             for (int y = 0; y < H; ++y)
                 if (const Cell cell = p.field.f.get(x, y)) piece(c, l, d, x, float(y) + 0.5f, cell);
@@ -1282,6 +1298,9 @@ struct DriveCounts {
     long control = 0;     // frames a pair of 2P was in play (Phase::Control)
     long spawnsSeen = 0, miscounted = 0; // new pairs of 2P the screen showed (Tracker), and those of them counted otherwise than the round gave them
     std::vector<int64_t> appeared; // the frames of the clock pairs of 2P appeared in
+    // wordsFrom: while the words stand, the pairs of 2P that appeared and those Tracker saw appear, the frames a pair of
+    // 2P was in play and those in which Tracker saw it, and the pictures that put the engine's pair right.
+    long wordsSpawns = 0, wordsSeen = 0, wordsControl = 0, wordsPairSeen = 0, wordsCorrected = 0;
 };
 
 // A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
@@ -1302,12 +1321,14 @@ struct DriveCounts {
 // noiseStream: the stream of the random noise on the pictures (another stream, the same round read otherwise).
 // coveredFrom: from that frame of the round on, a still block of yellow over columns 2 to 5 of 2P, from half a cell
 // below the 9th row to half a cell above the 11th (on the real game the words of an all clear stood so over the field
-// of 2P for more than 900 frames, read as pieces of a colour above the pieces at rest, in a clear reading).
+// of 2P for more than 900 frames, read as pieces of a colour above the pieces at rest, in a clear reading). wordsFrom:
+// from the first frame of the round from that one on in which columns 2 to 5 of 2P are lower than the 9th row, the
+// words of an all clear over the field of 2P, behind its pieces, as the real game draws them (WORDS).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
                        int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0,
-                       int litAsAppears = 0, int garbageAsLit = 0, uint64_t noiseStream = 7, int coveredFrom = -1) {
+                       int litAsAppears = 0, int garbageAsLit = 0, uint64_t noiseStream = 7, int coveredFrom = -1, int wordsFrom = -1) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -1341,14 +1362,22 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     uint8_t oldDir = 0;
     int alone = 0; // frames in a row the pair of 2P in the air took no button
     int litFor = 0; // litAsAppears: frames the light over 2P stays
+    bool words = false;
+    int correctedBefore = 0; // the driver's pictures put right before the words came
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
+        if (!words && wordsFrom >= 0 && f >= wordsFrom) {
+            int h[W];
+            r.player[1].field.heights(h);
+            words = std::max({h[1], h[2], h[3], h[4]}) <= 8;
+            correctedBefore = d.corrected;
+        }
         if (oldFor > 0 || hideFor > 0) {
             Round shown = r;
             if (oldFor > 0) shown.player[1].pair.dir = oldDir, --oldFor;
             if (hideFor > 0 && shown.player[1].phase == Phase::Control) shown.player[1].phase = Phase::Split, --hideFor;
-            draw(canvas, l, shown, false, noise, quietLanding);
+            draw(canvas, l, shown, false, noise, quietLanding, words);
         } else {
-            draw(canvas, l, r, false, noise, quietLanding);
+            draw(canvas, l, r, false, noise, quietLanding, words);
         }
         // (litAsAppears: one pair of 2P in three lit from 8 frames before it appears, for that many frames - on the real game
         //  the screen of 2P read nothing for 30 frames as a pair appeared)
@@ -1367,6 +1396,10 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         // (the pair seen as it is about to appear, or in play already when seen late)
         if (follow.tracker.spawned[1])
             ++n.spawnsSeen, n.miscounted += follow.tracker.side[1].pairs != r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
+        if (words) {
+            n.wordsSeen += follow.tracker.spawned[1];
+            if (r.player[1].phase == Phase::Control) ++n.wordsControl, n.wordsPairSeen += follow.tracker.side[1].pair.seen;
+        }
         if (later && f == laterAt) d.replaceAgent(std::move(later)); // (another AI chosen on the screen of the mode)
         // (a frame the driver is not called in: the pad holds what it held)
         if (skipOneIn && f > 0 && skipper.below(uint64_t(skipOneIn)) == 0) sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
@@ -1400,7 +1433,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         }
         if (movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, movedHidden);
         // (from the frame a pair appears in, until the frames take buttons the driver sent once it had begun that pair)
-        if (e[1].spawned) ++spawns, leftOver = true, n.appeared.push_back(clock), appearedAt = clock, firstBegunAt = -1;
+        if (e[1].spawned) ++spawns, leftOver = true, n.appeared.push_back(clock), appearedAt = clock, firstBegunAt = -1, n.wordsSpawns += words;
         if (leftOver && firstBegunAt < 0 && begunAt >= appearedAt) firstBegunAt = begunAt;
         if (leftOver && firstBegunAt >= 0 && from >= firstBegunAt) leftOver = false;
         if (leftOver && (buttons[1] & BTN_DOWN)) ++n.downAtSpawn, leftOver = false;
@@ -1411,6 +1444,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         ++n.frames;
     }
     n.corrected += d.corrected, n.played += d.played;
+    if (words) n.wordsCorrected += d.corrected - correctedBefore;
     n.lagRounds += 1, n.lagRight += d.measuredLag() == lag;
     n.lagTaken += d.lag == lag, n.turnsFound += d.turnsSwapped;
     if (sentOut) *sentOut = sent;
@@ -1827,6 +1861,149 @@ static void testWindowAlikeUnderWords() {
     std::cout << "a window of two pairs alike read otherwise for three pictures: the pair that comes after it is begun\n";
 }
 
+// The words of an all clear, read as pieces standing still in the air over an empty field (WORDS), are no pieces: the
+// pair that comes under them is counted where pairs appear and seen in play, a pair in front of them is seen where it
+// is, garbage that rises to them does not take them into the pieces at rest, and once they are gone a piece of their
+// colour there is a piece.
+static void testWordsRead() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {4, 1}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    // (the words `below` points lower than they stand)
+    const auto wordsAt = [&](int below) {
+        Reading r = empty;
+        for (int k = 16; k <= 20; ++k)
+            for (int x = 0; x < W; ++x)
+                if (const char w = WORDS[k - 16][x]; w != '.') r.side[1].point[x][k - below] = w == 'g' ? GARBAGE : Cell(w - '0');
+        return r;
+    };
+    const Reading words = wordsAt(0);
+    // (a piece of `cell` in column x whose lower point is k)
+    const auto put = [](Reading& r, int x, int k, Cell cell) { r.side[1].point[x][k] = r.side[1].point[x][k + 1] = cell; };
+    Tracker t;
+    int64_t at = 1000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    run(empty, 40);
+    const int rounds = t.rounds;
+    // (they come up from below as they appear, their points read as other pieces of them first; a piece passes in front
+    //  of them as they stand)
+    for (int below = 3; below > 0; --below) run(wordsAt(below), 4);
+    Reading passing = words;
+    put(passing, 1, 17, 3);
+    run(words, 40), run(passing, 10), run(words, 40);
+    check(t.rounds == rounds, "words standing over an empty field were taken for the screen before a round");
+    Reading first = words;
+    first.side[1].point[SPAWN_X][23] = 4;
+    run(first, 1);
+    check(t.spawned[1] && t.side[1].pairs == 1, "a pair that appeared under the words was not counted");
+    Reading moved = words;
+    put(moved, 0, 12, 4), put(moved, 0, 14, 1);
+    run(moved, 1);
+    check(t.side[1].pair.seen && t.side[1].pair.at.x == 0 && t.side[1].pair.at.y == 6, "a pair under the words was not seen in play");
+    // (a piece falling by itself in front of the words' columns covers a point for 26 frames: it is no words)
+    for (int k = 11; k >= 9; --k) {
+        Reading falling = words;
+        put(falling, 0, k, 3);
+        run(falling, 13);
+    }
+    check(t.side[1].words.at[0][10] == EMPTY, "a piece falling by itself was taken for the words");
+    // (the pair in front of the words, its red child over a point of the words read red)
+    Reading front = words;
+    put(front, 0, 18, 4), put(front, 1, 18, 1);
+    run(front, 1);
+    check(t.side[1].pair.seen && t.side[1].pair.at.x == 0 && t.side[1].pair.at.y == 9 && !t.side[1].pair.at.upper && t.side[1].pair.at.dir == RIGHT,
+          "a pair in front of the words was not seen where it is");
+    // Garbage risen to the words: in column 3 up to the 9th row (the words above it read yellow), in column 4 up to the
+    // 10th (its point of the words read as garbage covered by garbage).
+    Reading risen = words;
+    for (int k = 0; k < 18; ++k) risen.side[1].point[2][k] = GARBAGE;
+    for (int k = 0; k < 20; ++k) risen.side[1].point[3][k] = GARBAGE;
+    run(risen, 3);
+    int h[W];
+    t.side[1].resting.heights(h);
+    check(h[2] == 9 && h[3] == 10, "garbage risen to the words: " + std::to_string(h[2]) + " and " + std::to_string(h[3]) + " pieces at rest in columns 3 and 4, not 9 and 10");
+    // The words gone: a yellow piece where they read yellow is a piece.
+    Reading gone = empty;
+    for (int k = 0; k < 16; ++k) gone.side[1].point[1][k] = GARBAGE;
+    run(gone, 3);
+    put(gone, 1, 16, 4);
+    run(gone, 3);
+    t.side[1].resting.heights(h);
+    check(h[1] == 9, "a yellow piece where the words were is not taken into the pieces at rest");
+    std::cout << "the words of an all clear over the field: no pieces; the pairs under them and in front of them seen\n";
+}
+
+// A pair came unseen when the window moved on; the window moves on again and the next pair is seen one reading before
+// the window reads standing: it is numbered after the one put unseen (on the real game a pair seen so under the words of
+// an all clear was numbered as the one put unseen, and the pairs after it were learnt a place out).
+static void testSeenAsWindowSettles() {
+    const Pair p[5] = {{1, 2}, {4, 4}, {4, 4}, {3, 5}, {2, 1}};
+    Reading base;
+    for (SideRead& side : base.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = p[0], side.next[1] = p[1];
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 1000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    // (the window of 2P moving, and standing at p[n], p[n + 1])
+    const auto window = [&p](Reading r, int n) {
+        if (n < 0) r.side[1].nextRead[0] = r.side[1].nextRead[1] = false;
+        else r.side[1].next[0] = p[n], r.side[1].next[1] = p[n + 1];
+        return r;
+    };
+    run(base, 40);
+    Reading field = base;
+    run(window(field, -1), 2), run(window(field, 1), 3);
+    Reading first = window(field, 1);
+    first.side[1].point[SPAWN_X][23] = p[0].axis;
+    run(first, 1);
+    check(t.side[1].pairs == 1, "the first pair was not counted");
+    // (it lies in column 1; the window moves on, and the second pair comes under a light and lies in column 2)
+    field.side[1].point[0][0] = field.side[1].point[0][1] = p[0].axis, field.side[1].point[0][2] = field.side[1].point[0][3] = p[0].child;
+    run(window(field, 1), 20);
+    run(window(field, -1), 2), run(window(field, 2), 3);
+    Reading lit = window(field, 2);
+    lit.side[1].point[5][20] = UNSURE;
+    run(lit, 30);
+    for (int k = 0; k < 4; ++k) field.side[1].point[1][k] = 4;
+    run(window(field, 2), 20);
+    // (the window moves on again; the third pair is seen in the second reading of the window standing)
+    run(window(field, -1), 1), run(window(field, 3), 1);
+    Reading third = window(field, 3);
+    third.side[1].point[SPAWN_X][23] = p[2].axis;
+    run(third, 2);
+    check(t.side[1].pairs == 3 && t.side[1].unseen == 0, "the pair seen as the window settles was counted as pair " + std::to_string(t.side[1].pairs) + ", not 3");
+    std::cout << "a pair seen as the window settles after a pair put unseen: numbered after it\n";
+}
+
+// The words of an all clear stand over the field of 2P for many frames (on the real game more than 900), behind its
+// pieces. The pairs that come under them are counted as they appear and seen in play, and the screen puts right a pair
+// the engine has elsewhere (a shaky pad).
+static void testWordsBehindPairs() {
+    DriveCounts n;
+    for (const uint64_t seed : {120, 121})
+        driveRound(seed, 2, true, 2500, n, nullptr, nullptr, -1, false, 0, nullptr, false, 0, nullptr, 0, 0, 0, false, 0, 0, 0, 0, 7, -1, 300);
+    const std::string counts = std::to_string(n.wordsSeen) + " of " + std::to_string(n.wordsSpawns) + " pairs under the words seen to appear, seen in play in " +
+                               std::to_string(n.wordsPairSeen) + " of " + std::to_string(n.wordsControl) + " frames, " + std::to_string(n.wordsCorrected) + " put right";
+    check(n.wordsSpawns >= 20 && n.wordsSeen * 10 >= n.wordsSpawns * 9 && n.miscounted == 0, counts + ", " + std::to_string(n.miscounted) + " counted wrong");
+    check(n.wordsPairSeen * 2 >= n.wordsControl && n.wordsCorrected > 0, counts);
+    check(n.leftAlone == 0 && n.downAtSpawn == 0 && n.hits * 10 >= n.locks * 9,
+          "with the words behind the pieces of 2P: " + std::to_string(n.leftAlone) + " pairs left alone, " + std::to_string(n.downAtSpawn) + " took the down button before, " +
+              std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose");
+    std::cout << "words behind the pieces of 2P: " << counts << "\n";
+}
+
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------
 
 static void testMenus() {
@@ -2018,6 +2195,9 @@ int main(int argc, char** argv) {
         testWindowReleaseBounded();
         testCoveredField();
         testWindowAlikeUnderWords();
+        testWordsRead();
+        testSeenAsWindowSettles();
+        testWordsBehindPairs();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
         testMenus();
