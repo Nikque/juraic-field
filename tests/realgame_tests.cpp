@@ -1300,11 +1300,14 @@ struct DriveCounts {
 // appears, for that many frames. garbageAsLit: that many pieces of garbage fall on 2P before each of those pairs (sent
 // as the pair before is locked: the engine of the driver, which knows of no garbage, foresees the pair sooner).
 // noiseStream: the stream of the random noise on the pictures (another stream, the same round read otherwise).
+// coveredFrom: from that frame of the round on, a still block of yellow over columns 2 to 5 of 2P, from half a cell
+// below the 9th row to half a cell above the 11th (on the real game the words of an all clear stood so over the field
+// of 2P for more than 900 frames, read as pieces of a colour above the pieces at rest, in a clear reading).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
                        int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0,
-                       int litAsAppears = 0, int garbageAsLit = 0, uint64_t noiseStream = 7) {
+                       int litAsAppears = 0, int garbageAsLit = 0, uint64_t noiseStream = 7, int coveredFrom = -1) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -1355,6 +1358,10 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
             const SideLayout& s = l.side[1];
             canvas.fill(s.left, s.bottom - 2 * s.cellHeight, s.left + s.cellWidth, s.bottom - s.cellHeight, LIGHT);
             if (litFor > 0) --litFor;
+        }
+        if (coveredFrom >= 0 && f >= coveredFrom) {
+            const SideLayout& s = l.side[1];
+            canvas.fill(s.left + s.cellWidth, s.bottom - 10.75f * s.cellHeight, s.left + 5 * s.cellWidth, s.bottom - 8.25f * s.cellHeight, Rgb{240, 210, 60});
         }
         follow.step(read(canvas.picture(), l), clock);
         // (the pair seen as it is about to appear, or in play already when seen late)
@@ -1656,7 +1663,7 @@ static void testPairsLitAsTheyAppear() {
         driveRound(120 + uint64_t(k), 5, false, 2500, fallen, &notes, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 30, 6);
     }
     int unseen = 0, off = 0;
-    const std::string begun = "begun unseen: the screen not read, the engine had it appear in frame ";
+    const std::string begun = "begun unseen: the screen not showing it, the engine had it appear in frame ";
     for (const auto& [at, line] : notes) {
         const size_t i = line.find(begun);
         if (i == std::string::npos) continue;
@@ -1746,6 +1753,78 @@ static void testLongLights() {
     check(lifted.locks >= 20 && lifted.leftAlone == 0, "light 80, noise 27: " + std::to_string(lifted.leftAlone) + " pairs left alone in " + std::to_string(lifted.locks) + " locks");
     check(lifted.downAtSpawn == 0 && lifted.miscounted == 0, "light 80, noise 27: the down button carried to the next pair or a pair miscounted");
     std::cout << "long lights: no pair left alone, no down button carried to the next pair, no pair miscounted\n";
+}
+
+// Words the screen draws over the field and leaves there read as pieces in a clear reading, and the pairs that come
+// behind them are not seen. None of those pairs may be left alone.
+static void testCoveredField() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {120, 121}) {
+        auto a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, 5, false, 2500, n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 0, 0, 7, 600);
+    }
+    check(n.locks >= 20 && n.leftAlone == 0, "with words over the field of 2P: " + std::to_string(n.leftAlone) + " pairs left alone in " + std::to_string(n.locks) + " locks");
+    check(n.downAtSpawn == 0, "with words over the field of 2P: " + std::to_string(n.downAtSpawn) + " pairs took the previous pair's down button");
+    std::cout << "words over the field of 2P: no pair left alone in " << n.locks << " locks\n";
+}
+
+// Words over the field (still pieces above where pairs appear, read clear) hide the pairs that come, and the window
+// shows two pairs alike. Three pictures of the window read otherwise look like the window moving on; the window moving on
+// after them must still begin a pair (on the real game something crossed the window of 2P for two pictures, and no
+// pair of 2P was begun after it to the end of the round; three pictures read so in a row are a window standing still).
+static void testWindowAlikeUnderWords() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 5}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    Driver d;
+    std::vector<int> waits;
+    d.agent = std::make_unique<EarlyAgent>(&waits);
+    d.lag = 5, d.takeLag = false;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k, ++at) f.step(r, at), d.tick(f, at);
+    };
+    run(empty, 40);
+    Reading first = empty;
+    first.side[1].next[0] = {1, 2}, first.side[1].next[1] = {3, 3};
+    first.side[1].point[SPAWN_X][23] = 5;
+    run(first, 1);
+    check(d.played == 1, "the first pair under the words was not begun");
+    Reading words = empty;
+    words.side[1].next[0] = {1, 2}, words.side[1].next[1] = {3, 3};
+    for (int x = 1; x <= 4; ++x)
+        for (int k = 16; k <= 20; ++k) words.side[1].point[x][k] = 4;
+    run(words, 120);
+    check(!d.playing(), "the engine did not put the first pair under the words");
+    // (the window moves on as a pair comes: two pictures of it not read, then the new pairs)
+    const auto moveOn = [&](Pair a, Pair b) {
+        Reading moving = words;
+        moving.side[1].nextRead[0] = moving.side[1].nextRead[1] = false;
+        run(moving, 2);
+        words.side[1].next[0] = a, words.side[1].next[1] = b;
+    };
+    moveOn({3, 3}, {3, 3});
+    const int second = d.played;
+    run(words, 12);
+    check(d.played == second + 1, "the second pair under the words was not begun");
+    run(words, 120);
+    Reading crossed = words;
+    crossed.side[1].next[1] = {1, 4};
+    run(crossed, 3);
+    run(words, 120);
+    const int third = d.played;
+    moveOn({3, 3}, {1, 4});
+    run(words, 12);
+    check(d.played > third, "after the window was read otherwise for three pictures, the pair that came under the words was not begun");
+    std::cout << "a window of two pairs alike read otherwise for three pictures: the pair that comes after it is begun\n";
 }
 
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------
@@ -1871,8 +1950,14 @@ static void testRecord(const std::string& folder) {
         check(r.open(dir / "many", ""), "the record is not made");
         int taken = 0;
         for (int i = 0; i < Record::MAX_PICTURES + 20; ++i) {
-            taken += r.offer(pic.picture(), int64_t(i) * Record::PICTURE_EVERY);
-            std::this_thread::sleep_for(std::chrono::milliseconds(3)); // (time for the writer: none dropped as four behind)
+            bool kept = r.offer(pic.picture(), int64_t(i) * Record::PICTURE_EVERY);
+            // (a picture dropped as the writer is four behind is offered again once it has caught up: waiting 3 ms after
+            //  each, 177 of 200 were kept with eight copies of these tests running at once)
+            for (int k = 0; k < 5000 && !kept && r.picturesTaken() < Record::MAX_PICTURES; ++k) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                kept = r.offer(pic.picture(), int64_t(i) * Record::PICTURE_EVERY);
+            }
+            taken += kept;
         }
         r.close();
         int files = 0;
@@ -1931,6 +2016,8 @@ int main(int argc, char** argv) {
         testPairsLitAsTheyAppear();
         testLongLights();
         testWindowReleaseBounded();
+        testCoveredField();
+        testWindowAlikeUnderWords();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
         testMenus();

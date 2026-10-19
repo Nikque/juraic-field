@@ -138,14 +138,14 @@ public:
         }
         if (!agent) return held = 0;
         const int counted = side.pairs + side.unseen; // (with the pairs the window tells were put unseen)
-        if (t.rounds != round || counted < pairsSeen - (blindFor >= 0 ? 1 : 0)) {
-            if (t.rounds != round) {
-                following = untilLocked = false;
-                windowReadAt = windowPauseAt = -1;
-                own = juraic::Player{};
-                past.clear();
-            }
-            round = t.rounds, pairsSeen = 0, blindFor = -1;
+        // (Tracker counts the pairs of a round from 0 only as a new round begins. A pair begun unseen is numbered one
+        //  past those it has counted, and stays so when the window moving on - not its count - tells it has been put.)
+        if (t.rounds != round) {
+            following = untilLocked = false;
+            windowReadAt = windowPauseAt = -1;
+            own = juraic::Player{};
+            past.clear();
+            round = t.rounds, pairsSeen = 0, blindFor = -1, shiftBegun = -1;
             agent->startRound(me, seed++);
             stop();
             shots.clear(); // (a pair of the round before is not fitted: its pictures may be cut short)
@@ -158,10 +158,11 @@ public:
             //  engine has put it already)
             blindFor = -1;
             if (!active || std::abs(side.spawnedAt - blindAt) > BLIND_SLACK) begin(f, side);
-        } else if (blindFor >= 0 && side.unseen > 0 && counted >= blindFor) {
+        } else if (blindFor >= 0 && ((side.unseen > 0 && counted >= blindFor) || side.shiftedAt > shiftBegun)) {
             // (the window tells the pair begun unseen has been put, the screen never showing it: the next one may be
             //  begun unseen too - kept waiting for the screen to show this one, the next pair under the same light, 80
-            //  frames long, was left alone 11 times in a round of 34 pairs drawn so)
+            //  frames long, was left alone 11 times in a round of 34 pairs drawn so. The window moving on again tells
+            //  so too, when what it was counted by was one ahead.)
             blindFor = -1;
         }
         keepShot(f);
@@ -240,6 +241,7 @@ private:
     int begunRound = -1; // the round of the last pair begun (the engine's field is of it)
     int blindFor = -1;      // the pair begun unseen, until the screen shows it (-1: none)
     int64_t blindAt = -1;   // ... the frame the engine had it appear
+    int64_t shiftBegun = -1; // the window's last move on (SideTrack::shiftedAt) as the pair in play was begun
     int64_t checked = -1;
     int noted = -2; // the placement last noted (notes)
     int64_t steeredSeen = 0, againSeen = 0; // the agent's counts of the nearest placements taken and the second choices taken, as last noted
@@ -330,7 +332,7 @@ private:
         }
         // (seen late, it was in play already in the frame of the picture: it is taken as appearing in that frame)
         next = side.spawnedAt + (side.late ? 0 : 1);
-        startOwn = own, startNext = next;
+        startOwn = own, startNext = next, shiftBegun = t.side[me].shiftedAt;
         past.clear();
         checked = -1;
         active = true, following = false, untilLocked = false;
@@ -363,12 +365,17 @@ private:
     }
     // The next pair has come and the screen does not show it: BLIND_AFTER frames after it appeared, the screen of the own
     // side not read (a light over it). On the real game the screen of 2P read nothing for 30 frames as a pair appeared,
-    // and nothing played the pair until the screen showed it.
+    // and nothing played the pair until the screen showed it. So too with the side read clear: words drawn over the field
+    // read as pieces above them, and the pair is not found under them. On the real game the words of an all clear stood
+    // over the field of 2P for more than 900 frames, read clear, and every pair that came was left to fall by itself.
+    // A pair has come when the window has moved on since the pair in play was begun. (Counted by the pairs the window
+    // tells were put unseen, a window of two pairs alike read otherwise for three pictures put that count one ahead, and
+    // the window moving on after it was taken for no pair: no pair was begun to the end of the round.)
     bool blindDue(const Follower& f, int64_t now) const {
         const Tracker& t = f.tracker;
         const SideTrack& side = t.side[me];
         const int64_t appears = appeared(t);
-        return pairsSeen > 0 && blindFor < 0 && side.pairs + side.unseen == pairsSeen && appears >= 0 && now >= appears + BLIND_AFTER && !side.clear;
+        return pairsSeen > 0 && blindFor < 0 && side.shiftedAt > shiftBegun && appears >= 0 && now >= appears + BLIND_AFTER;
     }
     // The next pair, begun unseen, of the colours learnt: the engine goes on from where it stopped (a chain it still ran
     // run to its end at once), the pair appearing in the frame it came; the screen puts it right when it shows it.
@@ -386,13 +393,13 @@ private:
         next = appears + 1;
         pairsSeen = t.side[me].pairs + t.side[me].unseen + 1;
         blindFor = pairsSeen, blindAt = appears;
-        startOwn = own, startNext = next;
+        startOwn = own, startNext = next, shiftBegun = t.side[me].shiftedAt;
         past.clear();
         checked = -1;
         active = true, following = false, untilLocked = false;
         ++played;
         noted = -2;
-        note(f.tracker.frame, "2P pair " + std::to_string(pairsSeen) + " begun unseen: the screen not read, the engine had it appear in frame " + std::to_string(appears) +
+        note(f.tracker.frame, "2P pair " + std::to_string(pairsSeen) + " begun unseen: the screen not showing it, the engine had it appear in frame " + std::to_string(appears) +
                                   ", lag " + std::to_string(lag));
         bool same = true;
         const int64_t at = now + lag;
