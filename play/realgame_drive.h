@@ -179,7 +179,13 @@ public:
             blindFor = -1;
         }
         keepShot(f);
-        if (side.nextRead[0] && side.nextRead[1] && side.nextStill >= t.windowStill) windowReadAt = t.frame;
+        if (side.nextRead[0] && side.nextRead[1] && side.nextStill >= t.windowStill) windowReadAt = t.frame, standing[0] = side.next[0], standing[1] = side.next[1];
+        if (t.frame != oddAt) {
+            // (readings in a row of the window otherwise than it last stood, or not read whole)
+            const auto same = [](juraic::Pair a, juraic::Pair b) { return a.axis == b.axis && a.child == b.child; };
+            const bool asStood = side.nextRead[0] && side.nextRead[1] && same(side.next[0], standing[0]) && same(side.next[1], standing[1]);
+            oddAt = t.frame, windowOddFor = asStood ? 0 : windowOddFor + 1;
+        }
         if (!active) {
             wait(f, now);
             if (blindDue(f, now)) beginBlind(f, now);
@@ -195,7 +201,9 @@ public:
             const bool unseenInAir = blindFor == pairsSeen && !(side.clear && side.loose == 0);
             // A pair read as lying can lift again while earlier buttons arrive. Resume its down button when a clear
             // picture shows it in the air; one such pair was left for 10 frames after a light of 80 frames.
+            const bool heldBefore = untilLocked;
             if (following && side.pairs == pairsSeen && side.inHand && side.clear && side.pair.seen && !pairLying(side.pair, side.under)) untilLocked = true;
+            if (!heldBefore && untilLocked) note(t.frame, "2P pair " + std::to_string(pairsSeen) + " held down again: the screen shows it in the air");
             // So too, the window not moved on since the pair appeared, a pair Follower no longer finds lying, or takes as
             // put with no chain and nothing of it at rest: a clear picture that shows pieces of a colour above the pieces
             // at rest shows it in the air still (read lying, lifted by a turn on its way, let go by Tracker on a picture
@@ -208,7 +216,10 @@ public:
             if (following && side.pairs == pairsSeen && side.clear && side.shiftedAt <= side.spawnedAt + t.pairGap && contains(side.resting, side.under)) {
                 const bool put = m.followed == pairsSeen - 1;
                 const bool air = colouredAbove(t.last.side[me], side.resting) > 0;
-                if (air && (put ? m.chains == 0 && side.resting == side.under : !m.lying)) untilLocked = true, liftedFor = pairsSeen;
+                if (air && (put ? m.chains == 0 && side.resting == side.under : !m.lying)) {
+                    if (!untilLocked) note(t.frame, "2P pair " + std::to_string(pairsSeen) + " held down again: pieces of a colour in the air after it was taken as " + (put ? "put" : "lying"));
+                    untilLocked = true, liftedFor = pairsSeen;
+                }
                 else if (!air && put && liftedFor == pairsSeen) untilLocked = false, liftedFor = -1;
             }
             if (untilLocked && (side.pairs == pairsSeen || unseenInAir) && !lies(f)) {
@@ -216,8 +227,10 @@ public:
                 // stand still sent the old down button to 26 next pairs in 16 rounds with lights of 30 to 120 frames.
                 // An unread window alone cannot prove a lock. Keep untilLocked, and resume after nextSlide frames if
                 // neither the field nor the window has confirmed it (a window hidden for longer must not leave a pair).
-                if (!side.nextRead[0] && !side.nextRead[1] && windowReadAt > startNext && windowReadAt > windowPauseAt)
-                    windowPauseAt = t.frame;
+                // (as the real game draws it, the window moving shows one of its pairs read otherwise and the other not
+                //  read, never both unread: 9 frames before a pair, the down button held on went on to that pair)
+                const bool moving = (!side.nextRead[0] && !side.nextRead[1]) || windowOddFor >= 2;
+                if (moving && windowReadAt > startNext && windowReadAt > windowPauseAt) windowPauseAt = t.frame;
                 if (windowPauseAt >= startNext && now < windowPauseAt + t.timing.nextSlide) return press(now, held = 0);
                 return press(now, held = juraic::BTN_DOWN);
             }
@@ -284,6 +297,9 @@ private:
     bool untilLocked = false;
     int liftedFor = -1; // the pair held down again as a clear picture showed pieces of a colour in the air after it was put
     int64_t windowReadAt = -1, windowPauseAt = -1; // last stable window, and the bounded release when it became unread
+    juraic::Pair standing[2]{};                     // ... the window as it stood then
+    int64_t oddAt = -1;                             // the reading windowOddFor last counted
+    int windowOddFor = 0;                           // readings in a row of the window otherwise than it stood (or not read whole)
     std::unique_ptr<juraic::ai::Agent> nextAgent; // (replaceAgent)
     juraic::Rng noGarbage{1, 1}; // (settlePlayer lets garbage fall by it: there is none in the engine)
 
@@ -503,7 +519,10 @@ private:
     // fallen by it found no way to its placement behind a high column: four pairs went down where they appeared.)
     bool lies(const Follower& f) const {
         const SideModel& m = f.model[me];
-        if (m.lying && m.index == pairsSeen - 1) return true;
+        // (a turn sent and not yet taken by the game can lift a pair read lying: not lying until it has been)
+        bool turnOnItsWay = false;
+        for (int k = 0; k <= lag && !turnOnItsWay; ++k) turnOnItsWay = (padAt(f.tracker.frame - k) & (juraic::BTN_CW | juraic::BTN_CCW)) != 0;
+        if (m.lying && m.index == pairsSeen - 1 && !turnOnItsWay) return true;
         return following && own.phase == juraic::Phase::Next && own.wait <= 2;
     }
 

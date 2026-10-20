@@ -1796,6 +1796,51 @@ static void testWindowReleaseBounded() {
     std::cout << "an unread window releases briefly, then holds the pair again when no lock was confirmed\n";
 }
 
+// The window starts moving as the real game draws it: one of its two pairs read otherwise, the other not read, never
+// both unread. Read so in two readings in a row after the engine has locked the pair (the screen not showing it), the
+// down button is let go as for an unread window, and held again after nextSlide frames. (Held on, it went on to the
+// next pair as it appeared: the real game's window of 2P moved 9 frames before the pair, one of its pairs read all
+// the while.) One reading read otherwise lets nothing go.
+static void testWindowHalfMoving() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 5}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    Driver d;
+    std::vector<int> waits;
+    d.agent = std::make_unique<EarlyAgent>(&waits);
+    d.lag = 5, d.takeLag = false;
+    int64_t at = 50000;
+    for (int k = 0; k < 40; ++k, ++at) f.step(empty, at), d.tick(f, at);
+    Reading first = empty;
+    first.side[1].next[0] = {1, 2}, first.side[1].next[1] = {3, 3};
+    first.side[1].point[SPAWN_X][23] = 5;
+    f.step(first, at), d.tick(f, at), ++at;
+    check(d.played == 1 && d.playing(), "the pair for the half-moving-window test was not begun");
+    Reading hidden = first;
+    hidden.side[1].unsure = 1;
+    for (int k = 0; k < 100 && d.playing(); ++k, ++at) f.step(hidden, at), d.tick(f, at);
+    check(!d.playing(), "the engine did not lock the pair for the half-moving-window test");
+    // One reading otherwise (a picture read wrong): the button is held.
+    Reading half = hidden;
+    half.side[1].next[0] = {3, 3}, half.side[1].nextRead[1] = false;
+    f.step(half, at);
+    check(d.tick(f, at) == BTN_DOWN, "one reading of the window otherwise lets the down button go"), ++at;
+    for (int k = 0; k < 3; ++k, ++at) f.step(hidden, at), d.tick(f, at);
+    // Moving: read otherwise in readings in a row.
+    for (int k = 0; k < f.tracker.timing.nextSlide + 5; ++k, ++at) {
+        f.step(half, at);
+        const uint8_t b = d.tick(f, at);
+        check(b == (k >= 1 && k < 1 + f.tracker.timing.nextSlide ? 0 : BTN_DOWN),
+              "a window moving with one pair read does not give a bounded release at its reading " + std::to_string(k) + " (" + std::to_string(int(b)) + ")");
+    }
+    std::cout << "a window moving with one of its pairs read releases briefly, as an unread one\n";
+}
+
 // Longer lights cover a pair through its lock and the next window moving on. The down button for that pair must end
 // before the next pair takes it, even when garbage has made the engine's field and timing different from the screen.
 static void testLongLights() {
@@ -2618,6 +2663,7 @@ int main(int argc, char** argv) {
         testPairsLitAsTheyAppear();
         testLongLights();
         testWindowReleaseBounded();
+        testWindowHalfMoving();
         testCoveredField();
         testWindowAlikeUnderWords();
         testPairOverAGap();
