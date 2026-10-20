@@ -147,3 +147,24 @@
 - `realgame_tests` の出力は Windows と WSL で同じ。
 - 写しの乱数の流れ: 前の書き方では `testWordsBehindPairs`・`testKicksShownLate` などが乱数の流れ 7 を位置の引数で明示して渡していて、`variants3.py` の写し salt17/27/37 でも流れが替わらなかった。`DriveScenario` では既定と同じ 7 を書かないので、写しではそれらの試験も流れが替わる（試す回戦が増えた）。そこで見つかったのが 6.1 の「自分で見つけた」放置。整理と高速化だけを当てた写し（動きを変える直し 2 つを外した `order\w14\no_behav.py`）の試験の出力は `04808ee` と同じ（新しい試験 2 つが落ちるだけ）で、整理と高速化は動きを変えていない。
 - 写しの段の台本は新しい試験の形に合わせた（`order\w14\checks14.sh`・`verify14.sh`・`mkshake14.sh`・`make_shake3.py`・`shake_tracker3.py`、`order\variants3.py` は前の形も読める）。
+
+### 6.5 履歴の書き直し（3 回目。利用者の決め: push していないものも、push 済みのものも書き直す）
+
+- 対象: `realgame-2p` と `main` の `4f38b09`（前の番号 `96916a0`、push 済み）から先頭までの 36 コミットと、タグ `v0.9.5`。台本は `order\w14\rewrite3.sh`（`rewrite3_tree.py`・`rewrite3_msg.py`・`rewrite3_check.py`）。
+- 変えたのは資料（`*.md`）だけ: 利用者のフォルダーの道（`C:\Users\<名前>\`）を `%USERPROFILE%\` に、版の先の話を書いた所を消し、別の仕事の窓とその資料の道を消し、例外の外の元のゲームの名前を含む窓の題名を「対戦場の窓」に、玉の呼び名を「玉の数」にした。資料とコミットの文の中のコミット番号は新しい番号にした。
+- 確かめ: 36 コミットとも資料の外のファイルは前と同じ。`main` と `v0.9.5` の木は前と同じ。新しい `realgame-2p`・`main`・`v0.9.5` に、利用者の名前・予定・別の仕事・例外の外の名前は無い（`git grep`、`git log -S`）。
+- 番号の対応（全部は `order\w14\rewrite3_map.txt`）:
+
+| 前 | 後 | コミット |
+|---|---|---|
+| `96916a0` | `4f38b09` | 13 回目の記録の引き継ぎ（利用者の名前の入った道が最初に入った所） |
+| `e248973` | `62f7bf3` | Version 0.9.5 |
+| `5e3e005` | `e7e5ee3` | `main` への取り込み（0.9.5、タグ `v0.9.5`） |
+| `7d64cee` | `aa9ac8a` | `main` の先頭 |
+| `bc56b00` | `51f69ac` | push 済みの `realgame-2p` の先頭 |
+| `943d186` | `e96bdc1` | Version 0.9.6 |
+| `540dbb6` | `04808ee` | クロスチェックの受け入れの引き継ぎ |
+| `4b9f7ed` | `2e4cdeb` | クロスチェックの受け入れ（この窓の直し） |
+
+- 控え（push しない）: `refs/backup-rewrite3/heads/realgame-2p`・`refs/backup-rewrite3/heads/main`・`refs/backup-rewrite3/tags/v0.9.5` と `refs/original-rewrite3/`。前の書き直しの控え（枝 `backup/realgame-2p-before-rewrite`、`refs/original/`）もそのまま。
+- `realgame-2p`・`main`・`v0.9.5` は push 済みの番号が変わったので、push には強制が要る（名前を書いて、前の番号を確かめる形で行う）。GitHub は前の番号のコミットを、番号を知る人にはしばらく見せることがある。
