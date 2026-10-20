@@ -4,7 +4,7 @@
 
 ## 1. 今の状態（2026-10-21 未明）
 
-- **2026-10-21 朝（13 個目の窓）のクロスチェックの受け入れ、確かめ、公開は 6 節。** この節の下は、その前の状態。
+- **2026-10-21 朝（13 個目の窓）のクロスチェックの受け入れと確かめは 6 節、0.9.6 の公開（07:19、Latest）は 7 節。** この節の下は、その前の状態。
 - リポジトリ `C:\puyowork\puyo-19-chain-generator`、枝 `realgame-2p`。先頭はこの資料のコミット。その前が `e96bdc1`（Version 0.9.6）、`8dd92f3`（実機のモードの最後の直し・試験・資料）。作業ツリーに書きかけは無い。
 - **push 済みは `51f69ac` まで。** `main` = `origin/main` = `aa9ac8a`（v0.9.5。作業ツリー `C:\puyowork\wt-main095`）。公開した最新は v0.9.5。タグ `v0.9.6` は無い。
 - push していないコミットの履歴は書き直してある（資料 6 の 9.10。番号の対応表もそこ）。控えの枝 `backup/realgame-2p-before-rewrite` と `refs/original/…` は **push しない**。
@@ -168,3 +168,47 @@
 
 - 控え（push しない）: `refs/backup-rewrite3/heads/realgame-2p`・`refs/backup-rewrite3/heads/main`・`refs/backup-rewrite3/tags/v0.9.5` と `refs/original-rewrite3/`。前の書き直しの控え（枝 `backup/realgame-2p-before-rewrite`、`refs/original/`）もそのまま。
 - `realgame-2p`・`main`・`v0.9.5` は push 済みの番号が変わったので、push には強制が要る（名前を書いて、前の番号を確かめる形で行う）。GitHub は前の番号のコミットを、番号を知る人にはしばらく見せることがある。
+
+## 7. 0.9.6 の公開（2026-10-21 朝、13 個目の窓）
+
+### 7.1 push と公開
+
+- `main` へ取り込み（`473c91f`、`Merge realgame-2p (version 0.9.6) into main`。資料の消しだけが `realgame-2p` との違い）、注釈つきのタグ `v0.9.6`（タグの物 `10247fb` → `473c91f`）。
+- push（名前を書いて。書き直した 3 つは前の番号を確かめる強制）: `realgame-2p` → `8eaf8a7`（7.4 で書き直して `99359a9`）、`main` → `473c91f`、`v0.9.5` → タグの物 `9f882d4`（→ `e7e5ee3`）、`v0.9.6` は新しく。GitHub の `git ls-remote` で 4 つとも確かめた。控えの枝・`refs/backup-rewrite3/`・`refs/original*/` は push していない。
+- 公開: https://github.com/Nikque/juraic-field/releases/tag/v0.9.6 （題「Juraic Field v0.9.6」、Latest、10-21 07:19）。題は、4.4 の 9 に書いた「Juraic Field 0.9.6」ではなく、これまでの公開（「Juraic Field v0.9.5」など）の形に合わせた。本文は `C:\puyowork\artifacts\release-notes-v0.9.6.md`（試験の本数: Windows 37、Linux 29、Mac 29）。
+
+### 7.2 配布物（`C:\puyowork\artifacts\v0.9.6\`、公開したものと同じ）
+
+| ファイル | 大きさ | SHA-256 の頭 | 作り方 |
+|---|---|---|---|
+| `juraic-field-v0.9.6-windows-x64.zip` | 84,991,580 | `d70c0659` | `bench\make_release_zip_096.ps1`（`C:\puyowork\artifacts\` にも同じもの） |
+| `juraic-field-v0.9.6-linux-x86_64.tar.gz` | 87,931,284 | `ad235802` | WSL `bench\make_linux_tar.sh 0.9.6`（作ったときの自己テスト 0・3003 とも 0） |
+| `juraic-field-v0.9.6-macos-arm64.zip` | 87,858,299 | `c53960aa` | Mac の run `39504282642` の成果物（`D:\juraic-linux\mac-ci\v096\macos-results`）から `bench\make_mac_zip.py 0.9.6 20261021 …`。46 個、実行権は `JuraicField` と `random_19_chain`（0.9.5 と同じ形） |
+| `juraic-field-v0.9.6-android-arm64.apk` | 89,994,970 | `ec6b1a18` | Android の run `39504282559` の `app-release.apk`（`D:\juraic-linux\android-ci\v096`） |
+| `juraic-field-v0.9.6-android-readme.txt` | 8,391 | `123dcc6d` | 0.9.5 のものの版を替えた |
+| `SHA256SUMS-v0.9.6.txt` | 519 | — | 上の 5 つ（Windows の zip が 1 行目） |
+
+### 7.3 確かめ
+
+| 確かめ | 結果 |
+|---|---|
+| Mac の run（タグ） | 成功。試験 29 本すべて通過（`realgame_screen_read` 732 秒も通過）、X3 のチェックサム 4 つが Windows と同じ、自己テスト 20 個すべて 0 |
+| Android の run（タグ） | 成功。公開用の鍵（証明書 `d818408a…0cb6`）で v2 の署名、版 0.9.6、エミュレーター（Android 14）でメニューまで起動。アプリの落ちの記録なし |
+| `main` の Mac・Android の run | どちらも成功 |
+| 本文と Android の説明の語 | 見つからない（4.4 の 8 と 3 節に書いた、公開の文章に書かない語。`release_download_check.ps1` の語に、先の話と対戦場の語を足して） |
+| 配布物の中の文書の語（Windows・Linux・Mac） | 0.9.5 と同じ所だけ（README の断り書き、README.en、URL_FORMATS、CHANGELOG の前の版の項）。新しく増えた所なし。README・CHANGELOG に対戦場の記述なし |
+| `release_download_check.ps1 0.9.6` | 落とした Windows の zip が一覧・手元のものと同じ。展開した写しで自己テスト 0・3003 とも 0 |
+| 落とし直した 6 つ | 一覧（`sha256sum -c`）と手元のものと同じ |
+| Linux の tar.gz（落とし直したもの、WSL で展開） | 自己テスト 3003 は 0。自己テスト 0 は、WSL の音の出口（`/mnt/wslg/PulseServer`）が無い間は 10（BGM がどの場面でも鳴らない）、ある間は 0。0.9.5 の tar.gz と交互に 4 回ずつ流して、0.9.5 も同じ（出口の無い間の 1 回目はどちらも 10、出口ができた後はどちらも 0）。0.9.0 の組み立てのときも同じ 10 が出ていた。音を開くコードは 0.9.5 から変わっていない |
+
+- タグ `v0.9.5` を押し直したので、その Mac と Android の run も動いた。Android は成功、Mac は `realgame_screen_read` で落ちた。0.9.5 のタグの最初の run（`39109432038`）と同じ落ちで、木も同じ（タグの後の `9e0297a` で直したもの。0.9.5 の公開の Mac の配布物はその後のコミットから作った）。
+- 実機での確かめは、まだしていない（このモードを 0.9.6 の組み立てで実機につないで試すこと、置き違いの数、放置が無くなったこと）。Linux・Mac の実機、Android の端末とコントローラーも確かめていない。
+- `C:\puyowork\juraic-arena` への同じ直しは入れたが、その置き場にはコミットが 1 つも無い（もとから）ので、ファイルに入れたまま。
+- この節のコミットは、利用者に聞いてから push した（その後 7.4 で書き直した）。
+
+### 7.4 先頭の資料のコミット 2 つの書き直し（4 回目。利用者の決め）
+
+- 6.5 の説明の行が、3 回目の書き直しで消した版の先の話の語句を、そのまま引いていた（push 済みの 2 つのコミットに入っていた）。その行を語句を引かない形に直し、先頭の資料だけのコミット 2 つを書き直した（`main` とタグには入っていない）。この窓で書いたほかの資料の行とコミットの文には、同じものは無い。
+- 番号の対応: `8eaf8a7` → `99359a9`（6.5 の書き直しの引き継ぎ）、`65833d2` → この節のコミット（0.9.6 の公開の引き継ぎ）。7.1 の `realgame-2p` の番号に新しい番号を書き足した。
+- 控え（push しない）: `refs/backup-rewrite4/heads/realgame-2p`（`65833d2`）。
+- `realgame-2p` の push は、前の番号（`65833d2`）を確かめる強制で行う。
