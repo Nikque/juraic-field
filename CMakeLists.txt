@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(juraic_field VERSION 0.9.5 LANGUAGES CXX)
+project(juraic_field VERSION 0.9.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
@@ -169,6 +169,13 @@ if(BUILD_TESTING)
         target_link_libraries(udp_tests PRIVATE ws2_32)
     endif()
     add_test(NAME net_udp_on_this_machine COMMAND udp_tests)
+    # What a player's machine takes from a server of Juraic Arena, the server played at 127.0.0.1.
+    add_executable(arena_tests tests/arena_tests.cpp play/arena_play.h play/arena/tcp.h play/arena/follow.h play/arena/rules_text.h)
+    target_link_libraries(arena_tests PRIVATE Threads::Threads)
+    if(WIN32)
+        target_link_libraries(arena_tests PRIVATE ws2_32)
+    endif()
+    add_test(NAME arena_lines_on_this_machine COMMAND arena_tests)
     # Versus AI (ai/).
     add_executable(ai_tests tests/ai_tests.cpp ai/observe.h ai/duel.h ai/input.h ai/detect.h ai/params.h ai/build.h ai/gaze.h ai/value.h ai/exchange.h ai/pace.h ai/tactics.h ai/level.h)
 target_link_libraries(ai_tests PRIVATE Threads::Threads)

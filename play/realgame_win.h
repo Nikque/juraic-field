@@ -72,10 +72,11 @@ inline HWND findProgramWindow(const std::wstring& program) {
 }
 
 struct RealGameMode {
-    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_PRESS, ROW_BACK, ROWS };
+    enum Row { ROW_STYLE, ROW_LEVEL, ROW_HIGH, ROW_READ, ROW_PLAY, ROW_PRESS, ROW_BACK, ROWS };
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
+    bool keepLow = true;           // the pairs kept below the 13th row (Driver::keepLow); so each time the mode is opened
 
     RealGameMode() = default;
     RealGameMode(const RealGameMode&) = delete;
@@ -104,6 +105,7 @@ struct RealGameMode {
         stopPlaying(), stopPress();
         style = settingsStyle ? 1 : 0;
         level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LEVELS ? juraic::ai::LEVELS : settingsLevel;
+        keepLow = true;
         stopReading();
     }
     // The value of the row under the cursor changed by `by` steps; past either end it comes in again at the other
@@ -112,6 +114,7 @@ struct RealGameMode {
         const Hold hold(state);
         if (row == ROW_STYLE) style = ((style + by) % 2 + 2) % 2;
         else if (row == ROW_LEVEL) level = ((level - 1 + by) % juraic::ai::LEVELS + juraic::ai::LEVELS) % juraic::ai::LEVELS + 1;
+        else if (row == ROW_HIGH) keepLow = by % 2 ? !keepLow : keepLow;
         else if (row == ROW_PRESS) pressButton = ((pressButton + by) % PRESS_BUTTONS + PRESS_BUTTONS) % PRESS_BUTTONS;
         else return false;
         return true;
@@ -156,19 +159,24 @@ struct RealGameMode {
         if (reading != Reading::On) return error = L"先に「読み始める」で実機の窓を選んでください", false;
         if (!pad.running() && !pad.start(error)) return false;
         driver = realgame::Driver{};
-        realgame::Driver::prepare(agent.get());
+        driver.keepLow = keepLow;
+        realgame::Driver::prepare(agent.get(), keepLow);
         driver.lag = lag, driver.turnsSwapped = turnsSwapped, driver.agent = std::move(agent);
         driver.notes = &notes;
         playing = true;
-        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are"));
+        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are") +
+                                        (keepLow ? ", the pairs kept below the 13th row" : ", the 13th row used"));
         return true;
     }
-    // The AI changed on the screen while it plays: `agent` plays 2P from the next pair on.
+    // The AI changed on the screen while it plays (its kind, its level, the 13th row): `agent` plays 2P from the next
+    // pair on.
     void replaceAgent(std::unique_ptr<juraic::ai::Agent> agent) {
         const Hold hold(state);
         if (!playing) return;
+        driver.keepLow = keepLow;
         driver.replaceAgent(std::move(agent));
-        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level));
+        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level) +
+                                        (keepLow ? ", the pairs kept below the 13th row" : ", the 13th row used"));
     }
     void stopPlaying() {
         const Hold hold(state);
@@ -250,8 +258,6 @@ struct RealGameMode {
     bool confirmed = false;
     int64_t readSince = 0; // (the frame of the clock reading began in)
     HWND notTheGame = nullptr;
-    static constexpr int CHOOSE_FRAMES = 10 * 60;
-    int chooseLeft = 0;
     // The parts for finding faults (JURAIC_REALGAME_DEBUG) are built in.
     static constexpr bool DEBUG_PARTS = JURAIC_REALGAME_DEBUG != 0;
     // The table: with DEBUG_PARTS the file LAYOUT_FILE in the folder of one's own files when there is one (read when
@@ -391,11 +397,12 @@ private:
                 record.reading(t.reading, t.frame, t.width, t.height);
                 if (t.width != width || t.height != height) record.event(t.frame, "picture size " + std::to_string(t.width) + " x " + std::to_string(t.height));
             }
-            const Counts before = counts();
+            const bool noting = record.isOpen();
+            const Counts before = noting ? counts() : Counts{};
             follow.step(t.reading, t.frame);
             width = t.width, height = t.height;
             ++pictures;
-            if (record.isOpen()) noteStep(before, t.frame);
+            if (noting) noteStep(before, t.frame);
             if (t.menu != menu) record.event(t.frame, std::string("menu: ") + realgame::menuName(t.menu));
             menu = t.menu;
         }
@@ -429,15 +436,15 @@ private:
 
     // What the record is told after each reading: what it changed of these.
     struct Counts {
-        int rounds, doubts, placements, checks, misses, held, pairs[2], followed[2], notice[2];
+        int rounds = 0, doubts = 0, misses = 0, held = 0, followed[2]{}, notice[2]{};
         juraic::GameField reckoned[2]; // the pieces at rest as the game made them, before the reading
-        bool known[2];
+        bool known[2]{};
     };
     Counts counts() const {
-        Counts c{tracker.rounds, tracker.doubts, follow.placements, follow.checks, follow.misses, follow.held, {}, {}, {}, {}, {}};
+        Counts c;
+        c.rounds = tracker.rounds, c.doubts = tracker.doubts, c.misses = follow.misses, c.held = follow.held;
         for (int s = 0; s < 2; ++s)
-            c.pairs[s] = tracker.side[s].pairs, c.followed[s] = follow.model[s].followed, c.notice[s] = follow.notice[s],
-            c.reckoned[s] = follow.model[s].core.field, c.known[s] = follow.model[s].known;
+            c.followed[s] = follow.model[s].followed, c.notice[s] = follow.notice[s], c.reckoned[s] = follow.model[s].core.field, c.known[s] = follow.model[s].known;
         return c;
     }
     static std::string pairText(juraic::Pair p) { return std::to_string(p.axis) + std::to_string(p.child); }

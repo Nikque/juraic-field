@@ -170,6 +170,9 @@ five, and as numbers ("★ won / needed") beyond that.
 - 実機の 2P を Juraic が操作 in the menu looks for the real game's window, takes the place of 2P, chooses its
   character and kind of controls, and plays 2P once a match begins. The kind and the level of the AI can be changed
   on that screen (each time it opens they start from those of the 2P side in the settings).
+- Moves that take the pair up into the 13th row, which the screen does not show (a quick turn, a floor kick into
+  it), are used only when every other placement would fill the third column and lose. The row 13 段目を通る動き on
+  that screen switches them on (使う); each time the screen opens it starts with them off (使わない).
 - The virtual pad needs the driver ViGEmBus, which is not included: install it yourself.
 - **Juraic in this mode is weaker than Juraic in the matches of this program.** It knows the fields and the pairs
   only by reading the real game's screen, which it sometimes reads wrong or cannot read for a while; the presses of

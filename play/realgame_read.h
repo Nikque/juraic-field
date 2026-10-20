@@ -343,16 +343,25 @@ struct Scale {
     Scale(const Picture& p, const Layout& l) : x(float(p.width) / float(l.baseWidth)), y(float(p.height) / float(l.baseHeight)) {}
 };
 
+// The pixels of the square `half` base pixels each way around (x, y), in base pixels: columns x0 to x1 and rows y0 to
+// y1 of the picture, cut at its edges.
+struct Patch {
+    int x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    Patch(const Picture& p, const Scale& s, float x, float y, float half) {
+        const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
+        const float px = x * s.x, py = y * s.y, hx = half * s.x, hy = half * s.y;
+        x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
+        y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
+    }
+};
+
 // The mean colour of the square `half` base pixels each way around (x, y), in base pixels.
 inline Rgb sample(const Picture& p, const Scale& s, float x, float y, float half) {
-    const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
-    const float px = x * s.x, py = y * s.y, hx = half * s.x, hy = half * s.y;
-    const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
-    const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
+    const Patch q(p, s, x, y, half);
     long r = 0, g = 0, b = 0, n = 0;
-    for (int j = y0; j <= y1; ++j) {
+    for (int j = q.y0; j <= q.y1; ++j) {
         const uint8_t* row = p.pixels + size_t(j) * size_t(p.stride);
-        for (int i = x0; i <= x1; ++i) b += row[4 * i], g += row[4 * i + 1], r += row[4 * i + 2], ++n;
+        for (int i = q.x0; i <= q.x1; ++i) b += row[4 * i], g += row[4 * i + 1], r += row[4 * i + 2], ++n;
     }
     return n ? Rgb{int(r / n), int(g / n), int(b / n)} : Rgb{};
 }
@@ -398,14 +407,11 @@ inline juraic::Cell classifyHue(const Layout& l, const Rgb& c, int degrees) {
 // table nearest in hue within Layout::faceHue (EMPTY for none), for read to take when the other point of the cell is
 // a piece of that colour.
 inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, float x, float y, const MarkedCell* mark = nullptr, juraic::Cell* face = nullptr) {
-    const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
-    const float px = x * s.x, py = y * s.y, hx = l.patch * s.x, hy = l.patch * s.y;
-    const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
-    const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
+    const Patch q(p, s, x, y, l.patch);
     long r = 0, g = 0, b = 0, strong = 0, light = 0, all = 0, pr = 0, pb = 0, bright = 0;
-    for (int j = y0; j <= y1; ++j) {
+    for (int j = q.y0; j <= q.y1; ++j) {
         const uint8_t* row = p.pixels + size_t(j) * size_t(p.stride);
-        for (int i = x0; i <= x1; ++i) {
+        for (int i = q.x0; i <= q.x1; ++i) {
             const int cb = row[4 * i], cg = row[4 * i + 1], cr = row[4 * i + 2];
             const int high = std::max(cr, std::max(cg, cb)), low = std::min(cr, std::min(cg, cb));
             ++all;
@@ -418,7 +424,7 @@ inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, flo
     const juraic::Cell other = 100 * bright >= long(l.unsure) * all ? UNSURE : juraic::EMPTY;
     // (the white face of a piece is warm, garbage is grey)
     const bool warm = light && (pr - pb) >= 8 * light && strong;
-    if (100 * strong >= long(l.colored) * all || (warm && 100 * (strong + light) >= long(l.cover) * all)) {
+    if (strong && (100 * strong >= long(l.colored) * all || (warm && 100 * (strong + light) >= long(l.cover) * all))) {
         const Rgb mean{int(r / strong), int(g / strong), int(b / strong)};
         if (mark && 100 * light < long(mark->pale) * all) {
             // (the mark of the screen in this cell)
@@ -551,6 +557,14 @@ struct PairSeen {
 inline void pairHalves(const juraic::PairControl& p, int& axisX, int& axisHalf, int& childX, int& childHalf) {
     axisX = p.x, childX = p.childX(), axisHalf = 2 * p.y + (p.upper ? 1 : 0), childHalf = 2 * p.childY() + (p.upper ? 1 : 0);
 }
+// The points of a field the pieces of a pair seen cover (none when it is not seen).
+struct PairPoints {
+    int ax = -1, ah = -1, cx = -1, ch = -1;
+    explicit PairPoints(const PairSeen& pair) {
+        if (pair.seen) pairHalves(pair.at, ax, ah, cx, ch);
+    }
+    bool covers(int x, int k) const { return (x == ax && (k == ah || k == ah + 1)) || (x == cx && (k == ch || k == ch + 1)); }
+};
 
 // The pair over `under`, the field it moves over: the pieces above it, two of them side by side or one on the other,
 // or one with the place above it beyond the screen (the other piece there). `expected`: its colours when they are known
@@ -637,6 +651,15 @@ inline bool pairLying(const PairSeen& p, const juraic::GameField& under) {
     return ah == 2 * h[ax] || ch == 2 * h[cx];
 }
 
+// Points of `read` that show a piece of a colour (not garbage) above the pieces of `base`.
+inline int colouredAbove(const SideRead& read, const juraic::GameField& base) {
+    int h[juraic::W], n = 0;
+    base.heights(h);
+    for (int x = 0; x < juraic::W; ++x)
+        for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && read.point[x][k] != juraic::GARBAGE;
+    return n;
+}
+
 // ---- frame after frame ------------------------------------------------------------------------------------------
 
 // Every piece of `part` is in `whole` (the pieces of a pair lying on it, or garbage, may be above them).
@@ -647,6 +670,56 @@ inline bool contains(const juraic::GameField& whole, const juraic::GameField& pa
         for (int y = 0; y < h[x]; ++y)
             if (whole.f.get(x, y) != part.f.get(x, y)) return false;
     return true;
+}
+
+// Points of a field the screen draws something over and leaves standing (the words of an all clear): what each point
+// read when it was taken for that (EMPTY: not taken); since each point last read nothing, in the air with an empty point
+// under it, the piece it has read in the most clear readings so far and in how many (0: none), and the piece it read
+// last and in how many readings in a row. `was`: what each point read when it was last taken for the words in the round
+// (kept after it reads nothing: the words' points read nothing for up to 444 readings in a row on the real game, and
+// may then show again right on top of the pieces under them).
+struct Words {
+    juraic::Cell at[juraic::W][POINTS]{};
+    juraic::Cell was[juraic::W][POINTS]{};
+    juraic::Cell stillAs[juraic::W][POINTS]{};
+    int stillFor[juraic::W][POINTS]{};
+    juraic::Cell lastAs[juraic::W][POINTS]{};
+    int lastFor[juraic::W][POINTS]{};
+    bool any = false; // a point is taken
+};
+
+// The reading with the words taken away: a point that reads what the words read there is nothing, unless a piece is in
+// front of it - a run of that piece in its column with points that are not the words': the run keeps the words' points
+// between those, and one more next to them where it has one on one side only, for its points to come in twos (a piece
+// covers two points; with one on each side the run is left short, as the words may be over either).
+inline SideRead withoutWords(const SideRead& read, const Words& words) {
+    if (!words.any) return read;
+    SideRead out = read;
+    for (int x = 0; x < juraic::W; ++x)
+        for (int k = 0; k < POINTS;) {
+            const juraic::Cell c = read.point[x][k];
+            if (!isPiece(c)) {
+                ++k;
+                continue;
+            }
+            int end = k;
+            while (end < POINTS && read.point[x][end] == c) ++end;
+            int low = -1, high = -1; // the lowest and highest points of the run that are not the words'
+            for (int j = k; j < end; ++j)
+                if (words.at[x][j] != c) high = j, low = low < 0 ? j : low;
+            if (low >= 0 && (high - low) % 2 == 0) {
+                const bool below = low > k, above = high + 1 < end;
+                if (below != above) (below ? low : high) += below ? -1 : 1;
+            }
+            // (a run that is the words' at every point, right between two pieces that are not: a piece of a stack - the
+            //  words are behind the pieces, and a stack shows nothing of them between two of its pieces)
+            const auto piece = [&](int j) { return j >= 0 && j < POINTS && isPiece(read.point[x][j]) && words.at[x][j] != read.point[x][j]; };
+            if (low < 0 && piece(k - 1) && piece(end)) low = k, high = end - 1;
+            for (int j = k; j < end; ++j)
+                if (low < 0 || j < low || j > high) out.point[x][j] = juraic::EMPTY;
+            k = end;
+        }
+    return out;
 }
 
 struct SideTrack {
@@ -682,6 +755,15 @@ struct SideTrack {
     juraic::Pair stood[2]{};
     bool stoodKnown = false;
     int64_t shiftedAt = -1;
+    // Pairs that came and were put with the screen not showing them (a light over the field): the window moved on
+    // again, to the pairs learnt after them, with no pair seen since it moved on before. The next pair seen is counted
+    // after them.
+    int unseen = 0;
+    // Clear readings in a row in which the pair in hand was not seen, over the field it appeared over with nothing above
+    // it (Tracker::outOfSight).
+    int missedFor = 0;
+    // Something the screen draws over the field and leaves standing (Tracker::wordsFrames).
+    Words words;
 };
 
 class Tracker {
@@ -699,6 +781,10 @@ public:
     // A pair where pairs appear within this many frames after the last one appeared, over the field it appeared over,
     // is that pair (moved at once and read as another colour in a picture, it was taken for a new one).
     int pairGap = 12;
+    // The pair in hand not seen in this many clear readings in a row, over the field it appeared over with nothing above
+    // it, has been put out of sight (both pieces in the 13th and 14th rows), the window moved on or not. (The real game
+    // does not show a pair as it turns: 9 frames for two turns in its records.)
+    int outOfSight = 20;
     // The window of the next pairs moves for some frames as a pair appears, reading as other pairs on its way: the two
     // after a new pair are learnt once it has read the same windowStill readings in a row, after it moved - at most
     // windowBefore frames before the pair appeared - or windowWait frames after the pair appeared (the same pairs again).
@@ -709,6 +795,15 @@ public:
     // its way), unless it reads the second of them first - the window moved on as the first pair comes: it gives the
     // third - and has stood so for fewer than roundGap readings.
     int windowLong = 8;
+    // Pieces do not stand still in the air: a pair falls half a cell in 13 frames at most (Timing::fallPerFrame), so a
+    // piece of it covers a point for 26 frames at most and a pair of one colour standing up 52, and it lies on what is
+    // under it. Points that read the same piece with an empty point under them, above the pieces at rest, in
+    // wordsFrames clear readings since they last read nothing (another piece in front of them in between not counted),
+    // wordsPoints of them or more at once, are something the screen draws over the field and leaves standing (on the
+    // real game the words of an all clear, behind the pieces, for more than 900 frames: 18 points read as pieces; with
+    // 20 frames the points of a pair falling by itself in front of them were taken too), read as nothing (withoutWords)
+    // until a point of them reads nothing. While they stand the field is not taken for empty.
+    int wordsFrames = 60, wordsPoints = 8;
     SideTrack side[2];
     // The pairs the screen has shown, numbered as the players draw them (both draw from one tsumo), as the window of each
     // side showed them by that side's own count: a side that counted its pairs wrong learns them at the wrong places,
@@ -727,16 +822,18 @@ public:
 
     void reset() {
         const juraic::Timing t = timing;
-        const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames, twice = pairGap, broken = roundBreak;
-        const int windowS = windowStill, windowB = windowBefore, windowW = windowWait, windowL = windowLong;
+        const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames, twice = pairGap, broken = roundBreak, hiddenFor = outOfSight;
+        const int windowS = windowStill, windowB = windowBefore, windowW = windowWait, windowL = windowLong, wordsF = wordsFrames, wordsP = wordsPoints;
         *this = Tracker{};
-        timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness, pairGap = twice, roundBreak = broken;
-        windowStill = windowS, windowBefore = windowB, windowWait = windowW, windowLong = windowL;
+        timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness, pairGap = twice, roundBreak = broken, outOfSight = hiddenFor;
+        windowStill = windowS, windowBefore = windowB, windowWait = windowW, windowLong = windowL, wordsFrames = wordsF, wordsPoints = wordsP;
     }
 
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
     // last reading clear. (A reading that is not clear is no reading: it neither changes the pieces nor counts.)
     bool still(int s) const { return side[s].clear && frame - side[s].changedAt >= stillFrames && side[s].loose == 0; }
+    // The frame of the round that the frame `at` of the clock is (0 before it, or while its beginning is not known).
+    int64_t roundFrame(int64_t at) const { return roundStart >= 0 && at >= roundStart ? at - roundStart : 0; }
     // Pair `index` for side s: as its own window showed it, or else as the other side's did.
     bool knows(int s, int index) const { return learnt(s, index) || learnt(1 - s, index); }
     juraic::Pair pairOf(int s, int index) const { return learnt(s, index) ? pairsOf[s][size_t(index)] : pairsOf[1 - s][size_t(index)]; }
@@ -752,26 +849,7 @@ public:
         for (int s = 0; s < 2; ++s) {
             const SideRead& read = r.side[s];
             SideTrack& t = side[s];
-            if (read.notice != t.noticeRead) t.noticeRead = read.notice, t.noticeSince = at;
-            if (at - t.noticeSince + 1 >= noticeFrames) t.notice = t.noticeRead;
-            const bool sameWindow = read.nextRead[0] && read.nextRead[1] && t.nextRead[0] && t.nextRead[1] && same(read.next[0], t.next[0]) && same(read.next[1], t.next[1]);
-            t.nextStill = sameWindow ? t.nextStill + 1 : 0;
-            if (!sameWindow) t.nextMovedAt = at;
-            for (int n = 0; n < 2; ++n) t.next[n] = read.next[n], t.nextRead[n] = read.nextRead[n];
-            if (t.nextStill == windowStill && t.nextRead[0] && t.nextRead[1]) {
-                if (t.stoodKnown && same(t.next[0], t.stood[1]) && !(same(t.next[0], t.stood[0]) && same(t.next[1], t.stood[1]))) t.shiftedAt = at;
-                t.stood[0] = t.next[0], t.stood[1] = t.next[1], t.stoodKnown = true;
-            }
-            if (t.learnFor >= 0 && windowSettled(t, at)) {
-                learn(s, t.learnFor + 1, t.next[0]), learn(s, t.learnFor + 2, t.next[1]);
-                t.learnFor = -1;
-            }
-            // The window moves on before the next pair appears (Timing::nextShown): it shows the second of the two it
-            // showed, and the pair after them, which is learnt then (the AI waiting for its pair is shown it then, as
-            // in a match of this program).
-            if (t.learnFor < 0 && t.nextStill >= windowStill && knows(s, t.pairs) && knows(s, t.pairs + 1) && same(t.next[0], pairOf(s, t.pairs + 1)) &&
-                !(same(t.next[0], pairOf(s, t.pairs)) && same(t.next[1], pairOf(s, t.pairs + 1))))
-                learn(s, t.pairs + 2, t.next[1]);
+            readWindow(s, read, at);
             t.clear = read.unsure == 0;
             if (!t.clear) {
                 // (something the screen draws over the field: nothing of it is taken, the pair not seen in this frame)
@@ -780,96 +858,171 @@ public:
                 empty = false;
                 continue;
             }
-            const juraic::GameField resting = restingField(read);
+            // (the words the screen leaves standing taken away)
+            const SideRead field = withoutWords(read, t.words);
+            last.side[s] = field;
+            const juraic::GameField resting = restingField(field);
             if (!(resting == t.resting)) t.resting = resting, t.changedAt = at;
             t.pair = {};
-            // (the window has moved on since the pair in hand appeared: it has been put - out of sight, both pieces in the
-            //  13th and 14th rows, if the screen showed nothing of it: on the real game the next pair, of the same colour
-            //  below, was taken for it still where pairs appear, and nothing played it)
-            if (t.inHand && t.shiftedAt > t.spawnedAt + pairGap) t.inHand = false;
-            if (t.inHand) {
-                // (gone: the field under it changed - a chain, or a field read wrong -, or something came to rest and
-                //  the pair is not seen - it split, or it turns on the ground)
-                t.pair = contains(resting, t.under) ? readPair(read, t.under, t.colors, &t.lastSeen) : PairSeen{};
-                if (t.pair.seen) {
-                    t.lastSeen = t.pair;
-                    if (t.pair.childHidden) t.pair.colors.child = t.colors.child;
-                    else t.colors.child = t.pair.colors.child;
-                } else if (!(resting == t.under)) {
-                    t.inHand = false;
-                }
-            }
-            if (!t.pair.seen) {
-                // A new pair where pairs appear, on a field that stood still before it with nothing above it in the
-                // last clear reading (pieces of a chain falling past the place are no pair).
-                const juraic::Pair coming = knows(s, t.pairs) ? pairOf(s, t.pairs) : juraic::Pair{};
-                const PairSeen fresh = readPair(read, resting, coming);
-                const juraic::PairControl spawn = juraic::spawnPair(timing);
-                const auto atSpawn = [&](const PairSeen& p) { return p.seen && p.at.x == spawn.x && p.at.y == spawn.y && p.at.upper == spawn.upper && p.at.dir == spawn.dir; };
-                const bool there = atSpawn(fresh);
-                const bool settled = at - t.changedAt >= stillFrames && t.loose == 0;
-                // (hidden by a light as it appeared: seen after it, in the air, both pieces, of the colours of the pair
-                //  that comes - or its axis only, the child still above the screen, where pairs appear or a row below,
-                //  2 * pairGap frames or more after the last pair appeared, over pieces at rest: on the real game a pair
-                //  first seen so after a light, after a chain, was taken for no pair, and nothing played it; between two
-                //  rounds, the fields empty, a point read there in one picture is no pair. With no pair in hand the
-                //  reading before had that pair's own points above the field: for it, nothing besides it may be there now.)
-                const bool colours = knows(s, t.pairs) && fresh.colors.axis == pairOf(s, t.pairs).axis &&
-                                     (fresh.childHidden ? fresh.at.x == spawn.x && fresh.at.y >= juraic::SPAWN_Y - 1 && (t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap) &&
-                                                              !resting.f.empty()
-                                                        : fresh.colors.child == pairOf(s, t.pairs).child);
-                const bool hidden = !there && !t.inHand && t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && fresh.seen && colours &&
-                                    fresh.at.y >= juraic::SPAWN_Y - 3 && !pairLying(fresh, resting);
-                const bool settledLate = at - t.changedAt >= stillFrames && (t.loose == 0 || (t.loose <= 4 && looseOver(read, resting, fresh) == 0));
-                const bool samePair = t.inHand && resting == t.under && at - t.spawnedAt < pairGap;
-                // (the window has moved on since the last pair appeared, no pair in hand: a pair is coming)
-                const bool due = !t.inHand && t.shiftedAt > t.spawnedAt + pairGap;
-                // (the first pair of a round: its own pieces read in the reading before, when it was not taken, do not keep
-                //  the field from standing still; seen there before as a pair of other colours than those learnt, it came then)
-                const bool firstOfRound = fromStart && t.pairs == 0;
-                // (seen there in the clear reading before and not taken - pieces above the field then, or other colours
-                //  than learnt before the first pair of a round -, it came then: pieces of a chain do not stay there)
-                const bool seenBefore = t.strayAt >= 0 && at - t.strayAt <= 2 && fresh.seen && t.strayAxis == fresh.colors.axis;
-                // (seen late, both pieces showing, 2 * pairGap frames or more after the last pair appeared: its own
-                //  pieces read in the reading before do not keep the field from standing still either - on the real game
-                //  such a pair, after garbage fell under a light, was taken for none to the end of the round)
-                const bool longAfter = t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap;
-                if (((((firstOfRound || seenBefore) ? settledLate : settled) && there) || (((fresh.childHidden || longAfter) ? settledLate : settled) && hidden)) && !samePair) {
-                    newPair(s, fresh, resting, read, seenBefore ? t.strayAt : at), late[s] = t.late = hidden;
-                } else if (there && !samePair) {
-                    t.strayAt = at, t.strayAxis = fresh.colors.axis;
-                } else if (((firstOfRound && knows(s, 0)) || due) && !fresh.seen) {
-                    // A pair of other colours than learnt where pairs appear - the first of a round (the window read on a
-                    // screen before the round), or one after the window moved on (a window read wrong, pairs learnt at the
-                    // wrong places): taken when seen there in two clear readings in a row with nothing else above the
-                    // field, as the pair that came in the first of them, of the colours read. For the first of a round
-                    // the pairs learnt are dropped; otherwise this one is learnt again. No pair is left alone for its
-                    // colours.
-                    const PairSeen any = readPair(read, resting, {});
-                    if (atSpawn(any) && at - t.changedAt >= stillFrames && looseOver(read, resting, any) == 0) {
-                        if (t.strayAt >= 0 && at - t.strayAt <= 2 && t.strayAxis == any.colors.axis) {
-                            if (firstOfRound) {
-                                for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
-                            } else {
-                                const juraic::Cell child = !any.childHidden ? any.colors.child : knows(s, t.pairs) ? pairOf(s, t.pairs).child : any.colors.axis;
-                                learn(s, t.pairs, {any.colors.axis, child});
-                            }
-                            ++doubts;
-                            newPair(s, any, resting, read, t.strayAt);
-                        } else {
-                            t.strayAt = at, t.strayAxis = any.colors.axis;
-                        }
-                    }
-                }
-            }
-            t.loose = looseOf(read, t);
-            empty = empty && resting.f.empty() && t.loose == 0 && !t.inHand;
+            followHand(t, field, resting, at);
+            if (!t.pair.seen) lookForPair(s, field, resting, at);
+            t.loose = looseOf(field, t);
+            takeWords(t, read, resting);
+            empty = empty && resting.f.empty() && t.loose == 0 && !t.inHand && !t.words.any;
         }
         fullFor = empty ? 0 : fullFor + 1;
         if (fullFor >= roundBreak) emptySince = -1;
         else if (empty && emptySince < 0) emptySince = at;
         if (empty && at - emptySince >= roundGap && (side[0].pairs || side[1].pairs || !fromStart)) newRound();
-        // Before the first pair of a round: the window shows the first two pairs (the one that stood last: windowLong).
+        learnFirstWindow();
+    }
+
+private:
+    // The notice and the window of side s in the reading `read`: the pairs it shows learnt as they come.
+    void readWindow(int s, const SideRead& read, int64_t at) {
+        SideTrack& t = side[s];
+        if (read.notice != t.noticeRead) t.noticeRead = read.notice, t.noticeSince = at;
+        if (at - t.noticeSince + 1 >= noticeFrames) t.notice = t.noticeRead;
+        const bool sameWindow = read.nextRead[0] && read.nextRead[1] && t.nextRead[0] && t.nextRead[1] && same(read.next[0], t.next[0]) && same(read.next[1], t.next[1]);
+        t.nextStill = sameWindow ? t.nextStill + 1 : 0;
+        if (!sameWindow) t.nextMovedAt = at;
+        for (int n = 0; n < 2; ++n) t.next[n] = read.next[n], t.nextRead[n] = read.nextRead[n];
+        if (t.nextStill == windowStill && t.nextRead[0] && t.nextRead[1]) {
+            if (movedOn(t)) {
+                if (cameUnseen(t, s)) ++t.unseen;
+                t.shiftedAt = at;
+            }
+            t.stood[0] = t.next[0], t.stood[1] = t.next[1], t.stoodKnown = true;
+        }
+        if (t.learnFor >= 0 && windowSettled(t, at)) {
+            learn(s, t.learnFor + 1, t.next[0]), learn(s, t.learnFor + 2, t.next[1]);
+            t.learnFor = -1;
+        }
+        // The number of the pair that comes.
+        const int comes = t.pairs + t.unseen;
+        // The window moves on before the next pair appears (Timing::nextShown): it shows the second of the two it
+        // showed, and the pair after them, which is learnt then (the AI waiting for its pair is shown it then, as
+        // in a match of this program).
+        if (t.learnFor < 0 && t.nextStill >= windowStill && knows(s, comes) && knows(s, comes + 1) && same(t.next[0], pairOf(s, comes + 1)) &&
+            !(same(t.next[0], pairOf(s, comes)) && same(t.next[1], pairOf(s, comes + 1))))
+            learn(s, comes + 2, t.next[1]);
+    }
+    // The pair in hand, from a clear reading of its side (`field`, without the words; `resting`, its pieces at rest):
+    // where it is seen, or let go.
+    void followHand(SideTrack& t, const SideRead& field, const juraic::GameField& resting, int64_t at) {
+        // (the window has moved on since the pair in hand appeared: it has been put - out of sight, both pieces in the
+        //  13th and 14th rows, if the screen showed nothing of it: on the real game the next pair, of the same colour
+        //  below, was taken for it still where pairs appear, and nothing played it)
+        if (t.inHand && t.shiftedAt > t.spawnedAt + pairGap) t.inHand = false;
+        if (t.inHand) {
+            // (gone: the field under it changed - a chain, or a field read wrong -, or something came to rest and
+            //  the pair is not seen - it split, or it turns on the ground)
+            t.pair = contains(resting, t.under) ? readPair(field, t.under, t.colors, &t.lastSeen) : PairSeen{};
+            if (t.pair.seen) {
+                t.lastSeen = t.pair;
+                t.missedFor = 0;
+                if (t.pair.childHidden) t.pair.colors.child = t.colors.child;
+                else t.colors.child = t.pair.colors.child;
+            } else if (!(resting == t.under) && (contains(resting, t.under) || t.changedAt < at)) {
+                // (pieces under it missing in one picture only are a picture read wrong - a piece moving drawn over
+                //  them: the pieces under a pair in play do not go. Let go for such a picture, a pair turned up into
+                //  the 13th row where pairs appear, its child alone showing there, was counted again in a round drawn
+                //  and read.)
+                t.inHand = false;
+            } else if (resting == t.under && looseOver(field, t.under, PairSeen{}) == 0 && ++t.missedFor >= outOfSight) {
+                t.inHand = false; // (outOfSight)
+            }
+        }
+    }
+    // No pair seen in hand on side s: a new one looked for in a clear reading of it.
+    void lookForPair(int s, const SideRead& field, const juraic::GameField& resting, int64_t at) {
+        SideTrack& t = side[s];
+        const int comes = t.pairs + t.unseen; // (the number of the pair that comes)
+        // A new pair where pairs appear, on a field that stood still before it with nothing above it in the
+        // last clear reading (pieces of a chain falling past the place are no pair).
+        const juraic::Pair coming = knows(s, comes) ? pairOf(s, comes) : juraic::Pair{};
+        const PairSeen fresh = readPair(field, resting, coming);
+        const juraic::PairControl spawn = juraic::spawnPair(timing);
+        const auto atSpawn = [&](const PairSeen& p) { return p.seen && p.at.x == spawn.x && p.at.y == spawn.y && p.at.upper == spawn.upper && p.at.dir == spawn.dir; };
+        const bool there = atSpawn(fresh);
+        const bool settled = at - t.changedAt >= stillFrames && t.loose == 0;
+        // (hidden by a light as it appeared: seen after it, in the air, both pieces, of the colours of the pair
+        //  that comes - or its axis only, the child still above the screen, where pairs appear or a row below,
+        //  2 * pairGap frames or more after the last pair appeared, over pieces at rest: on the real game a pair
+        //  first seen so after a light, after a chain, was taken for no pair, and nothing played it; between two
+        //  rounds, the fields empty, a point read there in one picture is no pair. With no pair in hand the
+        //  reading before had that pair's own points above the field: for it, nothing besides it may be there now.
+        //  Not above where pairs appear: a screen that shows a part of the 13th row showed a piece moving there as
+        //  garbage fell, the point above it beyond the screen, in rounds drawn and read.)
+        const bool colours = knows(s, comes) && fresh.colors.axis == pairOf(s, comes).axis &&
+                             (fresh.childHidden ? fresh.at.x == spawn.x && fresh.at.y >= juraic::SPAWN_Y - 1 && fresh.at.y <= juraic::SPAWN_Y &&
+                                                      (t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap) &&
+                                                      !resting.f.empty()
+                                                : fresh.colors.child == pairOf(s, comes).child);
+        const bool hidden = !there && !t.inHand && t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && fresh.seen && colours &&
+                            fresh.at.y >= juraic::SPAWN_Y - 3 && !pairLying(fresh, resting);
+        const bool settledLate = at - t.changedAt >= stillFrames && (t.loose == 0 || (t.loose <= 4 && looseOver(field, resting, fresh) == 0));
+        const bool samePair = t.inHand && resting == t.under && at - t.spawnedAt < pairGap;
+        // (the window has moved on since the last pair appeared, no pair in hand: a pair is coming)
+        const bool due = !t.inHand && t.shiftedAt > t.spawnedAt + pairGap;
+        // (the first pair of a round: its own pieces read in the reading before, when it was not taken, do not keep
+        //  the field from standing still; seen there before as a pair of other colours than those learnt, it came then)
+        const bool firstOfRound = fromStart && comes == 0;
+        // (seen there in the clear reading before and not taken - pieces above the field then, or other colours
+        //  than learnt before the first pair of a round -, it came then: pieces of a chain do not stay there)
+        const bool seenBefore = t.strayAt >= 0 && at - t.strayAt <= 2 && fresh.seen && t.strayAxis == fresh.colors.axis;
+        // (seen late, both pieces showing, 2 * pairGap frames or more after the last pair appeared: its own
+        //  pieces read in the reading before do not keep the field from standing still either - on the real game
+        //  such a pair, after garbage fell under a light, was taken for none to the end of the round)
+        const bool longAfter = t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap;
+        // (the window moves on before a pair appears: read standing still ever since the last pair appeared, no
+        //  pair has come - a pair kept where pairs appear and turned over, its axis up in the 13th row, showed
+        //  its child alone there, of the colour of the next pair, and was counted again in a round drawn)
+        const bool windowMoved = t.spawnedAt < 0 || t.nextMovedAt >= t.spawnedAt;
+        // (first seen there pairGap frames or more after the window last moved, the screen not read clear since then and
+        //  the pieces at rest changed since then: the pair that came has been put while the screen was lit - a piece drawn
+        //  once there after the light, of its colour, was taken for it in a round drawn and read. Taken when seen there in
+        //  two clear readings in a row. With the field as it was, a pair seen there once after a light, which then lay
+        //  where it appeared, was the last of a round on the real game.)
+        const bool overdue = !firstOfRound && at - t.nextMovedAt >= pairGap && t.unclearAt > t.nextMovedAt && t.changedAt > t.nextMovedAt;
+        if (((((firstOfRound || seenBefore) ? settledLate : settled) && there && (seenBefore || !overdue)) ||
+             (((fresh.childHidden || longAfter) ? settledLate : settled) && hidden)) &&
+            !samePair && windowMoved) {
+            // (the window, moved on again since a pair came unseen, not read standing yet: that pair has been
+            //  put, as the window standing tells a reading later - on the real game a pair seen so under the
+            //  words of an all clear was numbered as the one put unseen, and the pairs after it learnt a place
+            //  out. Not when the window last stood fewer than pairGap frames before: on its way it stands for a
+            //  few readings as other pairs, and a pair seen then was counted twice in the records.)
+            if (t.nextStill < windowStill && t.nextRead[0] && t.nextRead[1] && at - t.shiftedAt >= pairGap && movedOn(t) && cameUnseen(t, s)) ++t.unseen;
+            newPair(s, fresh, resting, field, seenBefore ? t.strayAt : at), late[s] = t.late = hidden;
+        } else if (there && !samePair) {
+            t.strayAt = at, t.strayAxis = fresh.colors.axis;
+        } else if (((firstOfRound && knows(s, 0)) || due) && !fresh.seen) {
+            // A pair of other colours than learnt where pairs appear - the first of a round (the window read on a
+            // screen before the round), or one after the window moved on (a window read wrong, pairs learnt at the
+            // wrong places): taken when seen there in two clear readings in a row with nothing else above the
+            // field, as the pair that came in the first of them, of the colours read. For the first of a round
+            // the pairs learnt are dropped; otherwise this one is learnt again. No pair is left alone for its
+            // colours.
+            const PairSeen any = readPair(field, resting, {});
+            if (atSpawn(any) && at - t.changedAt >= stillFrames && looseOver(field, resting, any) == 0) {
+                if (t.strayAt >= 0 && at - t.strayAt <= 2 && t.strayAxis == any.colors.axis) {
+                    if (firstOfRound) {
+                        for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
+                    } else {
+                        const juraic::Cell child = !any.childHidden ? any.colors.child : knows(s, comes) ? pairOf(s, comes).child : any.colors.axis;
+                        learn(s, comes, {any.colors.axis, child});
+                    }
+                    ++doubts;
+                    newPair(s, any, resting, field, t.strayAt);
+                } else {
+                    t.strayAt = at, t.strayAxis = any.colors.axis;
+                }
+            }
+        }
+    }
+    // Before the first pair of a round: the window shows the first two pairs (the one that stood last: windowLong).
+    void learnFirstWindow() {
         if (fromStart && !side[0].pairs && !side[1].pairs && side[0].nextRead[0] && side[0].nextRead[1] && side[0].nextStill >= windowStill &&
             (!side[1].nextRead[0] || !side[1].nextRead[1] || side[1].nextStill >= windowStill)) {
             const juraic::Pair a = side[0].next[0], b = side[0].next[1];
@@ -885,24 +1038,70 @@ public:
             }
         }
     }
-
-private:
     int64_t emptySince = -1;
     int fullFor = 0; // readings in a row in which the fields were not empty
 
     static bool same(juraic::Pair a, juraic::Pair b) { return a.axis == b.axis && a.child == b.child; }
+    // The window shows the pairs after those it showed standing last, moved on by one.
+    static bool movedOn(const SideTrack& t) {
+        return t.stoodKnown && same(t.next[0], t.stood[1]) && !(same(t.next[0], t.stood[0]) && same(t.next[1], t.stood[1]));
+    }
+    // ... and it moved on before, after the last pair seen, and now shows first the pair after the one that came then:
+    // that one has been put unseen.
+    bool cameUnseen(const SideTrack& t, int s) const {
+        const int after = t.pairs + t.unseen + 2;
+        return t.shiftedAt > t.spawnedAt + pairGap && knows(s, after) && same(t.next[0], pairOf(s, after));
+    }
     // Points that show a piece above the field the pair moves over (or above the pieces at rest), the pair's own left out.
     static int looseOf(const SideRead& read, const SideTrack& t) { return looseOver(read, t.inHand ? t.under : t.resting, t.pair); }
     // ... above `base`, those of `pair` (if seen) left out.
     static int looseOver(const SideRead& read, const juraic::GameField& base, const PairSeen& pair) {
-        int ax = -1, ah = -1, cx = -1, ch = -1;
-        if (pair.seen) pairHalves(pair.at, ax, ah, cx, ch);
-        const auto own = [&](int x, int k) { return (x == ax && (k == ah || k == ah + 1)) || (x == cx && (k == ch || k == ch + 1)); };
+        const PairPoints own(pair);
         int h[juraic::W], n = 0;
         base.heights(h);
         for (int x = 0; x < juraic::W; ++x)
-            for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && !own(x, k);
+            for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && !own.covers(x, k);
         return n;
+    }
+    // The words (wordsFrames), from a clear reading as it was read and the pieces at rest it shows without them: a point
+    // that reads nothing is no longer the words and counts from nothing; a point in the air that reads a piece with an
+    // empty point under it, the pair seen left out, counts one more reading of that piece.
+    void takeWords(SideTrack& t, const SideRead& read, const juraic::GameField& resting) const {
+        Words& w = t.words;
+        int h[juraic::W];
+        resting.heights(h);
+        const PairPoints own(t.pair);
+        int standing = 0;
+        for (int x = 0; x < juraic::W; ++x) {
+            bool gap = false;
+            for (int k = 0; k < POINTS; ++k) {
+                const juraic::Cell c = read.point[x][k];
+                // (a point that was the words in this round, reading what it read then: with no empty point under it
+                //  too - the pieces under the words come right up to them -, and taken alone)
+                const bool again = w.was[x][k] != juraic::EMPTY && c == w.was[x][k];
+                const bool air = k >= 2 * h[x] && (gap || again) && isPiece(c) && !own.covers(x, k);
+                gap = gap || (k >= 2 * h[x] && c == juraic::EMPTY);
+                // (the pair seen, or pieces at rest: something in front of it, neither counted nor counted from again;
+                //  another piece than it counts is taken instead when it has read so in more readings in a row than the
+                //  piece counted in all - the words settle so as they come up - and is else something passing in front
+                //  of it: a pair covers a point for 52 frames at most)
+                if (c == juraic::EMPTY) {
+                    w.at[x][k] = juraic::EMPTY, w.stillFor[x][k] = w.lastFor[x][k] = 0;
+                } else if (air) {
+                    w.lastFor[x][k] = c == w.lastAs[x][k] && w.lastFor[x][k] ? w.lastFor[x][k] + 1 : 1, w.lastAs[x][k] = c;
+                    if (c == w.stillAs[x][k] && w.stillFor[x][k]) ++w.stillFor[x][k];
+                    else if (w.lastFor[x][k] > w.stillFor[x][k]) w.stillAs[x][k] = c, w.stillFor[x][k] = w.lastFor[x][k];
+                }
+                standing += w.stillFor[x][k] >= wordsFrames;
+            }
+        }
+        w.any = false;
+        for (int x = 0; x < juraic::W; ++x)
+            for (int k = 0; k < POINTS; ++k) {
+                if (w.stillFor[x][k] >= wordsFrames && (standing >= wordsPoints || (w.was[x][k] != juraic::EMPTY && w.stillAs[x][k] == w.was[x][k])))
+                    w.at[x][k] = w.was[x][k] = w.stillAs[x][k];
+                w.any = w.any || w.at[x][k] != juraic::EMPTY;
+            }
     }
     bool learnt(int s, int index) const { return index >= 0 && index < int(knownOf[s].size()) && knownOf[s][size_t(index)]; }
     // The pair `index` is p, as side s's window shows it: read from a window that stood still (sure), or that may have
@@ -922,14 +1121,15 @@ private:
     }
     void newRound() {
         ++rounds;
-        for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false, t.learnFor = -1, t.strayAt = -1, t.shiftedAt = -1;
+        for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false, t.learnFor = -1, t.strayAt = -1, t.shiftedAt = -1, t.unseen = 0, t.words = Words{};
         for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
         roundStart = -1;
         fromStart = true;
     }
     void newPair(int s, const PairSeen& fresh, const juraic::GameField& resting, const SideRead& read, int64_t at) {
         SideTrack& t = side[s];
-        const int index = t.pairs++;
+        const int index = t.pairs + t.unseen; // (after the pairs put unseen)
+        t.pairs = index + 1, t.unseen = 0, t.missedFor = 0;
         t.spawnedAt = at;
         t.late = false;
         t.inHand = true;
@@ -976,13 +1176,14 @@ inline void observeWith(const Tracker& t, int me, const juraic::Rules& rules, co
     o.timing = t.timing;
     o.players = 2;
     o.me = me;
-    o.frame = t.roundStart >= 0 && at >= t.roundStart ? at - t.roundStart : 0;
+    o.frame = t.roundFrame(at);
     o.state = RoundState::Playing;
     // The colours in play.
+    // (the pairs either side has learnt: those both sides know of, as each side's own window or the other's showed them)
     bool seen[8]{};
     for (int s = 0; s < 2; ++s)
-        for (size_t i = 0; i < t.pairsLearnt(); ++i)
-            if (t.knows(s, int(i))) seen[t.pairOf(s, int(i)).axis] = seen[t.pairOf(s, int(i)).child] = true;
+        for (size_t i = 0; i < t.knownOf[s].size(); ++i)
+            if (t.knownOf[s][i]) seen[t.pairsOf[s][i].axis] = seen[t.pairsOf[s][i].child] = true;
     for (const SideTrack& side : t.side)
         for (int x = 0; x < W; ++x)
             for (int y = 0; y < H; ++y) seen[side.resting.f.get(x, y)] = true;

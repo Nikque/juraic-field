@@ -26,14 +26,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "pad_gamepad.h"
 #ifdef JURAIC_PADS_SDL
-#include <SDL3/SDL.h>
 #include <map>
 #endif
 
 namespace play {
-
-constexpr int PAD_UP = 32, PAD_DOWN = 33, PAD_LEFT = 34, PAD_RIGHT = 35;
 
 class Pads {
 public:
@@ -126,23 +124,6 @@ private:
         sdlIds.clear();
         for (auto& [id, g] : sdlPads) sdlIds.push_back({SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g)});
         SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
-    }
-    // A pad SDL knows the layout of, as play/pad_sdl.h reads it: by the places of its buttons, as an Xbox pad.
-    static uint64_t readSdl(SDL_Gamepad* g) {
-        static const SDL_GamepadButton order[10] = {SDL_GAMEPAD_BUTTON_SOUTH,         SDL_GAMEPAD_BUTTON_EAST,           SDL_GAMEPAD_BUTTON_WEST,
-                                                    SDL_GAMEPAD_BUTTON_NORTH,         SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,  SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
-                                                    SDL_GAMEPAD_BUTTON_BACK,          SDL_GAMEPAD_BUTTON_START,          SDL_GAMEPAD_BUTTON_LEFT_STICK,
-                                                    SDL_GAMEPAD_BUTTON_RIGHT_STICK};
-        uint64_t bits = 0;
-        for (int i = 0; i < 10; ++i)
-            if (SDL_GetGamepadButton(g, order[i])) bits |= 1ull << i;
-        // (the stick as XInput is read: up beyond 20000, the sides beyond 16000; SDL counts down as plus)
-        const int x = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
-        if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_UP) || y < -20000) bits |= 1ull << PAD_UP;
-        if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_DOWN) || y > 20000) bits |= 1ull << PAD_DOWN;
-        if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_LEFT) || x < -16000) bits |= 1ull << PAD_LEFT;
-        if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || x > 16000) bits |= 1ull << PAD_RIGHT;
-        return bits;
     }
 #endif
 
@@ -240,7 +221,7 @@ public:
             failed = true; // no support for other controllers on this system
         }
 #ifdef JURAIC_PADS_SDL
-        for (auto& [id, g] : sdlPads) state.push_back(readSdl(g)), xbox.push_back(true), bySdl.push_back(true);
+        for (auto& [id, g] : sdlPads) state.push_back(readGamepad(g)), xbox.push_back(true), bySdl.push_back(true);
 #endif
     }
     int count() const { return int(state.size()); }

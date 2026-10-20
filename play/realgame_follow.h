@@ -33,6 +33,7 @@ struct SideModel {
     juraic::GameField base;   // the field it appeared over
     juraic::GameField with;   // ... and it put there
     int sends = 0;            // the garbage its chain would send
+    int inAir = 0;            // clear readings in a row with one piece more at rest and a piece of a colour in the air
 };
 
 class Follower {
@@ -67,7 +68,7 @@ public:
     }
 
     void step(const Reading& r, int64_t at) {
-        const SideTrack previous[2] = {tracker.side[0], tracker.side[1]};
+        const Before previous[2] = {before(tracker.side[0]), before(tracker.side[1])};
         tracker.step(r, at);
         if (tracker.rounds != round) {
             round = tracker.rounds;
@@ -114,6 +115,15 @@ public:
 private:
     int round = 0;
 
+    // What recover needs of a side as it was before a reading: its pairs, and the colours of the pair in hand and the
+    // field it appeared over.
+    struct Before {
+        int pairs = 0;
+        juraic::Pair colors{};
+        juraic::GameField under;
+    };
+    static Before before(const SideTrack& t) { return {t.pairs, t.colors, t.under}; }
+
     void complete(juraic::ai::Observation& o) const {
         for (int s = 0; s < 2; ++s) {
             juraic::Player& p = o.player[s];
@@ -124,7 +134,7 @@ private:
         }
     }
 
-    static int count(const juraic::GameField& g) { return g.f.count(); }
+public:
     // `read` (the twelve rows the screen shows) with the pieces of `game` in the rows it does not show where they can
     // rest: in the 13th row of a column read twelve high, and in the 14th row.
     static juraic::GameField withHidden(const juraic::GameField& read, const juraic::GameField& game) {
@@ -154,8 +164,7 @@ private:
         return true;
     }
 
-    int64_t roundFrame(int64_t at) const { return tracker.roundStart >= 0 && at >= tracker.roundStart ? at - tracker.roundStart : 0; }
-
+private:
     // The move of side s with the pair put at p over `base`: the chain, the garbage sent and offset (into `core` and
     // `other`, the garbage above the other field).
     juraic::TurnResult move(juraic::PlayerCore& core, juraic::Incoming& other, const juraic::GameField& base, juraic::Placement p,
@@ -163,7 +172,7 @@ private:
         core.field = base;
         juraic::place(core.field, p, colors);
         juraic::TurnResult result;
-        juraic::resolveChain(core, other, rules, tracker.timing, roundFrame(at), result);
+        juraic::resolveChain(core, other, rules, tracker.timing, tracker.roundFrame(at), result);
         return result;
     }
 
@@ -175,9 +184,30 @@ private:
         const SideTrack& t = tracker.side[s];
         SideModel& m = model[s];
         // (one piece more when the other went into the 13th or 14th row, which the screen does not show)
-        const int more = count(t.resting) - count(t.under);
+        const int more = t.resting.f.count() - t.under.f.count();
+        // The pair seen whole in the twelve rows, one piece of it at rest - or a piece of a colour shown in the air above
+        // the pieces at rest: the other is in the air over a lower column (turned on the ground, to split as it locks),
+        // not in the 13th row. A pair lying is taken out of it when two readings in a row show so (a light beginning over
+        // the field, or the first picture of its chain, showed pieces in the air in one picture, and the lying pair was
+        // lost). Not once the window has moved on: the next pair, about to appear, is seen where pairs appear before it
+        // is counted. (Taken as lying so, on the real game, the down button was let go: a turn on its way lifted one
+        // pair into the air, and another, turned out of the 13th row, lay 28 frames before it locked.)
+        const bool whole = t.inHand && t.pair.seen && !t.pair.childHidden;
+        const bool coming = t.shiftedAt > t.spawnedAt + tracker.pairGap;
+        m.inAir = more == 1 && contains(t.resting, t.under) && (whole || (!coming && colouredAbove(tracker.last.side[s], t.resting) > 0)) ? m.inAir + 1 : 0;
         if ((more == 2 || more == 1) && contains(t.resting, t.under)) {
-            if (m.lying && m.index == t.pairs - 1 && t.resting == m.with) return;
+            const bool was = m.lying && m.index == t.pairs - 1;
+            const bool lain = was && t.resting == m.with;
+            if (m.inAir >= (was ? 2 : 1)) {
+                m.lying = false;
+                return;
+            }
+            if (lain) return;
+            // The pair lying with both pieces shown, read with one of them missing (a piece that moves drawn over it):
+            // still where it lay, unless the screen shows it so in the reading after too (its other piece in the 13th
+            // row). Taken from one picture, a placement into the 13th row would keep a piece the game does not have.
+            if (more == 1 && m.lying && m.index == t.pairs - 1 && m.with.f.count() - t.under.f.count() == 2 && contains(m.with, t.resting) && at == t.changedAt)
+                return;
             const juraic::GameField base = withHidden(t.under, m.core.field), seen = shown(t.resting);
             const unsigned legal = juraic::legalPlacements(base);
             for (juraic::Cell child = 0; child <= juraic::MAX_COLORS; ++child) {
@@ -201,7 +231,7 @@ private:
         } else if (m.lying) {
             // Locked: the pieces under it changed (its chain), or more came above them (garbage). Otherwise it is moving
             // still (lifted, or half over a lower column).
-            if (!contains(t.resting, shown(m.base)) || count(t.resting) > count(shown(m.base)) + 2) lock(s, at);
+            if (!contains(t.resting, shown(m.base)) || t.resting.f.count() > shown(m.base).f.count() + 2) lock(s, at);
             else m.lying = false;
         }
     }
@@ -209,7 +239,7 @@ private:
     // A landing hidden by an animation can be identified later by the field the next pair appears over. Only a
     // resolved chain whose visible result matches (with possible garbage above it) is accepted. Distinct placements
     // must put the same coloured pieces before resolving, or the move is ambiguous and stays unknown.
-    void recover(int s, const SideTrack& before, int64_t at) {
+    void recover(int s, const Before& before, int64_t at) {
         SideModel& m = model[s];
         if (!before.colors.axis || !before.colors.child) return;
         const juraic::GameField base = withHidden(before.under, m.core.field);
