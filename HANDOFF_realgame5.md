@@ -196,7 +196,7 @@
 ### 9.5 確かめ
 
 - 途中の形（9.3 の 1〜3、3 は全部の組で ±2 の形）: WSL 一式 `n`・`p`（`~/rgt/w10/verify_{n,p}.txt`）で本体と写し 5 つは `FAILED` 0、写し A・AB は種 127（9.3 の 4 の元）だけで落ちた。16 通りは `matrix_gfin.txt` と全行同じ、全記録の Driver の F はどの記録も前と同じ（新しい 2 記録も 0）。Windows: MSVC 警告 0、`realgame_tests` 全件通過、`realgame_pad_tests` 77、`tidy_verify2.ps1 rg37` は 09:32 に `ALL OK (rg37)`（9.3 の 3 を絞る前のソース）。
-- 最後の形（9.3 の 1〜5）: このコミットの時に流している途中。WSL 一式 `q`（`~/rgt/w10/checks_q.txt`・`verify_q.txt`・`matrix_qfin.txt`・`~/rgt/w8/allrec_q.txt`）、Windows の `realgame_tests`（`bench\out\rg38_manual_realgame*.txt`）、デバッグの組み立てと `tidy_verify2.ps1 rg38`（台本 `order\w11\final_rg38.ps1`、まとめ `bench\out\rg38_summary.txt`）。**結果はまだ見ていない。次の窓（または利用者）が最初に見る。**
+- 最後の形（9.3 の 1〜5）: このコミットの時に流している途中。WSL 一式 `q`（`~/rgt/w10/checks_q.txt`・`verify_q.txt`・`matrix_qfin.txt`・`~/rgt/w8/allrec_q.txt`）、Windows の `realgame_tests`（`bench\out\rg38_manual_realgame*.txt`）、デバッグの組み立てと `tidy_verify2.ps1 rg38`（台本 `order\w11\final_rg38.ps1`、まとめ `bench\out\rg38_summary.txt`）。結果（10:35 までに見た）: WSL 一式 `q` は本体と写し 7 つすべて `FAILED` 0・`all realgame tests passed`・組み立ての出力 0 行（写し A・AB も通る）、16 通りは `matrix_gfin.txt` と全行同じ、全記録の Driver の F はどの記録も前と同じ。Windows は MSVC 警告 0、`realgame_tests` 全件通過、`realgame_pad_tests` 77。`tidy_verify2.ps1 rg38` は 10:34:44 に `ALL OK (rg38)`（X3 のチェックサム 4 本、`ai_tests`、`verify_build` 43 行に悪い行なし、ctest 36 本。`realgame_virtual_pad` は 1 回目に落ち、流し直しで通った。前にもあった形）。デバッグの組み立ては 10:09:41（警告 0）。**以上で最後の形の確かめはすべて済んだ。**
 
 ### 9.6 見つけたが直していないこと（確かめていない所を含む）
 
@@ -216,7 +216,7 @@
 
 ### 9.8 次にやること（利用者の指示: 全部してから、利用者がもう 1 回プレイ試験）
 
-0. 流していた確かめの結果を見て 9.5 に書く: WSL 一式 `q`（写し 7 つの `FAILED`、16 通りが `matrix_gfin.txt` と同じか、全記録の F）、`tidy_verify2.ps1 rg38`（`bench\out\rg38_summary.txt`）。落ちたものがあれば元を突き止めて直す。
+0. （済み: 9.5 に書いた。最後の形の確かめはすべて通った。）
 1. 戦の終わりで前の組の下ボタンが次の組に届く形（8.5 の 2）。上部の形なので最優先。放置を作らない形で直す（宙の組を放さないこと）。
 2. 送った回しが届くまで寝た絵を信じない Driver の形（8.5 の 3）。
 3. 前の窓の直し（`liftedFor`）の実機での効き目を、`rgdrive2` の流し直し（`RG_DSTATE=1`）で数える。
