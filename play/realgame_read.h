@@ -661,9 +661,12 @@ inline bool contains(const juraic::GameField& whole, const juraic::GameField& pa
 // Points of a field the screen draws something over and leaves standing (the words of an all clear): what each point
 // read when it was taken for that (EMPTY: not taken); since each point last read nothing, in the air with an empty point
 // under it, the piece it has read in the most clear readings so far and in how many (0: none), and the piece it read
-// last and in how many readings in a row.
+// last and in how many readings in a row. `was`: what each point read when it was last taken for the words in the round
+// (kept after it reads nothing: the words' points read nothing for up to 444 readings in a row on the real game, and
+// may then show again right on top of the pieces under them).
 struct Words {
     juraic::Cell at[juraic::W][POINTS]{};
+    juraic::Cell was[juraic::W][POINTS]{};
     juraic::Cell stillAs[juraic::W][POINTS]{};
     int stillFor[juraic::W][POINTS]{};
     juraic::Cell lastAs[juraic::W][POINTS]{};
@@ -694,6 +697,10 @@ inline SideRead withoutWords(const SideRead& read, const Words& words) {
                 const bool below = low > k, above = high + 1 < end;
                 if (below != above) (below ? low : high) += below ? -1 : 1;
             }
+            // (a run that is the words' at every point, right between two pieces that are not: a piece of a stack - the
+            //  words are behind the pieces, and a stack shows nothing of them between two of its pieces)
+            const auto piece = [&](int j) { return j >= 0 && j < POINTS && isPiece(read.point[x][j]) && words.at[x][j] != read.point[x][j]; };
+            if (low < 0 && piece(k - 1) && piece(end)) low = k, high = end - 1;
             for (int j = k; j < end; ++j)
                 if (low < 0 || j < low || j > high) out.point[x][j] = juraic::EMPTY;
             k = end;
@@ -926,7 +933,12 @@ public:
                 //  pieces read in the reading before do not keep the field from standing still either - on the real game
                 //  such a pair, after garbage fell under a light, was taken for none to the end of the round)
                 const bool longAfter = t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap;
-                if (((((firstOfRound || seenBefore) ? settledLate : settled) && there) || (((fresh.childHidden || longAfter) ? settledLate : settled) && hidden)) && !samePair) {
+                // (the window moves on before a pair appears: read standing still ever since the last pair appeared, no
+                //  pair has come - a pair kept where pairs appear and turned over, its axis up in the 13th row, showed
+                //  its child alone there, of the colour of the next pair, and was counted again in a round drawn)
+                const bool windowMoved = t.spawnedAt < 0 || t.nextMovedAt >= t.spawnedAt;
+                if (((((firstOfRound || seenBefore) ? settledLate : settled) && there) || (((fresh.childHidden || longAfter) ? settledLate : settled) && hidden)) && !samePair &&
+                    windowMoved) {
                     // (the window, moved on again since a pair came unseen, not read standing yet: that pair has been
                     //  put, as the window standing tells a reading later - on the real game a pair seen so under the
                     //  words of an all clear was numbered as the one put unseen, and the pairs after it learnt a place
@@ -1028,7 +1040,10 @@ private:
             bool gap = false;
             for (int k = 0; k < POINTS; ++k) {
                 const juraic::Cell c = read.point[x][k];
-                const bool air = k >= 2 * h[x] && gap && isPiece(c) && !own(x, k);
+                // (a point that was the words in this round, reading what it read then: with no empty point under it
+                //  too - the pieces under the words come right up to them -, and taken alone)
+                const bool again = w.was[x][k] != juraic::EMPTY && c == w.was[x][k];
+                const bool air = k >= 2 * h[x] && (gap || again) && isPiece(c) && !own(x, k);
                 gap = gap || (k >= 2 * h[x] && c == juraic::EMPTY);
                 // (the pair seen, or pieces at rest: something in front of it, neither counted nor counted from again;
                 //  another piece than it counts is taken instead when it has read so in more readings in a row than the
@@ -1047,7 +1062,8 @@ private:
         w.any = false;
         for (int x = 0; x < juraic::W; ++x)
             for (int k = 0; k < POINTS; ++k) {
-                if (standing >= wordsPoints && w.stillFor[x][k] >= wordsFrames) w.at[x][k] = w.stillAs[x][k];
+                if (w.stillFor[x][k] >= wordsFrames && (standing >= wordsPoints || (w.was[x][k] != juraic::EMPTY && w.stillAs[x][k] == w.was[x][k])))
+                    w.at[x][k] = w.was[x][k] = w.stillAs[x][k];
                 w.any = w.any || w.at[x][k] != juraic::EMPTY;
             }
     }

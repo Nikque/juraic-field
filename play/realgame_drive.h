@@ -58,6 +58,13 @@ public:
     // or 6 frames after it in a fifth of the pictures of those frames of the eighth record (8 frames twice). A picture of
     // the pair turned the way the engine had it up to TURN_LATEST frames before puts nothing right.
     static constexpr int TURN_LATEST = 6, TURN_RUN = 3;
+    // A turn that changes the column of the pair in its frame (pushed aside from a wall or a higher column, a move with
+    // it) is shown later than a move: the column before in the frame of the turn, the column between in the next, the
+    // column after in the one after (on the real game, turned so in the 12th row, its child in the hidden 13th row).
+    // A picture up to KICK_SHOWN frames after such a turn showing any column from the one before it to the one after
+    // puts nothing right. (Put right for it on the real game, the pair was turned once more: 13 pairs in a record went
+    // down with the child below or in another column than the AI chose, at the end of rounds with the field nearly full.)
+    static constexpr int KICK_SHOWN = 2;
     // The fit: lags from FIT_REACH less to FIT_REACH more than the driver's are tried, a pair with fewer than FIT_SHOTS
     // clear pictures is not counted; the pictures of the last FIT_PAIRS pairs are added up, and a lag is taken when its
     // engine shows FIT_MARGIN pictures more right than the driver's. The way of the turns, which does not change, is told
@@ -65,7 +72,12 @@ public:
     // or two of a pair tell of it, its records): the pictures more right with the turns the other way round, and
     // PLACED_WEIGHT for each pair locked where only that way brings it; at TURN_MARGIN the turns go the other way round
     // (the records played again: at 2 the turns of one record went to and fro seven times, at 3 and 4 never).
-    static constexpr int FIT_REACH = 3, FIT_SHOTS = 4, FIT_PAIRS = 3, FIT_MARGIN = 4, PLACED_WEIGHT = 4, TURN_MARGIN = 3;
+    // A pair whose axis went up into the 13th row tells TURN_STEP at most either way (there a turn the other way round,
+    // with a kick or a quick turn, can bring a pair to where the pictures show it: one such pair turned them the other
+    // way round at the end of a round drawn with a pad a frame early or late now and then, 10 pictures of 15 and the
+    // lock, and they stayed so). Capped for every pair, a pad that turns the other way round from the start was found a
+    // pair later, and 2 pairs of 80 went elsewhere for it.
+    static constexpr int FIT_REACH = 3, FIT_SHOTS = 4, FIT_PAIRS = 3, FIT_MARGIN = 4, PLACED_WEIGHT = 4, TURN_MARGIN = 3, TURN_STEP = 2;
     // When set: what the driver does, as lines with the frame of the clock they are of (the record of a reading,
     // play/realgame_log.h) - each pair begun, the placement it is brought to, a pair put where the picture shows it,
     // the lag the pictures of a pair fitted.
@@ -579,7 +591,10 @@ private:
         if (lags.size() > 15) lags.erase(lags.begin());
         shots.clear();
         // The way of the turns, at the lag that fits this pair best.
-        turnsOther += table[here][1] - table[here][0] + PLACED_WEIGHT * (int(lockedThere[here][1]) - int(lockedThere[here][0]));
+        const int told = table[here][1] - table[here][0] + PLACED_WEIGHT * (int(lockedThere[here][1]) - int(lockedThere[here][0]));
+        bool high = false; // (the engine had the axis in the 13th row or above)
+        for (const Past& q : past) high = high || (q.state.phase == juraic::Phase::Control && q.state.pair.y >= 12);
+        turnsOther += high ? std::clamp(told, -TURN_STEP, TURN_STEP) : told;
         turnsOther = std::max(turnsOther, -2 * TURN_MARGIN); // (a long run as it is does not keep a change from being found)
         if (turnsOther >= TURN_MARGIN) {
             turnsSwapped = !turnsSwapped, turnsOther = 0;
@@ -620,6 +635,12 @@ private:
         bool column = false;
         for (int k = 0; k <= MOVE_SHOWN && !column; ++k)
             if (const juraic::PairControl* p = at(g - k)) column = p->x == seen.x;
+        for (int k = 0; k <= KICK_SHOWN && !column; ++k) {
+            const juraic::PairControl* after = at(g - k);
+            const juraic::PairControl* before = at(g - k - 1);
+            if (after && before && after->dir != before->dir && after->x != before->x)
+                column = seen.x >= std::min(before->x, after->x) && seen.x <= std::max(before->x, after->x);
+        }
         if (!column) return false;
         // (the way: as the engine had it from TURN_LATEST frames before on, and back through turns that came one after the
         //  other into that time, each within TURN_RUN frames of the next - the way before the first of them included: the
