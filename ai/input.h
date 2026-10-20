@@ -45,6 +45,9 @@ public:
     // With tapHold above 1: the down button is held only once the pair is turned and moved where it goes (the pair
     // falls by itself until then, and can still be moved as it lies before it locks).
     bool downWhenPlaced = false;
+    // No way takes the pair's axis up into the 13th row (a floor kick or a quick turn that lifts it there) nor turns the
+    // pair quickly, and no way locks it with its axis there; a pair that is up there already is planned as it may.
+    bool keepLow = false;
 
     // `from` is the pair before the first frame of the path (PairControl::held =
     // the buttons of the frame before). For a pair that is about to appear:
@@ -55,6 +58,7 @@ public:
         out.softDropRows = 0;
         out.states = 0;
         if (from.locked) return false;
+        low = keepLow && from.y < ROW_13;
 
         bool clean;
         int soft;
@@ -97,6 +101,11 @@ private:
                                         BTN_LEFT | BTN_CW,  BTN_LEFT | BTN_CCW,  BTN_RIGHT | BTN_CW,  BTN_RIGHT | BTN_CCW};
     static constexpr uint8_t WAIT = 8;
     static constexpr uint8_t TAP_BUTTONS = BTN_LEFT | BTN_RIGHT | BTN_CW | BTN_CCW;
+    static constexpr int ROW_13 = 12; // (row index)
+    bool low = false; // keepLow for the way being planned
+
+    // A step that keepLow forbids: a quick turn, or the axis lifted into the 13th row.
+    bool tooHigh(const ControlEvents& e, const PairControl& p) const { return low && (e.quickTurned || p.y >= ROW_13); }
 
     struct Node {
         PairControl pair;
@@ -133,6 +142,7 @@ private:
             const ControlEvents e = stepPair(p, field, b, timing, speedPercent);
             if (((b & (BTN_CW | BTN_CCW)) && !e.rotated) || ((b & (BTN_LEFT | BTN_RIGHT)) && !e.moved) || e.kicked || e.quickTurned)
                 clean = false;
+            if (tooHigh(e, p)) return 0;
             soft += e.dropBonus;
             if (buttons) buttons->push_back(b);
             if (e.locked) return p.x == target.x && p.dir == target.dir ? frame : 0;
@@ -161,6 +171,7 @@ private:
             const uint8_t pressed = uint8_t(b & ~p.held);
             const ControlEvents e = stepPair(p, field, b, timing, speedPercent);
             if (((pressed & KIND[0]) && !e.rotated) || ((pressed & KIND[1]) && !e.moved) || e.kicked || e.quickTurned) clean = false;
+            if (tooHigh(e, p)) return 0;
             for (int k = 0; k < 2; ++k) {
                 if (b & KIND[k]) ++on[k], off[k] = 0;
                 else ++off[k], on[k] = 0;
@@ -214,8 +225,9 @@ private:
         Node root{from, -1, 0, WAIT};
         rootRelease = (from.held & TAP_BUTTONS) || from.moveWait;
         if (rootRelease) {
-            for (int k = 0; k < tapHold && !root.pair.locked; ++k) stepPair(root.pair, field, 0, timing, speedPercent), ++root.frames;
-            if (root.pair.locked) return;
+            bool high = false;
+            for (int k = 0; k < tapHold && !root.pair.locked; ++k) high = tooHigh(stepPair(root.pair, field, 0, timing, speedPercent), root.pair) || high, ++root.frames;
+            if (root.pair.locked || high) return;
         }
         nodes.push_back(root);
         seen(pack(root.pair));
@@ -247,9 +259,12 @@ private:
                 // (taps held: no turn and move together - which of them the game does first in a frame is not known)
                 if (tapHold > 1 && macro >= 4 && macro < WAIT) continue;
                 Node n{nodes[size_t(parent)].pair, parent, nodes[size_t(parent)].frames, macro};
+                bool high = false;
                 if (macro != WAIT)
-                    for (int k = 0; k < tapHold && !n.pair.locked; ++k) stepPair(n.pair, field, TAPS[macro], timing, speedPercent), ++n.frames;
-                for (int k = 0; k < (macro == WAIT ? 1 : tapHold) && !n.pair.locked; ++k) stepPair(n.pair, field, 0, timing, speedPercent), ++n.frames;
+                    for (int k = 0; k < tapHold && !n.pair.locked; ++k) high = tooHigh(stepPair(n.pair, field, TAPS[macro], timing, speedPercent), n.pair) || high, ++n.frames;
+                for (int k = 0; k < (macro == WAIT ? 1 : tapHold) && !n.pair.locked; ++k)
+                    high = tooHigh(stepPair(n.pair, field, 0, timing, speedPercent), n.pair) || high, ++n.frames;
+                if (high) continue;
                 if (n.pair.locked) {
                     if (n.pair.x == target.x && n.pair.dir == target.dir && (!best || n.frames < best))
                         nodes.push_back(n), best = n.frames, bestNode = int(nodes.size()) - 1;

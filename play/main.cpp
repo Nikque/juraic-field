@@ -724,7 +724,7 @@ struct App {
         if (change && m.change(change)) {
             if (heard) audio.play(SND_ROTATE);
             // (the AI plays as soon as the window is read: changed now, it plays so from its next pair on)
-            if ((m.row == RealGameMode::ROW_STYLE || m.row == RealGameMode::ROW_LEVEL) && m.playing) startRealGameAI();
+            if ((m.row == RealGameMode::ROW_STYLE || m.row == RealGameMode::ROW_LEVEL || m.row == RealGameMode::ROW_HIGH) && m.playing) startRealGameAI();
         }
         const bool ok = nav(NAV_OK); // (read once in a frame: a key is down in it only the first time it is asked)
         if (ok && m.row == RealGameMode::ROW_READ) {
@@ -805,11 +805,10 @@ struct App {
         const HWND front = GetForegroundWindow();
         RECT inside{};
         const bool shaped = gameLikeWindow(front, inside) && std::abs(float(inside.bottom) / float(inside.right) - 9.f / 16.f) < 0.02f;
-        const bool fits = front != window && (m.autoRead ? shaped && front != m.notTheGame : gameLikeWindow(front, inside));
+        const bool fits = front != window && shaped && front != m.notTheGame;
         chosenFor = fits && front == chosenFront ? chosenFor + 1 : 0;
         chosenFront = fits ? front : nullptr;
         if (chosenFor >= 30) beginReading(front);
-        else if (!m.autoRead && --m.chooseLeft <= 0) m.reading = RealGameMode::Reading::Off, say(L"窓が選ばれませんでした");
     }
     void beginReading(HWND w) {
         RealGameMode& m = realGame;
@@ -1545,11 +1544,10 @@ struct App {
         const RealGameMode::Hold hold(m.state); // (the thread of the play changes what is shown)
         gfx.text(L"実機の 2P を Juraic が操作", 0, 30, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         const unsigned tint = levelColor(m.level);
-        const int seconds = (m.chooseLeft + 59) / 60;
-        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", m.reading == RealGameMode::Reading::Off ? L"読み始める" : L"読むのを止める",
+        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", L"13 段目を通る動き", m.reading == RealGameMode::Reading::Off ? L"読み始める" : L"読むのを止める",
                                                        m.playing ? L"2P の操作を止める" : L"2P を操作する",
                                                        m.pressing() ? L"押すのを止める" : L"2P のボタンを押す", L"戻る"};
-        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level),
+        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level), m.keepLow ? L"使わない" : L"使う",
                                                          m.reading == RealGameMode::Reading::On ? L"読んでいます" : m.reading == RealGameMode::Reading::Choosing ? L"窓を選んでいます" : L"",
                                                          m.playing ? L"操作しています" : L"",
                                                          m.pressing() ? (m.pressSeconds() ? L"あと " + std::to_wstring(m.pressSeconds()) + L" 秒で " : std::wstring(L"今 ")) +
@@ -1557,7 +1555,7 @@ struct App {
                                                                       : L"5 秒後に " + std::wstring(RealGameMode::PRESS_BUTTON_NAMES[m.pressButton]) + L" を 1 回",
                                                          L""};
         for (int i = 0; i < RealGameMode::ROWS; ++i) {
-            const float y = 88 + float(i) * 38;
+            const float y = 88 + float(i) * 34;
             const bool on = i == m.row;
             if (on) gfx.round(rectF(40, y - 4, 640, y + 34), 8, rgb(84, 104, 190));
             gfx.text(rows[i], 64, y, 260, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
@@ -1573,8 +1571,7 @@ struct App {
             lines.push_back(L"読んでいません。「読み始める」で、実機の窓をまた探します。");
             lines.push_back(L"実機のボタンは、仮想のパッドでだけ押します。");
         } else if (m.reading == RealGameMode::Reading::Choosing) {
-            lines.push_back(m.autoRead ? std::wstring(L"実機の窓を探しています。実機の窓をクリックして前に出すと、それを読みます（次からは自分で見つけます）。")
-                                       : L"実機の窓をクリックして前に出してください（あと " + std::to_wstring(seconds) + L" 秒）。");
+            lines.push_back(L"実機の窓を探しています。実機の窓をクリックして前に出すと、それを読みます（次からは自分で見つけます）。");
         } else {
             lines.push_back(L"読んでいる窓の中身: " + std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) +
                             (debug ? L"（表の基準 " + std::to_wstring(m.layout.baseWidth) + L" × " + std::to_wstring(m.layout.baseHeight) + L"）" : L""));
@@ -1641,7 +1638,7 @@ struct App {
         }
         const wchar_t* notes[] = {L"同じ PC の実機のオフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなた。オンラインの対戦では使えません）。",
                                   L"この画面を開くと Juraic が実機の窓を読み始め、2P の欄・キャラクター・操作の種類を選び、対戦が始まると 2P を操作します。",
-                                  L"AI とレベルは開くたびに設定の 2P 側から始まります。仮想のパッドには ViGEmBus のドライバーが要ります。"};
+                                  L"AI とレベルは開くたびに設定の 2P 側から、13 段目を通る動きは「使わない」から始まります。仮想のパッドには ViGEmBus のドライバーが要ります。"};
         for (int i = 0; i < 3; ++i) gfx.text(notes[i], 0, 592 + float(i) * 18, CANVAS_W, 18, 0, rgb(150, 158, 186), 0);
         gfx.text(debug ? L"↑↓ で選ぶ　←→ で変える　Enter で決定　S で今の実機の画面を保存　Esc で戻る" : L"↑↓ で選ぶ　←→ で変える　Enter で決定　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
     }
@@ -2027,7 +2024,8 @@ struct App {
             // The screen of the mode that plays the real game's 2P (updateRealGame). Result 16 when it does not do what
             // it says: it opens with the AI of the 2P side in the settings, on the row of the AI; to the left there - the
             // other AI; down to the row of the level and to the right LEVELS times, a press at a time - round past Lv 36
-            // and back at the level it began with; the settings stay as they were. The picture: that row chosen.
+            // and back at the level it began with; the settings stay as they were; down to the row of the 13th row, which
+            // opens kept below it, to the right and back. The picture: that row chosen.
             const int style = settings.aiStyle, level = settings.aiLevel;
             realGame.open(style, level);
             bool good = realGame.style == style && realGame.level == level && realGame.row == RealGameMode::ROW_STYLE;
@@ -2044,6 +2042,12 @@ struct App {
             good = good && realGame.level == (level == 1 ? ai::LEVELS : level - 1);
             frame(right), frame(0), frame(left | right), frame(0);
             good = good && realGame.level == level && settings.aiStyle == style && settings.aiLevel == level && screen == Screen::RealGame;
+            frame(below), frame(0);
+            good = good && realGame.row == RealGameMode::ROW_HIGH && realGame.keepLow;
+            frame(right), frame(0);
+            good = good && !realGame.keepLow;
+            frame(left), frame(0);
+            good = good && realGame.keepLow;
             selfNav = selfNavWas = 0;
             if (!good) result = 16;
             say(good ? L"the screen of the real game's 2P: its rows change as they should" : L"the screen of the real game's 2P: a row is not what it should be");

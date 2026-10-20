@@ -72,10 +72,11 @@ inline HWND findProgramWindow(const std::wstring& program) {
 }
 
 struct RealGameMode {
-    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_PRESS, ROW_BACK, ROWS };
+    enum Row { ROW_STYLE, ROW_LEVEL, ROW_HIGH, ROW_READ, ROW_PLAY, ROW_PRESS, ROW_BACK, ROWS };
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
+    bool keepLow = true;           // the pairs kept below the 13th row (Driver::keepLow); so each time the mode is opened
 
     RealGameMode() = default;
     RealGameMode(const RealGameMode&) = delete;
@@ -104,6 +105,7 @@ struct RealGameMode {
         stopPlaying(), stopPress();
         style = settingsStyle ? 1 : 0;
         level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LEVELS ? juraic::ai::LEVELS : settingsLevel;
+        keepLow = true;
         stopReading();
     }
     // The value of the row under the cursor changed by `by` steps; past either end it comes in again at the other
@@ -112,6 +114,7 @@ struct RealGameMode {
         const Hold hold(state);
         if (row == ROW_STYLE) style = ((style + by) % 2 + 2) % 2;
         else if (row == ROW_LEVEL) level = ((level - 1 + by) % juraic::ai::LEVELS + juraic::ai::LEVELS) % juraic::ai::LEVELS + 1;
+        else if (row == ROW_HIGH) keepLow = by % 2 ? !keepLow : keepLow;
         else if (row == ROW_PRESS) pressButton = ((pressButton + by) % PRESS_BUTTONS + PRESS_BUTTONS) % PRESS_BUTTONS;
         else return false;
         return true;
@@ -156,19 +159,24 @@ struct RealGameMode {
         if (reading != Reading::On) return error = L"先に「読み始める」で実機の窓を選んでください", false;
         if (!pad.running() && !pad.start(error)) return false;
         driver = realgame::Driver{};
-        realgame::Driver::prepare(agent.get());
+        driver.keepLow = keepLow;
+        realgame::Driver::prepare(agent.get(), keepLow);
         driver.lag = lag, driver.turnsSwapped = turnsSwapped, driver.agent = std::move(agent);
         driver.notes = &notes;
         playing = true;
-        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are"));
+        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are") +
+                                        (keepLow ? ", the pairs kept below the 13th row" : ", the 13th row used"));
         return true;
     }
-    // The AI changed on the screen while it plays: `agent` plays 2P from the next pair on.
+    // The AI changed on the screen while it plays (its kind, its level, the 13th row): `agent` plays 2P from the next
+    // pair on.
     void replaceAgent(std::unique_ptr<juraic::ai::Agent> agent) {
         const Hold hold(state);
         if (!playing) return;
+        driver.keepLow = keepLow;
         driver.replaceAgent(std::move(agent));
-        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level));
+        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level) +
+                                        (keepLow ? ", the pairs kept below the 13th row" : ", the 13th row used"));
     }
     void stopPlaying() {
         const Hold hold(state);
@@ -250,8 +258,6 @@ struct RealGameMode {
     bool confirmed = false;
     int64_t readSince = 0; // (the frame of the clock reading began in)
     HWND notTheGame = nullptr;
-    static constexpr int CHOOSE_FRAMES = 10 * 60;
-    int chooseLeft = 0;
     // The parts for finding faults (JURAIC_REALGAME_DEBUG) are built in.
     static constexpr bool DEBUG_PARTS = JURAIC_REALGAME_DEBUG != 0;
     // The table: with DEBUG_PARTS the file LAYOUT_FILE in the folder of one's own files when there is one (read when

@@ -97,6 +97,10 @@ public:
     // The down button held only once the pair is turned and moved where it goes, and not while the choice is late
     // (InputPlanner::downWhenPlaced): for a pair whose field is not known for certain.
     bool downWhenPlaced = false;
+    // The ways keep the pairs below the 13th row and turn none quickly (InputPlanner::keepLow), and with pathCheck only
+    // placements reached so are chosen - when every one of those fills the 12th row of the third column, any reached.
+    bool keepLow = false;
+    int64_t climbs = 0;    // pairs for which every placement reached below the 13th row filled it (for tools)
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
     int64_t revisedChoices = 0; // choices discarded because their field or known pairs changed
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
@@ -113,14 +117,10 @@ public:
     // planned again from where `o` shows the pair. No way left to it: the pair goes to the placement nearest to it that
     // it can still reach (as a choice that came after the pair had fallen behind a column); none: down where it is.
     void steer(const Observation& o) {
-        planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
+        tune();
         if (o.self().phase != Phase::Control || late || target < 0) return;
         step = 0;
-        const Player& p = o.self();
-        if (planner.plan(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) return;
-        const int best = nearest(o, p.pair, target);
-        if (best >= 0 && planner.plan(p.field, p.pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best, ++steered;
-        else path.buttons.clear();
+        reach(o, o.self().pair, target, ~0u);
     }
     // The placement the pair in play is brought to (-1: none yet).
     int targetPlacement() const { return target; }
@@ -136,7 +136,7 @@ public:
     }
 
     uint8_t frame(const Observation& o) override {
-        planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
+        tune();
         const Player& p = o.self();
         uint8_t b = 0;
         if (late && p.phase != Phase::Control) finish(); // the pair came to rest before its choice was made
@@ -293,25 +293,54 @@ private:
         }
         return true;
     }
-    // The placements choose() is offered.
-    unsigned offered(const Observation& o) {
+    // The settings of the ways the planner makes.
+    void tune() {
+        planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
+        planner.keepLow = keepLow && lowWays;
+    }
+    // The placements choose() is offered for the pair `colors` (counted: a first choice, for climbs).
+    unsigned offered(const Observation& o, Pair colors, bool counted) {
         const Player& p = o.self();
         unsigned legal = legalPlacements(p.field);
+        lowWays = true;
+        tune();
         if (legal && pathCheck) {
-            // (only a field with a column eleven high or more can stand in the pair's way)
+            // (only a field with a column eleven high or more can stand in the pair's way - kept low, a quick turn is
+            //  needed between two higher columns anywhere)
             int h[W], top = 0;
             p.field.heights(h);
             for (int x = 0; x < W; ++x) top = h[x] > top ? h[x] : top;
-            if (top >= 11) {
-                unsigned reached = 0;
-                InputPath there;
+            if (top >= 11 || keepLow) {
                 const PairControl pair = spawnPair(o.timing);
-                for (int id = 0; id < PLACEMENTS; ++id)
-                    if ((legal >> id & 1) && planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, there)) reached |= 1u << id;
+                unsigned reached = reachedFrom(o, pair, legal);
+                if (keepLow && !survives(p.field, reached, colors)) {
+                    lowWays = false, climbs += counted;
+                    tune();
+                    reached = reachedFrom(o, pair, legal);
+                }
                 if (reached) legal = reached;
             }
         }
         return legal;
+    }
+    // The placements of `legal` the planner finds a way to from `pair`.
+    unsigned reachedFrom(const Observation& o, const PairControl& pair, unsigned legal) {
+        unsigned reached = 0;
+        InputPath there;
+        for (int id = 0; id < PLACEMENTS; ++id)
+            if ((legal >> id & 1) && planner.plan(o.self().field, pair, placement(id), o.timing, o.rules.speedPercent, there)) reached |= 1u << id;
+        return reached;
+    }
+    // Does a placement of `ids` leave the 12th row of the third column empty once its chain has run?
+    static bool survives(const GameField& field, unsigned ids, Pair colors) {
+        for (int id = 0; id < PLACEMENTS; ++id) {
+            if (!(ids >> id & 1)) continue;
+            GameField g = field;
+            place(g, placement(id), colors);
+            runChain(g.f);
+            if (!g.dead()) return true;
+        }
+        return false;
     }
     // Chooses the placement of the pair that appears next.
     void think(const Observation& o) {
@@ -320,9 +349,9 @@ private:
         rememberChoice(o);
         asked = pending = second = false, shownAtThink = o.mine().count();
         const Player& p = o.self();
-        const unsigned legal = offered(o);
-        if (!legal) return;
         const Pair colors = o.mine().pair(p.nextPair);
+        const unsigned legal = offered(o, colors, true);
+        if (!legal) return;
         coming = colors;
         choosingAgain = false;
         const Observation& shown = sight(o);
@@ -336,7 +365,7 @@ private:
     // The choice of that pair once more (again() said so). The first one stands until this one has come.
     void thinkAgain(const Observation& o) {
         if (job.valid()) chosen = job.get(), job = std::future<int>();
-        const unsigned legal = offered(o);
+        const unsigned legal = offered(o, coming, false);
         if (!legal || chosen < 0) return;
         ++againBegun;
         rememberChoice(o);
@@ -383,12 +412,7 @@ private:
         if (next.locked) return false;
         InputPath way;
         if (!planner.plan(p.field, next, placement(target), o.timing, o.rules.speedPercent, way) || way.frames() + 1 > left) return false;
-        const unsigned legal = legalPlacements(p.field);
-        for (int id = 0; id < PLACEMENTS; ++id)
-            if ((legal >> id & 1) && id != target && planner.plan(p.field, now, placement(id), o.timing, o.rules.speedPercent, way) &&
-                !planner.plan(p.field, next, placement(id), o.timing, o.rules.speedPercent, way))
-                return false;
-        return true;
+        return keepsWays(o, now, next, target);
     }
     // holdSecond, no choice to bring the pair to yet (late, or a choice made again): may the pair go straight down in this
     // frame? Yes when every placement that has a way from where it is still has one from there. (Held down at once, a
@@ -399,10 +423,15 @@ private:
         PairControl next = now;
         stepPair(next, p.field, BTN_DOWN, o.timing, o.rules.speedPercent);
         if (next.locked) return false;
+        return keepsWays(o, now, next, -1);
+    }
+    // Has every placement but `except` that has a way from `now` still one from `next`?
+    bool keepsWays(const Observation& o, const PairControl& now, const PairControl& next, int except) {
+        const Player& p = o.self();
         InputPath way;
         const unsigned legal = legalPlacements(p.field);
         for (int id = 0; id < PLACEMENTS; ++id)
-            if ((legal >> id & 1) && planner.plan(p.field, now, placement(id), o.timing, o.rules.speedPercent, way) &&
+            if ((legal >> id & 1) && id != except && planner.plan(p.field, now, placement(id), o.timing, o.rules.speedPercent, way) &&
                 !planner.plan(p.field, next, placement(id), o.timing, o.rules.speedPercent, way))
                 return false;
         return true;
@@ -442,15 +471,28 @@ private:
             if (wanted >= 0 && target != wanted) ++rerouted, lastWanted = wanted, lastTaken = target;
             return;
         }
-        if (id < 0) return;
-        if ((legal >> id & 1) && planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
-            target = id;
-            return;
+        if (id >= 0) reach(o, pair, id, legal);
+    }
+    // The way of `pair` to placement `id` (one of `legal`). No way leads there any more - the choice came, or the pair was
+    // put right, when it had fallen behind a column -: to the placement nearest to it; none: down where it is. Kept below
+    // the 13th row (keepLow) and finding no way at all: any way.
+    void reach(const Observation& o, const PairControl& pair, int id, unsigned legal) {
+        const Player& p = o.self();
+        for (;;) {
+            if ((legal >> id & 1) && planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
+                target = id;
+                return;
+            }
+            const int best = nearest(o, pair, id);
+            if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) {
+                target = best, ++steered;
+                return;
+            }
+            if (!planner.keepLow) break;
+            lowWays = false, ++climbs;
+            tune();
         }
-        // The pair cannot get there any more: the choice came when it had fallen behind a column.
-        const int best = nearest(o, pair, id);
-        if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) target = best, ++steered;
-        else path.buttons.clear();
+        path.buttons.clear();
     }
     // The placement `pair` can still reach whose two pieces come down nearest to the columns of placement `id`; of equal
     // ones the one with the smaller number. -1: none.
@@ -471,6 +513,7 @@ private:
     }
 
     InputPlanner planner;
+    bool lowWays = true; // keepLow holds for the ways of the pair in play
     InputPath path;
     int step = 0, target = -1;
     int idle = 0; // handWait: the frames the pair in the air is still left alone
