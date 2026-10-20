@@ -39,6 +39,12 @@ class InputPlanner {
 public:
     int maxStates = 1024;
     int tapHold = 1; // frames a tap is pressed, and let go before the next (1: the fastest)
+    // With tapHold above 1: the frames each kind of tap held as the way begins (turns, moves) has been held so far; it
+    // is held on to tapHold frames before it is let go (0: as long as a tap is - let go at once).
+    int heldFor[2] = {0, 0};
+    // With tapHold above 1: the down button is held only once the pair is turned and moved where it goes (the pair
+    // falls by itself until then, and can still be moved as it lies before it locks).
+    bool downWhenPlaced = false;
 
     // `from` is the pair before the first frame of the path (PairControl::held =
     // the buttons of the frame before). For a pair that is about to appear:
@@ -140,14 +146,15 @@ private:
         constexpr uint8_t KIND[2] = {BTN_CW | BTN_CCW, BTN_LEFT | BTN_RIGHT};
         int on[2] = {0, 0}, off[2] = {tapHold, tapHold}; // frames each kind of tap has been pressed / let go in a row
         for (int k = 0; k < 2; ++k)
-            if (p.held & KIND[k]) on[k] = tapHold, off[k] = 0; // (a tap held as the way begins: let go first)
+            if (p.held & KIND[k]) on[k] = heldFor[k] > 0 ? std::min(heldFor[k], tapHold) : tapHold, off[k] = 0; // (a tap held as the way begins: held to its end, then let go)
         for (int frame = 1; frame <= MAX_FRAMES; ++frame) {
-            uint8_t b = BTN_DOWN;
             const uint8_t want[2] = {turnButton(p.dir, target.dir), uint8_t(p.x < target.x ? BTN_RIGHT : p.x > target.x ? BTN_LEFT : 0)};
+            uint8_t b = downWhenPlaced && (want[0] || want[1]) ? 0 : BTN_DOWN;
             for (int k = 0; k < 2; ++k) {
                 if (p.held & KIND[k]) {
                     if (on[k] < tapHold) b |= uint8_t(p.held & KIND[k]);
-                } else if (want[k] && off[k] >= tapHold) {
+                } else if (want[k] && off[k] >= tapHold && !(k == 1 && (b & ~p.held & KIND[0]))) {
+                    // (a move does not begin in the frame a turn begins: which the game does first is not known)
                     b |= want[k];
                 }
             }
@@ -237,6 +244,8 @@ private:
             if (best && int(top >> 32) >= best) break; // nothing left can be earlier
             const int parent = int(uint32_t(top));
             for (uint8_t macro = 0; macro <= WAIT; ++macro) {
+                // (taps held: no turn and move together - which of them the game does first in a frame is not known)
+                if (tapHold > 1 && macro >= 4 && macro < WAIT) continue;
                 Node n{nodes[size_t(parent)].pair, parent, nodes[size_t(parent)].frames, macro};
                 if (macro != WAIT)
                     for (int k = 0; k < tapHold && !n.pair.locked; ++k) stepPair(n.pair, field, TAPS[macro], timing, speedPercent), ++n.frames;

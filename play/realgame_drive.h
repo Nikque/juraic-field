@@ -231,11 +231,11 @@ public:
                 //  read, never both unread: 9 frames before a pair, the down button held on went on to that pair)
                 const bool moving = (!side.nextRead[0] && !side.nextRead[1]) || windowOddFor >= 2;
                 if (moving && windowReadAt > startNext && windowReadAt > windowPauseAt) windowPauseAt = t.frame;
-                if (windowPauseAt >= startNext && now < windowPauseAt + t.timing.nextSlide) return press(now, held = 0);
-                return press(now, held = juraic::BTN_DOWN);
+                if (windowPauseAt >= startNext && now < windowPauseAt + t.timing.nextSlide) return press(now, held = tapToEnd(now, 0));
+                return press(now, held = tapToEnd(now, juraic::BTN_DOWN));
             }
             untilLocked = false;
-            return press(now, held = 0);
+            return press(now, held = tapToEnd(now, 0));
         }
         correct(f);
         if (notes) {
@@ -325,6 +325,22 @@ private:
         while (pads.size() > 600) pads.pop_front();
         return out;
     }
+    // A turn or a move held in the frame before, for fewer frames than a tap is held
+    // (PlacementAgent::tapHold), is held on to its end. (The last tap of a way, in the frame the engine locks the pair, went
+    // out for one frame: lost by a frame of the game under load, the pair locked turned otherwise or a column short.)
+    uint8_t tapToEnd(int64_t now, uint8_t b) const {
+        const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(agent.get());
+        const int hold = placing ? placing->tapHold : 1;
+        static constexpr uint8_t KIND[2] = {juraic::BTN_CW | juraic::BTN_CCW, juraic::BTN_LEFT | juraic::BTN_RIGHT};
+        for (int k = 0; k < 2 && hold > 1; ++k) {
+            const uint8_t last = padAt(now - 1) & KIND[k];
+            if (!last || (b & KIND[k])) continue;
+            int run = 0;
+            for (int64_t q = now - 1; run < hold && (padAt(q) & KIND[k]) == last; --q) ++run;
+            if (run < hold) b |= uint8_t((turnsSwapped ? swapTurns(last) : last) & KIND[k]);
+        }
+        return b;
+    }
     // The buttons the pad held in the frame `at` of the clock (0 before any).
     uint8_t padAt(int64_t at) const {
         for (size_t i = pads.size(); i-- > 0;)
@@ -355,6 +371,22 @@ private:
 
     int64_t roundFrame(const Tracker& t, int64_t at) const { return t.roundStart >= 0 && at >= t.roundStart ? at - t.roundStart : 0; }
 
+    // A pair begun unseen goes down by itself until it is turned and moved where it goes (PlacementAgent::
+    // downWhenPlaced): the engine knows of no garbage that fell while the screen could not be read, and the game's
+    // pair, on a field higher than the engine's, lay down before its last move (in rounds drawn with the screen lit as
+    // one pair in three appears, the pairs elsewhere than the AI chose were all begun unseen, garbage under most of them).
+    void carefulDown(bool on) {
+        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent.get())) placing->downWhenPlaced = on;
+    }
+    // The engine's pairs: those either side has shown (one not known: of the first colour).
+    void learnPairs(const Tracker& t) {
+        tsumo = juraic::Tsumo{};
+        for (size_t i = 0; i < t.pairsLearnt(); ++i) {
+            const juraic::Pair p = t.knows(me, int(i)) ? t.pairOf(me, int(i)) : juraic::Pair{1, 1};
+            tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2] = p.axis, tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2 + 1] = p.child;
+        }
+    }
+
     // A new own pair was seen: the engine takes the side as it was then (the pair about to appear), with the pairs
     // the screen has shown.
     void begin(const Follower& f, const SideTrack& side) {
@@ -370,11 +402,8 @@ private:
         own.wait = 1;
         own.nextPair = own.moves = side.pairs - 1;
         if (f.model[me].known) own.scoring = f.model[me].core.scoring;
-        tsumo = juraic::Tsumo{};
-        for (size_t i = 0; i < t.pairsLearnt(); ++i) {
-            const juraic::Pair p = t.knows(me, int(i)) ? t.pairOf(me, int(i)) : juraic::Pair{1, 1};
-            tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2] = p.axis, tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2 + 1] = p.child;
-        }
+        learnPairs(t);
+        carefulDown(false);
         // (seen late, it was in play already in the frame of the picture: it is taken as appearing in that frame)
         next = side.spawnedAt + (side.late ? 0 : 1);
         startOwn = own, startNext = next, shiftBegun = t.side[me].shiftedAt;
@@ -434,6 +463,10 @@ private:
             juraic::settlePlayer(own, rules, t.timing, noGarbage, e);
         }
         if (own.phase != juraic::Phase::Next) return;
+        // (the colours learnt since the last pair begun: from the third pair begun unseen in a row on, the engine had
+        //  none, put pairs of no colour, and its field stayed lower than the game's)
+        learnPairs(t);
+        carefulDown(true);
         own.wait = 1;
         next = appears + 1;
         pairsSeen = t.side[me].pairs + t.side[me].unseen + 1;
@@ -457,12 +490,15 @@ private:
     bool play(const Follower& f, bool send) {
         juraic::ai::Observation o;
         f.observeAt(me, rules, own, next, o);
+        tellHeld();
         const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(agent.get());
         const int64_t revisions = placing ? placing->revisedChoices : 0;
         const uint8_t wanted = uint8_t(agent->frame(o) & ~juraic::BTN_DROP);
         if (placing && placing->revisedChoices != revisions)
             note(next, "2P pair " + std::to_string(pairsSeen) + " choice renewed: the field or known pairs changed");
-        if (send) held = wanted;
+        // (a tap the agent lets go before its end - its way planned again, a picture put right - is held to its end: one
+        //  that went out for a frame as a pair was put right was lost by a frame of the game under load now and then)
+        if (send) held = tapToEnd(next - lag, wanted);
         juraic::Incoming nobody;
         juraic::advancePlayer(own, nobody, held, tsumo, rules, f.tracker.timing, roundFrame(f.tracker, next));
         past.push_back({next, own, held});
@@ -530,7 +566,23 @@ private:
         if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent.get())) {
             juraic::ai::Observation o;
             f.observeAt(me, rules, own, next, o);
+            tellHeld();
             placing->steer(o);
+        }
+    }
+    // The agent is told how many frames the turn and the move the engine's pair held in its last frame have been held
+    // (PlacementAgent::tapsHeldFor): a way planned again while a tap is held holds it to the end of its tapHold frames.
+    // (Let go at once, a tap was cut to one frame when a second choice came or a pair was put right: on the real game
+    // 103 pairs of 465 had such a tap, and one lost by a frame of the game left a pair short of its placement.)
+    void tellHeld() {
+        auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent.get());
+        if (!placing) return;
+        static constexpr uint8_t KIND[2] = {juraic::BTN_CW | juraic::BTN_CCW, juraic::BTN_LEFT | juraic::BTN_RIGHT};
+        for (int k = 0; k < 2; ++k) {
+            const uint8_t h = own.pair.held & KIND[k];
+            int run = 0;
+            for (size_t i = past.size(); h && i-- > 0 && (past[i].buttons & KIND[k]) == h;) ++run;
+            placing->tapsHeldFor[k] = run;
         }
     }
 
@@ -539,6 +591,15 @@ private:
         const SideTrack& s = f.tracker.side[me];
         if (pairsSeen <= 0 || s.pairs != pairsSeen || !s.inHand || !s.pair.seen || !s.clear) return;
         if (!shots.empty() && shots.back().frame >= f.tracker.frame) return;
+        // (not a picture up to TURN_LATEST frames after a turn that changed the column or the row of the engine's pair: a
+        //  kick or a lift is shown late, and such pictures took the lag to 8 frames for a pad 5 late in rounds drawn so)
+        for (size_t i = past.size(); i-- > 1 && past[i].frame > f.tracker.frame - TURN_LATEST;) {
+            const juraic::PairControl& a = past[i].state.pair;
+            const juraic::PairControl& b = past[i - 1].state.pair;
+            if (past[i].frame <= f.tracker.frame && past[i].state.phase == juraic::Phase::Control && past[i - 1].state.phase == juraic::Phase::Control &&
+                a.dir != b.dir && (a.x != b.x || a.y != b.y || a.upper != b.upper))
+                return;
+        }
         shots.push_back({f.tracker.frame, s.pair.at});
     }
 
@@ -710,11 +771,29 @@ private:
         juraic::PairControl& had = past[i].state.pair;
         const juraic::PairControl& seen = side.pair.at;
         const juraic::Pair c = past[i].state.colors;
+        // (a pair of one colour: which piece is its axis no picture tells, and the picture is taken either way round -
+        //  read the other way round from the engine, a turned pair shown the way before its turn put right, and on the
+        //  real game it was turned again and went down with its child up, not right)
+        juraic::PairControl other = seen;
+        const bool either = c.axis == c.child && seen.childY() < juraic::ROW_14;
+        if (either) other.x = int8_t(seen.childX()), other.y = int8_t(seen.childY()), other.dir = uint8_t((seen.dir + 2) % 4);
         for (const int by : {0, 1, -1, 2, -2})
-            if (shows(t.frame + by, seen, c)) return;
+            if (shows(t.frame + by, seen, c) || (either && shows(t.frame + by, other, c))) return;
         ++corrected;
         note(t.frame, "2P pair " + std::to_string(pairsSeen) + " put right: the engine had " + controlText(had) + ", the picture shows " + controlText(seen));
-        had.x = seen.x, had.y = seen.y, had.dir = seen.dir, had.upper = seen.upper;
+        // (put right, a pair of one colour keeps the way the engine has it, and so the piece it has as its axis: the
+        //  picture's way, its axis taken where it was seen last, was the other way round for a pair gone down since,
+        //  and on the real game its way to a placement was two turns longer, turned at the wall it went down a column
+        //  short. Turned in the last TURN_LATEST frames - the turn perhaps taken the other way round -, the axis is the
+        //  piece nearer the engine's axis, which a turn leaves where it is, and the way the engine's only as near.)
+        bool turned = false;
+        for (size_t k = i; k > 0 && k + TURN_LATEST > i && !turned; --k) turned = past[k].state.pair.dir != past[k - 1].state.pair.dir;
+        const auto apart = [&](const juraic::PairControl& p) {
+            return 2 * std::abs(p.x - had.x) + std::abs(2 * p.y + (p.upper ? 1 : 0) - 2 * had.y - (had.upper ? 1 : 0));
+        };
+        const bool asEngine = either && (turned ? apart(other) < apart(seen) || (apart(other) == apart(seen) && other.dir == had.dir) : other.dir == had.dir);
+        const juraic::PairControl& to = asEngine ? other : seen;
+        had.x = to.x, had.y = to.y, had.dir = to.dir, had.upper = to.upper;
         had.grounded = false, had.moveWait = 0;
         // (the frames since played again with the buttons they took)
         own = past[i].state;

@@ -91,6 +91,12 @@ public:
     // The taps of the buttons it gives (InputPlanner::tapHold): pressed this many frames, let go as many before the
     // next. 1: a frame each (the fastest; the default).
     int tapHold = 1;
+    // With tapHold above 1: the frames the turn and the move held in the last frame have been held so far, as told by
+    // whoever sends the buttons (InputPlanner::heldFor; 0: as long as a tap is).
+    int tapsHeldFor[2] = {0, 0};
+    // The down button held only once the pair is turned and moved where it goes, and not while the choice is late
+    // (InputPlanner::downWhenPlaced): for a pair whose field is not known for certain.
+    bool downWhenPlaced = false;
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
     int64_t revisedChoices = 0; // choices discarded because their field or known pairs changed
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
@@ -107,7 +113,7 @@ public:
     // planned again from where `o` shows the pair. No way left to it: the pair goes to the placement nearest to it that
     // it can still reach (as a choice that came after the pair had fallen behind a column); none: down where it is.
     void steer(const Observation& o) {
-        planner.tapHold = tapHold;
+        planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
         if (o.self().phase != Phase::Control || late || target < 0) return;
         step = 0;
         const Player& p = o.self();
@@ -130,7 +136,7 @@ public:
     }
 
     uint8_t frame(const Observation& o) override {
-        planner.tapHold = tapHold;
+        planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
         const Player& p = o.self();
         uint8_t b = 0;
         if (late && p.phase != Phase::Control) finish(); // the pair came to rest before its choice was made
@@ -145,7 +151,7 @@ public:
                 // A search owns the agent's working data until it returns. Keep sending input, then discard its result
                 // before beginning a choice of the corrected field. No old result may become the new pair's target.
                 if (!made() || (again_.valid() && again_.wait_for(std::chrono::seconds(0)) != std::future_status::ready))
-                    return last = p.phase == Phase::Control || p.wait == 1 ? BTN_DOWN : 0;
+                    return last = (p.phase == Phase::Control || p.wait == 1) && !downWhenPlaced && (!holdSecond || downKeepsWays(o)) ? BTN_DOWN : 0;
                 finish();
                 revising = false;
                 target = -1, step = 0;
@@ -212,7 +218,7 @@ public:
         if (late) {
             if (!lateScript) ++lateLog.back();
             if (idle > 0) --idle; // (slow hands: the pair is left alone in this frame anyway)
-            return ++lateFrames, last = holdSecond ? BTN_DOWN : 0;
+            return ++lateFrames, last = holdSecond && !downWhenPlaced && downKeepsWays(o) ? BTN_DOWN : 0;
         }
         // (not while a second choice is being worked out: it works with the members of the class)
         if (p.phase == Phase::Control && target >= 0 && !second && !again_.valid()) airborne(o, coming, target, path.frames() - step);
@@ -380,6 +386,23 @@ private:
         const unsigned legal = legalPlacements(p.field);
         for (int id = 0; id < PLACEMENTS; ++id)
             if ((legal >> id & 1) && id != target && planner.plan(p.field, now, placement(id), o.timing, o.rules.speedPercent, way) &&
+                !planner.plan(p.field, next, placement(id), o.timing, o.rules.speedPercent, way))
+                return false;
+        return true;
+    }
+    // holdSecond, no choice to bring the pair to yet (late, or a choice made again): may the pair go straight down in this
+    // frame? Yes when every placement that has a way from where it is still has one from there. (Held down at once, a
+    // pair to go up over a column twelve high lay on the column beside it on the real game.)
+    bool downKeepsWays(const Observation& o) {
+        const Player& p = o.self();
+        const PairControl now = p.phase == Phase::Control ? p.pair : appearingPair(p, o.rules, o.timing);
+        PairControl next = now;
+        stepPair(next, p.field, BTN_DOWN, o.timing, o.rules.speedPercent);
+        if (next.locked) return false;
+        InputPath way;
+        const unsigned legal = legalPlacements(p.field);
+        for (int id = 0; id < PLACEMENTS; ++id)
+            if ((legal >> id & 1) && planner.plan(p.field, now, placement(id), o.timing, o.rules.speedPercent, way) &&
                 !planner.plan(p.field, next, placement(id), o.timing, o.rules.speedPercent, way))
                 return false;
         return true;
