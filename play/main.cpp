@@ -1264,8 +1264,9 @@ struct App {
         splitAddress(toUtf8(arenaServer), host, port);
         if (host.empty()) return say(L"サーバーのアドレスを入れてください");
         if (arenaIndex == 3 && (arenaName.empty() || arenaToken.empty())) return say(L"名前とトークンを入れてください（対戦場の運営者が登録したもの）");
-        const bool called = arenaIndex == 3 ? arena.play(host, port, toUtf8(arenaName), toUtf8(arenaToken)) : arena.watch(host, port);
-        if (!called) return say(L"サーバーにつながりませんでした: " + arenaServer);
+        // (no server is told on the screen of the arena: ArenaPlay::Over)
+        if (arenaIndex == 3) arena.play(host, port, toUtf8(arenaName), toUtf8(arenaToken));
+        else arena.watch(host, port);
         chooseDevices(input, pads, 1, arenaDevice);
         arenaQuit = 0;
         beginGame();
@@ -2173,7 +2174,9 @@ struct App {
             std::string host;
             int port = ARENA_DEFAULT_PORT;
             splitAddress(toUtf8(where), host, port);
-            const bool called = !host.empty() && (frames == -9 ? arena.play(host, port, toUtf8(who), toUtf8(token)) : arena.watch(host, port));
+            const bool called = !host.empty();
+            if (called && frames == -9) arena.play(host, port, toUtf8(who), toUtf8(token));
+            else if (called) arena.watch(host, port);
             if (frames == -9) arenaName = who;
             if (!called) result = 15;
             ScriptBot bot;

@@ -10,6 +10,8 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace juraic::ai {
 
@@ -56,6 +58,7 @@ public:
     const std::vector<int>* lateScript = nullptr;
     int64_t rerouted = 0;   // pairs whose chosen placement had no path from where they appeared, and that went to another (for tools)
     int64_t steered = 0;    // pairs sent to the nearest placement they could still reach, no way leading to the chosen one any more (steer, a late choice; for tools)
+    int64_t steeredLow = 0; // ... of them, those a way through the 13th row still led to the chosen one (keepLow; for tools)
     int lastWanted = -1, lastTaken = -1; // ... the last of them
     // true: a placement is offered to choose() only when the pair has a path to it from where it
     // appears. (legalPlacements follows the rule of reach of core/reach.h; on a field with columns
@@ -101,6 +104,7 @@ public:
     // placements reached so are chosen - when every one of those fills the 12th row of the third column, any reached.
     bool keepLow = false;
     int64_t climbs = 0;    // pairs for which every placement reached below the 13th row filled it (for tools)
+    std::vector<int> climbing; // ... and the pairs whose ways were let go up into the 13th row so, by their number (for tools)
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
     int64_t revisedChoices = 0; // choices discarded because their field or known pairs changed
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
@@ -130,6 +134,7 @@ public:
         rng = Rng(seed, AGENT_STREAM);
         lateLog.clear();
         againLog.clear();
+        climbing.clear();
         path.buttons.clear();
         step = 0, last = 0, target = -1, idle = 0;
         revising = false;
@@ -315,6 +320,7 @@ private:
                 unsigned reached = reachedFrom(o, pair, legal);
                 if (keepLow && !survives(p.field, reached, colors)) {
                     lowWays = false, climbs += counted;
+                    letClimb(p.nextPair);
                     tune();
                     reached = reachedFrom(o, pair, legal);
                 }
@@ -483,31 +489,42 @@ private:
                 target = id;
                 return;
             }
-            const int best = nearest(o, pair, id);
-            if (best >= 0 && planner.plan(p.field, pair, placement(best), o.timing, o.rules.speedPercent, path)) {
+            const int best = nearest(o, pair, id, path);
+            if (best >= 0) {
                 target = best, ++steered;
+                if (planner.keepLow && (legal >> id & 1)) {
+                    // (for tools: a way through the 13th row leads there still)
+                    InputPath high;
+                    planner.keepLow = false;
+                    steeredLow += planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, high);
+                    planner.keepLow = true;
+                }
                 return;
             }
             if (!planner.keepLow) break;
             lowWays = false, ++climbs;
+            letClimb(p.nextPair - (p.phase == Phase::Control ? 1 : 0));
             tune();
         }
         path.buttons.clear();
     }
+    void letClimb(int pair) {
+        if (climbing.empty() || climbing.back() != pair) climbing.push_back(pair);
+    }
     // The placement `pair` can still reach whose two pieces come down nearest to the columns of placement `id`; of equal
-    // ones the one with the smaller number. -1: none.
-    int nearest(const Observation& o, const PairControl& pair, int id) {
+    // ones the one with the smaller number, and its way (`way`, left as it was when none). -1: none.
+    int nearest(const Observation& o, const PairControl& pair, int id, InputPath& way) {
         const Player& p = o.self();
         const unsigned legal = legalPlacements(p.field);
         const Placement want = placement(id);
         int best = -1, bestApart = 0;
+        InputPath there;
         for (int other = 0; other < PLACEMENTS; ++other) {
             if (!(legal >> other & 1)) continue;
             const Placement t = placement(other);
             const int apart = std::abs(int(t.x) - int(want.x)) + std::abs(t.childX() - want.childX());
             if (best >= 0 && apart >= bestApart) continue;
-            InputPath there;
-            if (planner.plan(p.field, pair, t, o.timing, o.rules.speedPercent, there)) best = other, bestApart = apart;
+            if (planner.plan(p.field, pair, t, o.timing, o.rules.speedPercent, there)) best = other, bestApart = apart, std::swap(way, there);
         }
         return best;
     }

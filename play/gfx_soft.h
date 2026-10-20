@@ -101,35 +101,44 @@ struct GfxBase {
     void clip(RectF r) { raster.clip(r); }
     void unclip() { raster.unclip(); }
     // align: -1 left, 0 centre, 1 right
-    void text(const std::wstring& s, float x, float y, float w, float h, int size, ColorF c, int align = -1) {
+    void text(const std::wstring& s, float x, float y, float w, float, int size, ColorF c, int align = -1) {
+        Face& f = face[face[1].ready ? 1 : 0];
+        if (!f.ready) return;
+        // (the characters and the room each takes, once for the line and its edge)
+        Line l;
+        l.px = SIZES[size] * raster.scale; // (the size in pixels of the window)
+        l.text = toChars(s);
+        l.advance.resize(l.text.size()), l.kern.resize(l.text.size());
+        for (size_t i = 0; i < l.text.size(); ++i) {
+            l.advance[i] = f.glyph(l.px, l.text[i]).advance;
+            l.kern[i] = i + 1 < l.text.size() ? float(stbtt_GetCodepointKernAdvance(&f.info, int(l.text[i]), int(l.text[i + 1]))) * f.scaleFor(l.px) : 0;
+            l.width += l.advance[i];
+            if (i + 1 < l.text.size()) l.width += l.kern[i];
+        }
         if (shadow) {
             // (a picture is behind the game: every text gets a dark edge, so that it can be read on any picture)
-            for (int k = 0; k < 4; ++k) line(s, x + (k & 1 ? 1.5f : -1.5f), y + (k & 2 ? 1.5f : -1.5f), w, h, size, colorF(0, 0, 0, 0.7f * c.a), align);
+            for (int k = 0; k < 4; ++k) line(f, l, x + (k & 1 ? 1.5f : -1.5f), y + (k & 2 ? 1.5f : -1.5f), w, colorF(0, 0, 0, 0.7f * c.a), align);
         }
-        line(s, x, y, w, h, size, c, align);
+        line(f, l, x, y, w, c, align);
     }
 
 private:
-    void line(const std::wstring& s, float x, float y, float w, float, int size, ColorF c, int align) {
-        Face& f = face[face[1].ready ? 1 : 0];
-        if (!f.ready) return;
-        const float px = SIZES[size] * raster.scale; // (the size in pixels of the window)
-        const std::u32string text = toChars(s);
-        float width = 0;
-        for (size_t i = 0; i < text.size(); ++i) {
-            width += f.glyph(px, text[i]).advance;
-            if (i + 1 < text.size()) width += float(stbtt_GetCodepointKernAdvance(&f.info, int(text[i]), int(text[i + 1]))) * f.scaleFor(px);
-        }
+    struct Line {
+        float px = 0, width = 0;
+        std::u32string text;
+        std::vector<float> advance, kern; // by character: its advance, and the kerning to the next one
+    };
+    void line(Face& f, const Line& l, float x, float y, float w, ColorF c, int align) {
         const float left = x * raster.scale + raster.dx, boxW = w * raster.scale;
-        float pen = align < 0 ? left : align == 0 ? left + (boxW - width) / 2 : left + boxW - width;
+        float pen = align < 0 ? left : align == 0 ? left + (boxW - l.width) / 2 : left + boxW - l.width;
         // (the line lower by 0.22 of the size: the middle of the letters then stands where DirectWrite puts that of the
         //  font of Windows, measured on the self-test pictures of both at sizes 18, 24 and 36)
-        const float baseline = y * raster.scale + raster.dy + f.ascent(px) + 0.22f * px;
-        for (size_t i = 0; i < text.size(); ++i) {
-            const Face::Glyph& g = f.glyph(px, text[i]);
+        const float baseline = y * raster.scale + raster.dy + f.ascent(l.px) + 0.22f * l.px;
+        for (size_t i = 0; i < l.text.size(); ++i) {
+            const Face::Glyph& g = f.glyph(l.px, l.text[i]);
             if (!g.mask.empty()) raster.mask(g.mask.data(), g.w, g.h, int(std::lround(pen)) + g.x, int(std::lround(baseline)) + g.y, c);
-            pen += g.advance;
-            if (i + 1 < text.size()) pen += float(stbtt_GetCodepointKernAdvance(&f.info, int(text[i]), int(text[i + 1]))) * f.scaleFor(px);
+            pen += l.advance[i];
+            if (i + 1 < l.text.size()) pen += l.kern[i];
         }
     }
     // The characters of a text (wchar_t is UTF-32 here; a pair of UTF-16 halves is joined all the same).

@@ -34,14 +34,24 @@ struct MatchView {
     std::string result, reason;      // END of the round
     int64_t endFrame = 0;
     std::string ratingLine;          // the last RATING line
+    // A line of the match had a value out of range (a seat, the rules, the colours of a pair): the match is not followed.
+    bool broken = false;
+    static constexpr int64_t MORE_FRAMES = 64; // the frames of a seat beyond the end of a round the server takes
 
     // Takes a line of the server. False: it was no line of a match.
     bool take(const std::vector<std::string>& w) {
         if (w.empty()) return false;
         const std::string& k = w[0];
+        const auto fail = [&] {
+            *this = MatchView{};
+            broken = true;
+            return true;
+        };
         if (k == "MATCH" && w.size() >= 13) {
             *this = MatchView{};
-            id = w[1], seat = int(toNumber(w[2], -1));
+            const long long given = toNumber(w[2], -2);
+            if (given < -1 || given > 1) return fail();
+            id = w[1], seat = int(given);
             for (int i = 0; i < 2; ++i) {
                 name[i] = w[3 + 4 * size_t(i)], kind[i] = w[4 + 4 * size_t(i)];
                 rating[i] = std::atof(w[5 + 4 * size_t(i)].c_str()), rd[i] = std::atof(w[6 + 4 * size_t(i)].c_str());
@@ -54,7 +64,7 @@ struct MatchView {
         if (k == "RULES") {
             std::string text;
             for (size_t i = 1; i < w.size(); ++i) text += (i > 1 ? " " : "") + w[i];
-            readRules(text, rules);
+            if (!readRules(text, rules)) return fail();
             return true;
         }
         if (k == "ROUND" && w.size() >= 4) {
@@ -68,14 +78,20 @@ struct MatchView {
         }
         if (k == "T" && w.size() >= 4 && toNumber(w[1]) == roundNo) {
             const std::string& p = w[3];
-            if (p.size() == 2) round.addPair(int(toNumber(w[2], -1)), juraic::Pair{juraic::Cell(p[0] - '0'), juraic::Cell(p[1] - '0')});
+            const auto colour = [](char c) { return c >= '1' && c < char('1' + juraic::MAX_COLORS); };
+            if (p.size() != 2 || !colour(p[0]) || !colour(p[1])) return fail();
+            round.addPair(int(toNumber(w[2], -1)), juraic::Pair{juraic::Cell(p[0] - '0'), juraic::Cell(p[1] - '0')});
             return true;
         }
+        // (the buttons of a seat: no more than the server takes of it - the frames of a round and MORE_FRAMES, a seat
+        //  may play beyond its end -, none after its end)
         if (k == "B" && w.size() >= 5 && toNumber(w[1]) == roundNo) {
             const int s = int(toNumber(w[2], -1));
             bool ok = false;
             const std::vector<uint8_t> b = fromHex(w[4], &ok);
-            if (ok && (s == 0 || s == 1) && s != seat && toNumber(w[3]) == int64_t(buttons[s].size())) buttons[s].insert(buttons[s].end(), b.begin(), b.end());
+            if (ok && (s == 0 || s == 1) && s != seat && !roundEnded && toNumber(w[3]) == int64_t(buttons[s].size()) &&
+                int64_t(buttons[s].size() + b.size()) <= rules.roundFrameLimit + MORE_FRAMES)
+                buttons[s].insert(buttons[s].end(), b.begin(), b.end());
             return true;
         }
         if (k == "END" && w.size() >= 7 && toNumber(w[1]) == roundNo) {

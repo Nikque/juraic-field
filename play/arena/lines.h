@@ -42,6 +42,7 @@ inline int hexDigit(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' &
 inline std::vector<uint8_t> fromHex(const std::string& s, bool* ok = nullptr) {
     std::vector<uint8_t> b;
     bool good = s.size() % 2 == 0;
+    if (good) b.reserve(s.size() / 2);
     for (size_t i = 0; good && i + 1 < s.size(); i += 2) {
         const int hi = hexDigit(s[i]), lo = hexDigit(s[i + 1]);
         good = hi >= 0 && lo >= 0;

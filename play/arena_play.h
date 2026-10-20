@@ -4,12 +4,14 @@
 // server says and how a round of the arena is played). No window and no devices here - the owner gives the buttons
 // of the own seat once a frame and draws what stands here - so the game and its self test play the same thing.
 //
-//   Connecting   the server is called and the name and its token are given
+//   Connecting   the server is called (on a thread of its own: the screen goes on meanwhile), then the name and its
+//                token are given
 //   Waiting      the person waits for a match (the server pairs whoever waits)
 //   Playing      a match: the own seat every frame, the other from what has arrived; between its rounds, and at its
 //                end until the person asks for the next (again)
 //   Watching     the matches of the arena, WATCH_LAG_MS behind the players (each match after the one before)
-//   Over         the server is gone, or would not let the person in (why: `over`)
+//   Over         no server, the server is gone, would not let the person in, or sent a match that cannot be followed
+//                (why: `over`)
 #include "arena/follow.h"
 #include "arena/tcp.h"
 #include "view_state.h"
@@ -33,6 +35,9 @@ struct ArenaPlay {
     double startRating[2]{}; // the ratings as the match began
     std::wstring over;      // Over: why
     std::deque<std::pair<int64_t, std::string>> held; // a watcher: the lines that have come, used WATCH_LAG_MS later
+    size_t heldBytes = 0;   // ... their length (more than arena::Line::MOST_IN: the server is left)
+    std::unique_ptr<arena::Call> calling; // Connecting: the call on its way
+    std::string hello;      // ... the line to send once it has come
 
     bool on() const { return stage != Off; }
     bool inMatch() const { return (stage == Playing || stage == Watching) && match.on; }
@@ -42,27 +47,19 @@ struct ArenaPlay {
     static void startSockets() { static arena::NetStart started; }
 
     // A person: calls the server with the name and token it registered.
-    bool play(const std::string& host, int port, const std::string& who, const std::string& token) {
-        startSockets();
-        *this = ArenaPlay{};
+    void play(const std::string& host, int port, const std::string& who, const std::string& token) {
+        call(host, port, "LOGIN " + who + " " + token + " " + arena::ENGINE_NAME);
         name = who;
-        if (!arena::connectTo(host, port, line)) return false;
-        line.send("LOGIN " + who + " " + token + " " + arena::ENGINE_NAME);
-        stage = Connecting;
-        return true;
     }
     // A watcher: no name needed.
-    bool watch(const std::string& host, int port) {
-        startSockets();
-        *this = ArenaPlay{};
+    void watch(const std::string& host, int port) {
+        call(host, port, "WATCH auto");
         watcher = true;
-        if (!arena::connectTo(host, port, line)) return false;
-        line.send("WATCH auto");
-        stage = Watching;
-        return true;
     }
     void leave() {
-        if (line.open()) line.send("LEAVE"), line.close();
+        if (line.open()) line.send("LEAVE");
+        line.close();
+        calling.reset();
         stage = Off;
     }
     // At the end of a match: wait for the next.
@@ -76,24 +73,40 @@ struct ArenaPlay {
     // One frame. buttons: those of the own seat. each(seat, events) after every frame a seat has played.
     template <class Each> void tick(uint8_t buttons, Each&& each) {
         if (stage == Off || stage == Over) return;
+        if (calling) {
+            const int got = calling->take(line);
+            if (got == 0) return;
+            calling.reset();
+            if (got < 0) return end(L"サーバーにつながりませんでした");
+            line.send(hello);
+            if (watcher) stage = Watching;
+        }
         line.pump();
         std::string text;
-        while (line.nextLine(text)) {
+        while (stage != Over && line.nextLine(text)) {
             if (text.rfind("PING", 0) == 0) line.send("PONG" + text.substr(4));
-            else if (watcher) held.emplace_back(arena::nowMs(), text);
+            else if (watcher) held.emplace_back(arena::nowMs(), text), heldBytes += text.size();
             else take(text);
         }
-        while (!held.empty() && arena::nowMs() - held.front().first >= WATCH_LAG_MS) take(held.front().second), held.pop_front();
-        if (line.closed && stage != Over) {
-            over = L"サーバーとの接続が切れました";
-            stage = Over;
-            return;
+        if (heldBytes > arena::Line::MOST_IN) return end(L"サーバーから届く行が多すぎます");
+        while (stage != Over && !held.empty() && arena::nowMs() - held.front().first >= WATCH_LAG_MS) {
+            heldBytes -= held.front().second.size();
+            take(held.front().second), held.pop_front();
         }
-        if (!match.roundOn || match.roundEnded) return;
+        if (stage == Over) return;
+        if (line.closed) return end(L"サーバーとの接続が切れました");
+        if (!match.roundOn) return;
         const auto seen = [&](int s, const juraic::PlayerEvents& e) {
             view[s].update(match.round.player(s), e);
             each(s, e);
         };
+        if (match.roundEnded) {
+            // (the frames that came before the end of the round are played still, at the speed of a watcher: the last
+            //  of the round is shown. The own seat has played its own.)
+            for (int s = 0; s < 2; ++s)
+                if (s != match.seat) match.playArrived(s, seen, watcher ? 2 : 1 << 30);
+            return;
+        }
         if (watcher) {
             // (as fast as the game, a little faster when behind)
             match.playArrived(0, seen, 2), match.playArrived(1, seen, 2);
@@ -116,6 +129,21 @@ struct ArenaPlay {
     }
 
 private:
+    // The server called (Connecting); `first` is sent once the call has come. Whatever was followed before is left.
+    void call(const std::string& host, int port, const std::string& first) {
+        startSockets();
+        *this = ArenaPlay{};
+        calling = std::make_unique<arena::Call>(host, port);
+        hello = first;
+        stage = Connecting;
+    }
+    // Over for `why`, the connection closed.
+    void end(const wchar_t* why) {
+        over = why;
+        stage = Over;
+        line.close();
+        held.clear(), heldBytes = 0;
+    }
     void take(const std::string& text) {
         const std::vector<std::string> w = arena::words(text);
         if (w.empty()) return;
@@ -125,14 +153,15 @@ private:
                 line.send("WAIT rated");
                 stage = Waiting;
             } else {
-                over = k == "LOGIN:engine" ? L"このソフトの版では対戦場に入れません（サーバーとエンジンの版が違います）"
-                       : k == "LOGIN:busy" ? L"同じ名前が、すでに対戦場につながっています"
-                                           : L"名前かトークンが違います";
-                stage = Over;
+                end(k == "LOGIN:engine" ? L"このソフトの版では対戦場に入れません（サーバーとエンジンの版が違います）"
+                    : k == "LOGIN:busy" ? L"同じ名前が、すでに対戦場につながっています"
+                                        : L"名前かトークンが違います");
             }
             return;
         }
         if (!match.take(w)) return;
+        // (a seat of a player's own, none for a watcher)
+        if (match.broken || (k == "MATCH" && watcher != (match.seat < 0))) return end(L"サーバーから届いた対戦の内容が正しくありません");
         if (k == "MATCH") {
             if (!watcher) stage = Playing;
             startRating[0] = match.rating[0], startRating[1] = match.rating[1];

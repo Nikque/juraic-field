@@ -397,11 +397,12 @@ private:
                 record.reading(t.reading, t.frame, t.width, t.height);
                 if (t.width != width || t.height != height) record.event(t.frame, "picture size " + std::to_string(t.width) + " x " + std::to_string(t.height));
             }
-            const Counts before = counts();
+            const bool noting = record.isOpen();
+            const Counts before = noting ? counts() : Counts{};
             follow.step(t.reading, t.frame);
             width = t.width, height = t.height;
             ++pictures;
-            if (record.isOpen()) noteStep(before, t.frame);
+            if (noting) noteStep(before, t.frame);
             if (t.menu != menu) record.event(t.frame, std::string("menu: ") + realgame::menuName(t.menu));
             menu = t.menu;
         }
@@ -435,15 +436,15 @@ private:
 
     // What the record is told after each reading: what it changed of these.
     struct Counts {
-        int rounds, doubts, placements, checks, misses, held, pairs[2], followed[2], notice[2];
+        int rounds = 0, doubts = 0, misses = 0, held = 0, followed[2]{}, notice[2]{};
         juraic::GameField reckoned[2]; // the pieces at rest as the game made them, before the reading
-        bool known[2];
+        bool known[2]{};
     };
     Counts counts() const {
-        Counts c{tracker.rounds, tracker.doubts, follow.placements, follow.checks, follow.misses, follow.held, {}, {}, {}, {}, {}};
+        Counts c;
+        c.rounds = tracker.rounds, c.doubts = tracker.doubts, c.misses = follow.misses, c.held = follow.held;
         for (int s = 0; s < 2; ++s)
-            c.pairs[s] = tracker.side[s].pairs, c.followed[s] = follow.model[s].followed, c.notice[s] = follow.notice[s],
-            c.reckoned[s] = follow.model[s].core.field, c.known[s] = follow.model[s].known;
+            c.followed[s] = follow.model[s].followed, c.notice[s] = follow.notice[s], c.reckoned[s] = follow.model[s].core.field, c.known[s] = follow.model[s].known;
         return c;
     }
     static std::string pairText(juraic::Pair p) { return std::to_string(p.axis) + std::to_string(p.child); }

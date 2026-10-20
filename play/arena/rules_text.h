@@ -36,40 +36,54 @@ inline std::string rulesText(const ArenaRules& a) {
     return s.str();
 }
 
-// Reads what rulesText wrote. A word it does not know is passed over; false when a value is out of range.
+// Reads what rulesText wrote. A word it does not know is passed over. False when a value is not a number or out of
+// range: `a` is then left as it was.
 inline bool readRules(const std::string& text, ArenaRules& a) {
     std::istringstream in(text);
     std::string word;
-    juraic::Rules& r = a.rules;
+    ArenaRules got = a;
+    juraic::Rules& r = got.rules;
     bool ok = true;
+    // (the number of `text`, when it is one from low to high)
+    const auto number = [&](const std::string& text, long long low, long long high, long long& v) {
+        char* end = nullptr;
+        v = std::strtoll(text.c_str(), &end, 10);
+        ok = ok && !text.empty() && end && *end == 0 && v >= low && v <= high;
+        return ok;
+    };
     while (in >> word) {
         const size_t eq = word.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = word.substr(0, eq), value = word.substr(eq + 1);
-        const long v = std::strtol(value.c_str(), nullptr, 10);
-        if (key == "colors") r.colors = int(v), ok = ok && v >= 1 && v <= juraic::MAX_COLORS;
-        else if (key == "clearCount") r.clearCount = int(v), ok = ok && v >= 2 && v <= 72;
-        else if (key == "tsumoCorrection") r.tsumoCorrection = juraic::TsumoCorrection(v), ok = ok && v >= 0 && v <= 2;
-        else if (key == "targetPoints") r.targetPoints = int(v), ok = ok && v >= 1;
-        else if (key == "marginSeconds") r.marginSeconds = int(v);
-        else if (key == "marginStepSeconds") r.marginStepSeconds = int(v);
+        long long v = 0;
+        const auto take = [&](int& to, long long low, long long high) {
+            if (number(value, low, high, v)) to = int(v);
+        };
+        if (key == "colors") take(r.colors, 1, juraic::MAX_COLORS);
+        else if (key == "clearCount") take(r.clearCount, 2, 72);
+        else if (key == "tsumoCorrection" && number(value, 0, 2, v)) r.tsumoCorrection = juraic::TsumoCorrection(v);
+        else if (key == "targetPoints") take(r.targetPoints, 1, 9990);
+        else if (key == "marginSeconds") take(r.marginSeconds, 0, 99999);
+        else if (key == "marginStepSeconds") take(r.marginStepSeconds, 0, 99999);
         else if (key == "marginRates") {
             int n = 0;
             std::istringstream list(value);
             std::string item;
-            while (std::getline(list, item, ',') && n < juraic::MAX_MARGIN_STEPS) r.marginRates[size_t(n++)] = std::atoi(item.c_str());
+            while (n < juraic::MAX_MARGIN_STEPS && std::getline(list, item, ',') && number(item, 0, 9990, v)) r.marginRates[size_t(n++)] = int(v);
+            ok = ok && list.eof();
             r.marginSteps = n;
-        } else if (key == "chainRequirement") r.chainRequirement = int(v);
-        else if (key == "allClearBonus") r.allClearBonus = int(v);
-        else if (key == "softDropBonus") r.softDropBonus = v != 0;
-        else if (key == "maxGarbagePerDrop") r.maxGarbagePerDrop = int(v), ok = ok && v >= 1;
-        else if (key == "speedPercent") r.speedPercent = int(v), ok = ok && v >= 1;
-        else if (key == "preInput") r.preInput = v != 0;
-        else if (key == "winsNeeded") r.winsNeeded = int(v), ok = ok && v >= 1;
-        else if (key == "setsNeeded") r.setsNeeded = int(v), ok = ok && v >= 1;
-        else if (key == "quickDrop") a.quickDrop = v != 0;
-        else if (key == "roundFrameLimit") a.roundFrameLimit = v;
+        } else if (key == "chainRequirement") take(r.chainRequirement, 1, 99);
+        else if (key == "allClearBonus") take(r.allClearBonus, 0, 99999);
+        else if (key == "softDropBonus" && number(value, 0, 1, v)) r.softDropBonus = v != 0;
+        else if (key == "maxGarbagePerDrop") take(r.maxGarbagePerDrop, 1, 999);
+        else if (key == "speedPercent") take(r.speedPercent, 1, 1000);
+        else if (key == "preInput" && number(value, 0, 1, v)) r.preInput = v != 0;
+        else if (key == "winsNeeded") take(r.winsNeeded, 1, 99);
+        else if (key == "setsNeeded") take(r.setsNeeded, 1, 99);
+        else if (key == "quickDrop" && number(value, 0, 1, v)) got.quickDrop = v != 0;
+        else if (key == "roundFrameLimit" && number(value, 1, 216000, v)) got.roundFrameLimit = v; // (an hour at most)
     }
+    if (ok) a = got;
     return ok;
 }
 

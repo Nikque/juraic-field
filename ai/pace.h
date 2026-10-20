@@ -73,7 +73,7 @@ public:
         int pairs = 0;           // the pairs the plans were made with
         int id = -1;             // the placement chosen
         int cut = 0;             // searches that the clock stopped
-        std::vector<int> widths; // the width of every search that the clock may make wider or narrower, in their order
+        std::vector<int> widths{}; // the width of every search that the clock may make wider or narrower, in their order
     };
     bool noting = false;                      // the game: the choices of the round are written to `notes`
     std::vector<Note> notes;                  // (a thread writes them: read through takeNotes)

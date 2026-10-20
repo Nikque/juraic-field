@@ -343,16 +343,25 @@ struct Scale {
     Scale(const Picture& p, const Layout& l) : x(float(p.width) / float(l.baseWidth)), y(float(p.height) / float(l.baseHeight)) {}
 };
 
+// The pixels of the square `half` base pixels each way around (x, y), in base pixels: columns x0 to x1 and rows y0 to
+// y1 of the picture, cut at its edges.
+struct Patch {
+    int x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    Patch(const Picture& p, const Scale& s, float x, float y, float half) {
+        const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
+        const float px = x * s.x, py = y * s.y, hx = half * s.x, hy = half * s.y;
+        x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
+        y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
+    }
+};
+
 // The mean colour of the square `half` base pixels each way around (x, y), in base pixels.
 inline Rgb sample(const Picture& p, const Scale& s, float x, float y, float half) {
-    const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
-    const float px = x * s.x, py = y * s.y, hx = half * s.x, hy = half * s.y;
-    const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
-    const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
+    const Patch q(p, s, x, y, half);
     long r = 0, g = 0, b = 0, n = 0;
-    for (int j = y0; j <= y1; ++j) {
+    for (int j = q.y0; j <= q.y1; ++j) {
         const uint8_t* row = p.pixels + size_t(j) * size_t(p.stride);
-        for (int i = x0; i <= x1; ++i) b += row[4 * i], g += row[4 * i + 1], r += row[4 * i + 2], ++n;
+        for (int i = q.x0; i <= q.x1; ++i) b += row[4 * i], g += row[4 * i + 1], r += row[4 * i + 2], ++n;
     }
     return n ? Rgb{int(r / n), int(g / n), int(b / n)} : Rgb{};
 }
@@ -398,14 +407,11 @@ inline juraic::Cell classifyHue(const Layout& l, const Rgb& c, int degrees) {
 // table nearest in hue within Layout::faceHue (EMPTY for none), for read to take when the other point of the cell is
 // a piece of that colour.
 inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, float x, float y, const MarkedCell* mark = nullptr, juraic::Cell* face = nullptr) {
-    const auto clamp = [](int v, int high) { return v < 0 ? 0 : v > high ? high : v; };
-    const float px = x * s.x, py = y * s.y, hx = l.patch * s.x, hy = l.patch * s.y;
-    const int x0 = clamp(int(std::floor(px - hx)), p.width - 1), x1 = clamp(int(std::floor(px + hx)), p.width - 1);
-    const int y0 = clamp(int(std::floor(py - hy)), p.height - 1), y1 = clamp(int(std::floor(py + hy)), p.height - 1);
+    const Patch q(p, s, x, y, l.patch);
     long r = 0, g = 0, b = 0, strong = 0, light = 0, all = 0, pr = 0, pb = 0, bright = 0;
-    for (int j = y0; j <= y1; ++j) {
+    for (int j = q.y0; j <= q.y1; ++j) {
         const uint8_t* row = p.pixels + size_t(j) * size_t(p.stride);
-        for (int i = x0; i <= x1; ++i) {
+        for (int i = q.x0; i <= q.x1; ++i) {
             const int cb = row[4 * i], cg = row[4 * i + 1], cr = row[4 * i + 2];
             const int high = std::max(cr, std::max(cg, cb)), low = std::min(cr, std::min(cg, cb));
             ++all;
@@ -418,7 +424,7 @@ inline juraic::Cell piece(const Picture& p, const Layout& l, const Scale& s, flo
     const juraic::Cell other = 100 * bright >= long(l.unsure) * all ? UNSURE : juraic::EMPTY;
     // (the white face of a piece is warm, garbage is grey)
     const bool warm = light && (pr - pb) >= 8 * light && strong;
-    if (100 * strong >= long(l.colored) * all || (warm && 100 * (strong + light) >= long(l.cover) * all)) {
+    if (strong && (100 * strong >= long(l.colored) * all || (warm && 100 * (strong + light) >= long(l.cover) * all))) {
         const Rgb mean{int(r / strong), int(g / strong), int(b / strong)};
         if (mark && 100 * light < long(mark->pale) * all) {
             // (the mark of the screen in this cell)
@@ -551,6 +557,14 @@ struct PairSeen {
 inline void pairHalves(const juraic::PairControl& p, int& axisX, int& axisHalf, int& childX, int& childHalf) {
     axisX = p.x, childX = p.childX(), axisHalf = 2 * p.y + (p.upper ? 1 : 0), childHalf = 2 * p.childY() + (p.upper ? 1 : 0);
 }
+// The points of a field the pieces of a pair seen cover (none when it is not seen).
+struct PairPoints {
+    int ax = -1, ah = -1, cx = -1, ch = -1;
+    explicit PairPoints(const PairSeen& pair) {
+        if (pair.seen) pairHalves(pair.at, ax, ah, cx, ch);
+    }
+    bool covers(int x, int k) const { return (x == ax && (k == ah || k == ah + 1)) || (x == cx && (k == ch || k == ch + 1)); }
+};
 
 // The pair over `under`, the field it moves over: the pieces above it, two of them side by side or one on the other,
 // or one with the place above it beyond the screen (the other piece there). `expected`: its colours when they are known
@@ -818,6 +832,8 @@ public:
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
     // last reading clear. (A reading that is not clear is no reading: it neither changes the pieces nor counts.)
     bool still(int s) const { return side[s].clear && frame - side[s].changedAt >= stillFrames && side[s].loose == 0; }
+    // The frame of the round that the frame `at` of the clock is (0 before it, or while its beginning is not known).
+    int64_t roundFrame(int64_t at) const { return roundStart >= 0 && at >= roundStart ? at - roundStart : 0; }
     // Pair `index` for side s: as its own window showed it, or else as the other side's did.
     bool knows(int s, int index) const { return learnt(s, index) || learnt(1 - s, index); }
     juraic::Pair pairOf(int s, int index) const { return learnt(s, index) ? pairsOf[s][size_t(index)] : pairsOf[1 - s][size_t(index)]; }
@@ -1040,13 +1056,11 @@ private:
     static int looseOf(const SideRead& read, const SideTrack& t) { return looseOver(read, t.inHand ? t.under : t.resting, t.pair); }
     // ... above `base`, those of `pair` (if seen) left out.
     static int looseOver(const SideRead& read, const juraic::GameField& base, const PairSeen& pair) {
-        int ax = -1, ah = -1, cx = -1, ch = -1;
-        if (pair.seen) pairHalves(pair.at, ax, ah, cx, ch);
-        const auto own = [&](int x, int k) { return (x == ax && (k == ah || k == ah + 1)) || (x == cx && (k == ch || k == ch + 1)); };
+        const PairPoints own(pair);
         int h[juraic::W], n = 0;
         base.heights(h);
         for (int x = 0; x < juraic::W; ++x)
-            for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && !own(x, k);
+            for (int k = 2 * h[x]; k < POINTS; ++k) n += isPiece(read.point[x][k]) && !own.covers(x, k);
         return n;
     }
     // The words (wordsFrames), from a clear reading as it was read and the pieces at rest it shows without them: a point
@@ -1056,9 +1070,7 @@ private:
         Words& w = t.words;
         int h[juraic::W];
         resting.heights(h);
-        int ax = -1, ah = -1, cx = -1, ch = -1;
-        if (t.pair.seen) pairHalves(t.pair.at, ax, ah, cx, ch);
-        const auto own = [&](int x, int k) { return (x == ax && (k == ah || k == ah + 1)) || (x == cx && (k == ch || k == ch + 1)); };
+        const PairPoints own(t.pair);
         int standing = 0;
         for (int x = 0; x < juraic::W; ++x) {
             bool gap = false;
@@ -1067,7 +1079,7 @@ private:
                 // (a point that was the words in this round, reading what it read then: with no empty point under it
                 //  too - the pieces under the words come right up to them -, and taken alone)
                 const bool again = w.was[x][k] != juraic::EMPTY && c == w.was[x][k];
-                const bool air = k >= 2 * h[x] && (gap || again) && isPiece(c) && !own(x, k);
+                const bool air = k >= 2 * h[x] && (gap || again) && isPiece(c) && !own.covers(x, k);
                 gap = gap || (k >= 2 * h[x] && c == juraic::EMPTY);
                 // (the pair seen, or pieces at rest: something in front of it, neither counted nor counted from again;
                 //  another piece than it counts is taken instead when it has read so in more readings in a row than the
@@ -1164,13 +1176,14 @@ inline void observeWith(const Tracker& t, int me, const juraic::Rules& rules, co
     o.timing = t.timing;
     o.players = 2;
     o.me = me;
-    o.frame = t.roundStart >= 0 && at >= t.roundStart ? at - t.roundStart : 0;
+    o.frame = t.roundFrame(at);
     o.state = RoundState::Playing;
     // The colours in play.
+    // (the pairs either side has learnt: those both sides know of, as each side's own window or the other's showed them)
     bool seen[8]{};
     for (int s = 0; s < 2; ++s)
-        for (size_t i = 0; i < t.pairsLearnt(); ++i)
-            if (t.knows(s, int(i))) seen[t.pairOf(s, int(i)).axis] = seen[t.pairOf(s, int(i)).child] = true;
+        for (size_t i = 0; i < t.knownOf[s].size(); ++i)
+            if (t.knownOf[s][i]) seen[t.pairsOf[s][i].axis] = seen[t.pairsOf[s][i].child] = true;
     for (const SideTrack& side : t.side)
         for (int x = 0; x < W; ++x)
             for (int y = 0; y < H; ++y) seen[side.resting.f.get(x, y)] = true;

@@ -233,6 +233,13 @@ static void testTableText() {
         check(!parseLayout(std::string("still 2\n") + bad + "\n", back, &error), std::string("a wrong line is read: ") + bad);
         check(error.rfind("line 2:", 0) == 0, std::string("a wrong line is not named: ") + bad + " -> " + error);
     }
+    // (a table given in a file is used as it is read: with shares of nothing, a black point reads as no colour)
+    check(parseLayout(formatLayout(sampleLayout()) + "share 0 0 0 0\n", back, &error), "a table with shares of nothing is not read: " + error);
+    const uint8_t black[4] = {0, 0, 0, 255};
+    Picture dark;
+    dark.pixels = black, dark.width = dark.height = 1, dark.stride = 4;
+    const Cell seen = piece(dark, back, Scale(dark, back), 0, 0);
+    check(seen == EMPTY || seen == GARBAGE || seen == UNSURE, "a black point read with shares of nothing is a colour: " + std::to_string(int(seen)));
     std::cout << "the table as text: written and read again the same (the plain one and the measured one); wrong lines named\n";
 }
 
@@ -1293,8 +1300,14 @@ static void testNoticeCeiling() {
 }
 
 struct DriveCounts {
-    long frames = 0, locks = 0, hits = 0, corrected = 0, played = 0, lagRight = 0, lagRounds = 0;
-    long lostMisses = 0; // pairs locked elsewhere than the AI chose that left the field of 2P dead (the round lost)
+    long locks = 0, hits = 0, corrected = 0, lagRight = 0, lagRounds = 0;
+    // Pairs locked elsewhere than the AI chose with garbage fallen on 2P since the pair before, and of them those with no
+    // clear picture of 2P since it fell (the engine of the driver knows of no garbage, and the screen showed none of it).
+    long garbageMisses = 0, unseenGarbageMisses = 0;
+    long untargeted = 0;  // pairs of 2P locked with no placement chosen for them (the field full)
+    long mostUnbegun = 0; // the most frames a pair of 2P was in play before a button sent for it reached the game
+    long highUnallowed = 0; // pairs of 2P taken up into the 13th row that the AI had not let go up (PlacementAgent::climbing)
+    long steeredLow = 0;    // of steered: those a way through the 13th row still led to the placement chosen
     long lagTaken = 0;  // rounds that ended with the driver using the lag of the pad
     long turnsFound = 0; // rounds that ended with the driver turning the other way round (the pad turns so)
     long downAtSpawn = 0; // pairs of 2P that took the down button in the frame they appeared (sent before they were seen)
@@ -1319,10 +1332,14 @@ struct DriveCounts {
     long highPairs = 0, climbs = 0;
     long glitches = 0, glitchesRead = 0; // glitchAfterTurn: the pictures drawn so, and those Tracker read the pair in as drawn
     long strays = 0;                     // strayAfterLight: the pieces drawn so
+    long firstIdle = 0;                  // frames the first pair of a round of 2P was in play and took no button
 };
 
-// A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
-// frame sooner or later). startLag: the lag the driver begins with (-1: the pad's). swapped: the pad turns the other way
+// How a round of this program is drawn, read and played (driveRound): its 2P played by the AI through the screen and a
+// pad `lag` frames late (shaky: now and then a frame sooner or later). frames: at most so many frames of the round.
+// notes, sentOut: the driver's notes, and the buttons it sent by the frame of the clock. given: the AI of the driver
+// (X3 when none). keepLag: the driver keeps the lag it begins with. lit: the screen of 2P lit in that many frames of
+// every 12. startLag: the lag the driver begins with (-1: the pad's). swapped: the pad turns the other way
 // round from what the driver sends (as a real game whose buttons are the other way round). turnShownLate: a pair turned
 // is drawn the way it was for that many frames more (as the real game shows a turn: seen in its record). later: the
 // AI given to the driver in frame laterAt of the round. hidden: a pair turned is not drawn for that many frames (the
@@ -1354,34 +1371,54 @@ struct DriveCounts {
 // glitchAfterTurn: after one move of 2P in two that comes up to two frames after a turn, the pair drawn once as it was
 // three frames before (on the real game a pair turned and then moved was shown after the move as it was three frames
 // before, its column, row and way, and was not read again until it had locked), and then not at all for that many frames.
-static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
-                       std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
-                       std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
-                       int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0,
-                       int litAsAppears = 0, int garbageAsLit = 0, uint64_t noiseStream = 7, int coveredFrom = -1, int wordsFrom = -1,
-                       int kickShown = 0, int liftShown = 0, int glitchAfterTurn = 0, int twiceOneIn = 0, int strayAfterLight = 0) {
+// litFirst: the first pair of 2P lit from 8 frames before it appears, for that many frames. loseAtGround: as a pair of
+// 2P comes to rest on the ground, the pad takes in the frame after the buttons sent a frame later (one frame of them
+// lost, as on a machine under load).
+struct DriveScenario {
+    int lag = 5;
+    bool shaky = false;
+    int frames = 2500;
+    std::vector<std::pair<int64_t, std::string>>* notes = nullptr;
+    std::vector<uint8_t>* sentOut = nullptr;
+    int startLag = -1;
+    bool swapped = false;
+    int turnShownLate = 0;
+    std::unique_ptr<ai::Agent> given = nullptr;
+    bool keepLag = false;
+    int lit = 0;
+    std::unique_ptr<ai::Agent> later = nullptr;
+    int laterAt = 0, hidden = 0, movedHidden = 0;
+    bool quietLanding = false;
+    int skipOneIn = 0, crowdedLate = 0, litAsAppears = 0, garbageAsLit = 0;
+    uint64_t noiseStream = 7;
+    int coveredFrom = -1, wordsFrom = -1, kickShown = 0, liftShown = 0, glitchAfterTurn = 0, twiceOneIn = 0, strayAfterLight = 0;
+    int litFirst = 0;
+    bool loseAtGround = false;
+};
+// Such a round from `seed`, counted into n.
+static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
     r.start(rules, seed);
     Canvas canvas(1280, 720, l);
-    Rng noise(seed, noiseStream), shake(seed, 9), skipper(seed, 11), glitcher(seed, 13), twicer(seed, 15);
+    Rng noise(seed, how.noiseStream), shake(seed, 9), skipper(seed, 11), glitcher(seed, 13), twicer(seed, 15);
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
     const std::unique_ptr<ai::Agent> other = ai::makeAgent("x3", narrow);
     other->startRound(0, seed);
     Follower follow;
     Driver d;
-    d.lag = startLag >= 0 ? startLag : lag, d.rules = rules, d.agent = given ? std::move(given) : ai::makeAgent("x3", narrow);
-    d.notes = notes;
-    d.takeLag = !keepLag;
+    d.lag = how.startLag >= 0 ? how.startLag : how.lag, d.rules = rules, d.agent = how.given ? std::move(how.given) : ai::makeAgent("x3", narrow);
+    d.notes = how.notes;
+    d.takeLag = !how.keepLag;
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
         follow.step(read(canvas.picture(), l), clock);
         check(d.tick(follow, clock) == 0, "buttons before the round");
     }
-    std::vector<uint8_t> sent(size_t(frames) + 100, 0); // by the frame of the clock they were sent in
+    std::vector<uint8_t> sent(size_t(how.frames) + 100, 0); // by the frame of the clock they were sent in
     const int64_t first = clock;
     ai::Observation o;
     int target = -1, played = 0; // (the engine of the Driver plays `lag` frames ahead of the round: the target of the pair it played last)
@@ -1407,12 +1444,17 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     int64_t liftAt = -100;
     bool liftPair = false;
     bool highPair = false; // the pair in play has been taken up into the 13th row
+    int spawnIndex = -1;   // ... its number
+    int64_t garbageAt = -1, clearAt = -1, lockedAt = -1; // the frames of the clock garbage last fell on 2P, its last clear picture, its last lock
+    bool beginning = false; // the pair in play has taken no button sent for it yet ...
+    long unbegun = 0;       // ... in so many frames
+    bool loseNext = false;  // loseAtGround: the next frame takes the buttons sent a frame later
     bool glitchNext = false, glitchDrawn = false; // glitchAfterTurn: the next picture shows the pair at glitchAt; this one does
     PairControl glitchAt{};
     std::deque<PairControl> recent; // the pair of 2P as each of the last frames began
     int turnedAt = -100;            // the frame of the round the pair of 2P last turned in
-    for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
-        if (!words && wordsFrom >= 0 && f >= wordsFrom) {
+    for (int f = 0; f < how.frames && r.state == RoundState::Playing; ++f, ++clock) {
+        if (!words && how.wordsFrom >= 0 && f >= how.wordsFrom) {
             int h[W];
             r.player[1].field.heights(h);
             words = std::max({h[1], h[2], h[3], h[4]}) <= 8;
@@ -1432,7 +1474,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
             }
             if (kickFor > 0) {
                 if (shown.player[1].phase == Phase::Control)
-                    shown.player[1].pair.x = int8_t(kickFor == kickShown ? kickFrom : kickFrom + (kickTo > kickFrom ? 1 : -1)), shown.player[1].pair.dir = kickDir;
+                    shown.player[1].pair.x = int8_t(kickFor == how.kickShown ? kickFrom : kickFrom + (kickTo > kickFrom ? 1 : -1)), shown.player[1].pair.dir = kickDir;
                 --kickFor;
             }
             if (hideFor > 0 && shown.player[1].phase == Phase::Control) {
@@ -1444,21 +1486,22 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
                     shown.player[1].phase = Phase::Control;
                     PairControl& q = shown.player[1].pair;
                     q.x = glitchAt.x, q.y = glitchAt.y, q.upper = glitchAt.upper, q.dir = glitchAt.dir;
-                    ++n.glitches, hideFor = std::max(hideFor, glitchAfterTurn), glitchDrawn = true;
+                    ++n.glitches, hideFor = std::max(hideFor, how.glitchAfterTurn), glitchDrawn = true;
                 }
                 glitchNext = false;
             }
-            draw(canvas, l, shown, false, noise, quietLanding, words);
+            draw(canvas, l, shown, false, noise, how.quietLanding, words);
         } else {
-            draw(canvas, l, r, false, noise, quietLanding, words);
+            draw(canvas, l, r, false, noise, how.quietLanding, words);
         }
         // (litAsAppears: one pair of 2P in three lit from 8 frames before it appears, for that many frames - on the real game
         //  the screen of 2P read nothing for 30 frames as a pair appeared)
-        if (litAsAppears && r.player[1].phase == Phase::Next && r.player[1].wait == 8 && spawns % 3 == 2)
-            litFor = strayAfterLight ? 1000 : litAsAppears, strayPair = r.player[1].nextPair;
+        if (how.litAsAppears && r.player[1].phase == Phase::Next && r.player[1].wait == 8 && spawns % 3 == 2)
+            litFor = how.strayAfterLight ? 1000 : how.litAsAppears, strayPair = r.player[1].nextPair;
+        if (how.litFirst && spawns == 0 && r.player[1].phase == Phase::Next && r.player[1].wait == 8) litFor = how.litFirst;
         // (strayAfterLight: the light stays until that pair has locked)
-        if (strayAfterLight && strayPair >= 0 && litFor > 1 && r.player[1].nextPair == strayPair + 1 && r.player[1].phase != Phase::Control) litFor = 1;
-        if (f % 12 < lit || litFor > 0) {
+        if (how.strayAfterLight && strayPair >= 0 && litFor > 1 && r.player[1].nextPair == strayPair + 1 && r.player[1].phase != Phase::Control) litFor = 1;
+        if (f % 12 < how.lit || litFor > 0) {
             // (a light over the field of 2P: nothing of it is read in this picture)
             const SideLayout& s = l.side[1];
             canvas.fill(s.left, s.bottom - 2 * s.cellHeight, s.left + s.cellWidth, s.bottom - s.cellHeight, LIGHT);
@@ -1468,19 +1511,20 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         //  cell lower - 2 -, as a piece of a chain falling past, three frames or more after the light, the field read
         //  still for three frames, as the pair lands or before the window moves)
         const bool quiet = r.player[1].phase == Phase::Land || (r.player[1].phase == Phase::Next && r.player[1].wait > r.timing.nextSlide);
-        if (strayAfterLight && strayPair >= 0 && litFor == 0 && litEndedAt >= 0 && clock - litEndedAt >= 3 && r.player[1].nextPair == strayPair + 1 && quiet &&
+        if (how.strayAfterLight && strayPair >= 0 && litFor == 0 && litEndedAt >= 0 && clock - litEndedAt >= 3 && r.player[1].nextPair == strayPair + 1 && quiet &&
             clock - follow.tracker.side[1].changedAt >= 3 && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen <= strayPair) {
             int h[W];
             r.player[1].field.heights(h);
-            if (h[SPAWN_X] <= 10) piece(canvas, l, l.side[1], SPAWN_X, strayAfterLight == 1 ? 12.f : 11.5f, r.tsumo.pair(strayPair).axis), ++n.strays;
+            if (h[SPAWN_X] <= 10) piece(canvas, l, l.side[1], SPAWN_X, how.strayAfterLight == 1 ? 12.f : 11.5f, r.tsumo.pair(strayPair).axis), ++n.strays;
             strayPair = -1;
         }
         if (strayPair >= 0 && r.player[1].nextPair > strayPair + 1) strayPair = -1;
-        if (coveredFrom >= 0 && f >= coveredFrom) {
+        if (how.coveredFrom >= 0 && f >= how.coveredFrom) {
             const SideLayout& s = l.side[1];
             canvas.fill(s.left + s.cellWidth, s.bottom - 10.75f * s.cellHeight, s.left + 5 * s.cellWidth, s.bottom - 8.25f * s.cellHeight, Rgb{240, 210, 60});
         }
         follow.step(read(canvas.picture(), l), clock);
+        if (follow.tracker.side[1].clear) clearAt = clock;
         // (the pair seen as it is about to appear, or in play already when seen late)
         if (follow.tracker.spawned[1])
             ++n.spawnsSeen, n.miscounted += follow.tracker.side[1].pairs != r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
@@ -1493,13 +1537,13 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
             n.wordsSeen += follow.tracker.spawned[1];
             if (r.player[1].phase == Phase::Control) ++n.wordsControl, n.wordsPairSeen += follow.tracker.side[1].pair.seen;
         }
-        if (later && f == laterAt) d.replaceAgent(std::move(later)); // (another AI chosen on the screen of the mode)
+        if (how.later && f == how.laterAt) d.replaceAgent(std::move(how.later)); // (another AI chosen on the screen of the mode)
         // (a frame the driver is not called in: the pad holds what it held)
-        if (skipOneIn && f > 0 && skipper.below(uint64_t(skipOneIn)) == 0) sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
+        if (how.skipOneIn && f > 0 && skipper.below(uint64_t(how.skipOneIn)) == 0) sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
         else {
             const int correctedNow = d.corrected;
             sent[size_t(clock - first)] = d.tick(follow, clock);
-            if (twiceOneIn && twicer.below(uint64_t(twiceOneIn)) == 0) sent[size_t(clock - first)] = d.tick(follow, clock);
+            if (how.twiceOneIn && twicer.below(uint64_t(how.twiceOneIn)) == 0) sent[size_t(clock - first)] = d.tick(follow, clock);
             if (clock - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
         }
@@ -1507,69 +1551,83 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         if (d.target() >= 0) target = d.target();
         // The next frame of the round takes what was sent `lag` frames before it (a shaky pad: now and then a frame
         // sooner or later).
-        int64_t from = clock + 1 - lag;
-        if (shaky && shake.below(8) == 0) from += shake.below(2) ? 1 : -1;
+        int64_t from = clock + 1 - how.lag;
+        if (how.shaky && shake.below(8) == 0) from += shake.below(2) ? 1 : -1;
+        if (loseNext) from += 1, loseNext = false;
         from = std::min(from, clock);
         uint8_t buttons[2];
         ai::observe(r, 0, o);
         buttons[0] = other->frame(o);
         buttons[1] = from >= first ? sent[size_t(from - first)] : 0;
-        if (swapped) buttons[1] = uint8_t((buttons[1] & ~(BTN_CW | BTN_CCW)) | (buttons[1] & BTN_CW ? BTN_CCW : 0) | (buttons[1] & BTN_CCW ? BTN_CW : 0));
+        if (how.swapped) buttons[1] = uint8_t((buttons[1] & ~(BTN_CW | BTN_CCW)) | (buttons[1] & BTN_CW ? BTN_CCW : 0) | (buttons[1] & BTN_CCW ? BTN_CW : 0));
         PlayerEvents e[2];
         const uint8_t dirBefore = r.player[1].pair.dir;
         const int8_t columnBefore = r.player[1].pair.x;
         const PairControl pairBefore = r.player[1].pair;
+        const bool groundedBefore = r.player[1].phase == Phase::Control && r.player[1].pair.grounded;
         alone = r.player[1].phase == Phase::Control && buttons[1] == 0 ? alone + 1 : 0;
+        n.firstIdle += spawns == 1 && r.player[1].phase == Phase::Control && buttons[1] == 0;
         if (alone == 10) ++n.leftAlone;
         n.control += r.player[1].phase == Phase::Control;
         r.step(buttons, e);
-        if (turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = turnShownLate;
-        if (crowdedLate && e[1].control.rotated && r.player[1].phase == Phase::Control) {
+        if (how.turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = how.turnShownLate;
+        if (how.crowdedLate && e[1].control.rotated && r.player[1].phase == Phase::Control) {
             if (r.player[1].pair.x != columnBefore || f - lastTurn <= 3) {
                 if (oldFor == 0) oldDir = dirBefore;
-                oldFor = crowdedLate;
+                oldFor = how.crowdedLate;
             }
             lastTurn = f;
         }
-        if (movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, movedHidden);
+        if (how.movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, how.movedHidden);
         // (from the frame a pair appears in, until the frames take buttons the driver sent once it had begun that pair)
         if (e[1].spawned) ++spawns, leftOver = true, n.appeared.push_back(clock), appearedAt = clock, firstBegunAt = -1, n.wordsSpawns += words;
         if (leftOver && firstBegunAt < 0 && begunAt >= appearedAt) firstBegunAt = begunAt;
         if (leftOver && firstBegunAt >= 0 && from >= firstBegunAt) leftOver = false;
+        if (e[1].spawned) beginning = true, unbegun = 0, spawnIndex = r.player[1].nextPair - 1;
+        if (beginning && firstBegunAt >= 0 && from >= firstBegunAt) beginning = false;
+        if (beginning && !e[1].spawned && r.player[1].phase == Phase::Control) n.mostUnbegun = std::max(n.mostUnbegun, ++unbegun);
+        if (e[1].garbageFell) garbageAt = clock;
+        if (how.loseAtGround && r.player[1].phase == Phase::Control && r.player[1].pair.grounded && !groundedBefore) loseNext = true;
         // (a turn taken from buttons the driver sent for the pair in play, not from those sent before it was begun)
-        if (kickShown && e[1].control.rotated && dirBefore == UP && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore)
-            ++n.kicks, n.kickMoves += std::abs(r.player[1].pair.x - columnBefore) > 1, kickFrom = columnBefore, kickTo = r.player[1].pair.x, kickDir = dirBefore, kickFor = kickShown, kickAt = clock, kickPair = true;
+        if (how.kickShown && e[1].control.rotated && dirBefore == UP && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore)
+            ++n.kicks, n.kickMoves += std::abs(r.player[1].pair.x - columnBefore) > 1, kickFrom = columnBefore, kickTo = r.player[1].pair.x, kickDir = dirBefore, kickFor = how.kickShown, kickAt = clock, kickPair = true;
         if (leftOver && (buttons[1] & BTN_DOWN)) ++n.downAtSpawn, leftOver = false;
-        if (hidden && e[1].control.rotated && r.player[1].phase == Phase::Control) hideFor = hidden;
+        if (how.hidden && e[1].control.rotated && r.player[1].phase == Phase::Control) hideFor = how.hidden;
         // (a pair the AI found no placement for - the field full - is not counted)
         if (e[1].locked && target >= 0) {
             const bool hit = placementId(r.player[1].pair.placement()) == target;
-            n.locks += 1, n.hits += hit, n.lostMisses += !hit && r.player[1].field.dead();
+            n.locks += 1, n.hits += hit;
+            n.garbageMisses += !hit && garbageAt > lockedAt, n.unseenGarbageMisses += !hit && garbageAt > lockedAt && clearAt <= garbageAt;
         }
+        if (e[1].locked && target < 0) ++n.untargeted;
         if (e[1].locked && target >= 0 && kickPair) n.kickLocks += 1, n.kickHits += placementId(r.player[1].pair.placement()) == target;
-        if (liftShown && e[1].control.rotated && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control &&
+        if (how.liftShown && e[1].control.rotated && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control &&
             (r.player[1].pair.y != pairBefore.y || r.player[1].pair.upper != pairBefore.upper))
-            ++n.lifts, liftFrom = pairBefore, liftFor = liftShown, liftAt = clock, liftPair = true;
+            ++n.lifts, liftFrom = pairBefore, liftFor = how.liftShown, liftAt = clock, liftPair = true;
         if (e[1].locked && target >= 0 && liftPair) n.liftLocks += 1, n.liftHits += placementId(r.player[1].pair.placement()) == target;
         if (!leftOver && !e[1].spawned && (e[1].control.quickTurned || (e[1].control.rotated && r.player[1].pair.y >= 12))) highPair = true;
         recent.push_back(pairBefore);
         if (recent.size() > 3) recent.pop_front();
         if (e[1].spawned) recent.clear();
         turnedAt = e[1].control.rotated ? f : turnedAt;
-        if (glitchAfterTurn && e[1].control.moved && f - turnedAt <= 2 && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && recent.size() == 3 &&
+        if (how.glitchAfterTurn && e[1].control.moved && f - turnedAt <= 2 && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && recent.size() == 3 &&
             glitcher.below(2) == 0)
             glitchAt = recent.front(), glitchNext = true;
+        if (e[1].locked && highPair) {
+            const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get());
+            n.highUnallowed += !placing || std::find(placing->climbing.begin(), placing->climbing.end(), spawnIndex) == placing->climbing.end();
+        }
         if (e[1].locked) n.highPairs += highPair, highPair = false;
-        if (e[1].locked) kickPair = false, kickFor = 0, liftPair = false, liftFor = 0;
-        if (garbageAsLit && e[1].locked && spawns % 3 == 2) r.player[1].incoming.confirmed += garbageAsLit;
-        ++n.frames;
+        if (e[1].locked) kickPair = false, kickFor = 0, liftPair = false, liftFor = 0, beginning = false, lockedAt = clock;
+        if (how.garbageAsLit && e[1].locked && spawns % 3 == 2) r.player[1].incoming.confirmed += how.garbageAsLit;
     }
-    n.corrected += d.corrected, n.played += d.played;
-    if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get())) n.rerouted += placing->rerouted, n.steered += placing->steered, n.climbs += placing->climbs;
+    n.corrected += d.corrected;
+    if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get()))
+        n.rerouted += placing->rerouted, n.steered += placing->steered, n.steeredLow += placing->steeredLow, n.climbs += placing->climbs;
     if (words) n.wordsCorrected += d.corrected - correctedBefore;
-    n.lagRounds += 1, n.lagRight += d.measuredLag() == lag;
-    n.lagTaken += d.lag == lag, n.turnsFound += d.turnsSwapped;
-    if (sentOut) *sentOut = sent;
+    n.lagRounds += 1, n.lagRight += d.measuredLag() == how.lag;
+    n.lagTaken += d.lag == how.lag, n.turnsFound += d.turnsSwapped;
+    if (how.sentOut) *how.sentOut = sent;
 }
 
 // An agent that chooses the first placement it may, and notes how many frames before its pair appears it chose (the
@@ -1598,30 +1656,30 @@ struct CountedX3 : ai::X3Agent {
 
 static void testDriver() {
     DriveCounts exact, shaky;
-    for (int lag = 1; lag <= 3; ++lag) driveRound(60 + uint64_t(lag), lag, false, 2500, exact);
+    for (int lag = 1; lag <= 3; ++lag) driveRound(60 + uint64_t(lag), exact, {.lag = lag});
     check(exact.lagRight == exact.lagRounds, "the lag measured is not the lag of the pad");
     check(exact.locks >= 60 && exact.hits == exact.locks && exact.corrected == 0,
           "through a pad that is late as said, a pair is not brought where the AI chose (" + std::to_string(exact.hits) + " of " + std::to_string(exact.locks) +
               ") or found elsewhere than the engine had it (" + std::to_string(exact.corrected) + ")");
-    for (int k = 0; k < 3; ++k) driveRound(70 + uint64_t(k), 2, true, 2500, shaky);
+    for (int k = 0; k < 3; ++k) driveRound(70 + uint64_t(k), shaky, {.lag = 2, .shaky = true});
     check(shaky.locks >= 60 && shaky.corrected > 0 && shaky.hits * 10 >= shaky.locks * 9,
           "through a shaky pad, pairs are not put right: " + std::to_string(shaky.hits) + " of " + std::to_string(shaky.locks) + " where the AI chose, " +
               std::to_string(shaky.corrected) + " found elsewhere");
     // The lag the driver begins with is not the pad's: it takes the lag it measures.
     DriveCounts learnt;
-    for (const int padLag : {4, 6}) driveRound(80 + uint64_t(padLag), padLag, false, 2500, learnt, nullptr, nullptr, 2);
+    for (const int padLag : {4, 6}) driveRound(80 + uint64_t(padLag), learnt, {.lag = padLag, .startLag = 2});
     // The lag begun with a frame more than the pad's (as on the real game: 6 for 5): the pictures show the pair a frame
     // ahead of the engine, which takes the lag from the pictures that show it in another column, and puts no pair
     // elsewhere for it (116 times in these rounds when each such picture was put right; the heights and the turns of the
     // rounds drawn here would tell of the lag too, but those of the real game do not, and are not taken).
     DriveCounts over;
-    for (int k = 0; k < 2; ++k) driveRound(84 + uint64_t(k), 5, false, 2500, over, nullptr, nullptr, 6);
+    for (int k = 0; k < 2; ++k) driveRound(84 + uint64_t(k), over, {.lag = 5, .startLag = 6});
     check(over.lagTaken == 2 && over.corrected <= 10 && over.hits * 10 >= over.locks * 9,
           "beginning with a lag a frame more than the pad's, pairs are put elsewhere for it (" + std::to_string(over.corrected) + " times), or the lag is not taken (" +
               std::to_string(over.lagTaken) + " of 2 rounds), or pairs are not brought where the AI chose (" + std::to_string(over.hits) + " of " + std::to_string(over.locks) + ")");
     // A turn shown two frames late (as the real game shows it): pictures of the pair the way it was are no pair elsewhere.
     DriveCounts late;
-    for (int k = 0; k < 2; ++k) driveRound(96 + uint64_t(k), 5, false, 2500, late, nullptr, nullptr, -1, false, 2);
+    for (int k = 0; k < 2; ++k) driveRound(96 + uint64_t(k), late, {.lag = 5, .turnShownLate = 2});
     check(late.turnsFound == 0 && late.corrected <= 10 && late.hits * 10 >= late.locks * 9,
           "with turns shown two frames late, pairs are put elsewhere (" + std::to_string(late.corrected) + " times), the turns are taken the other way round (" +
               std::to_string(late.turnsFound) + "), or pairs are not brought where the AI chose (" + std::to_string(late.hits) + " of " + std::to_string(late.locks) + ")");
@@ -1632,7 +1690,7 @@ static void testDriver() {
         std::vector<int> waits;
         DriveCounts n;
         std::vector<std::pair<int64_t, std::string>> notes;
-        driveRound(101, 5, false, 1500, n, &notes, nullptr, -1, false, 0, std::make_unique<EarlyAgent>(&waits));
+        driveRound(101, n, {.lag = 5, .frames = 1500, .notes = &notes, .given = std::make_unique<EarlyAgent>(&waits)});
         int before = 0;
         for (const int wait : waits) before += wait > 1;
         check(waits.size() >= 10 && before * 10 >= int(waits.size()) * 8,
@@ -1654,8 +1712,8 @@ static void testDriver() {
     // 73 with the engine ahead, 19 frames in play for each).
     {
         DriveCounts right, ahead;
-        driveRound(106, 5, false, 2500, right, nullptr, nullptr, -1, false, 0, nullptr, true, 4);
-        driveRound(106, 5, false, 2500, ahead, nullptr, nullptr, 3, false, 0, nullptr, true, 4);
+        driveRound(106, right, {.lag = 5, .keepLag = true, .lit = 4});
+        driveRound(106, ahead, {.lag = 5, .startLag = 3, .keepLag = true, .lit = 4});
         const double perRight = double(right.control) / double(std::max(1L, right.locks)), perAhead = double(ahead.control) / double(std::max(1L, ahead.locks));
         check(right.locks >= 20 && ahead.locks >= 20 && perAhead <= perRight * 1.15 && ahead.corrected <= 10 && ahead.hits * 10 >= ahead.locks * 9,
               "with the engine ahead of the game, a pair is in play " + std::to_string(perAhead) + " frames, with the lag right " + std::to_string(perRight) + ", put elsewhere " +
@@ -1669,8 +1727,7 @@ static void testDriver() {
         narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
         std::atomic<int> before{0}, after{0};
         DriveCounts n;
-        driveRound(107, 5, false, 2500, n, nullptr, nullptr, -1, false, 0, std::make_unique<CountedX3>(narrow, &before), false, 0,
-                   std::make_unique<CountedX3>(narrow, &after), 1200);
+        driveRound(107, n, {.lag = 5, .given = std::make_unique<CountedX3>(narrow, &before), .later = std::make_unique<CountedX3>(narrow, &after), .laterAt = 1200});
         check(before > 0 && after >= 10 && n.hits * 10 >= n.locks * 9,
               "the AI given while the AI plays does not play (" + std::to_string(after.load()) + " choices; the one before " + std::to_string(before.load()) +
                   "), or pairs are not brought where the AI chose (" + std::to_string(n.hits) + " of " + std::to_string(n.locks) + ")");
@@ -1682,7 +1739,7 @@ static void testDriver() {
     {
         DriveCounts n;
         std::vector<std::pair<int64_t, std::string>> notes;
-        for (int k = 0; k < 2; ++k) driveRound(108 + uint64_t(k), 5, false, 2500, n, &notes, nullptr, -1, false, 0, nullptr, false, 0, nullptr, 0, 8);
+        for (int k = 0; k < 2; ++k) driveRound(108 + uint64_t(k), n, {.lag = 5, .notes = &notes, .hidden = 8});
         int off = 0, measured = 0;
         for (const auto& [at, line] : notes)
             if (line.rfind("lag measured: ", 0) == 0) ++measured, off += std::abs(std::atoi(line.c_str() + 14) - 5) > 1;
@@ -1695,7 +1752,7 @@ static void testDriver() {
     // round that follows, and two rounds went from 86% to 85% for that alone; over 36 rounds the pairs where the AI
     // chose were 91.3% either way.)
     DriveCounts heavy;
-    for (int k = 0; k < 8; ++k) driveRound(98 + uint64_t(k), 5, true, 2500, heavy, nullptr, nullptr, 6, false, 2);
+    for (int k = 0; k < 8; ++k) driveRound(98 + uint64_t(k), heavy, {.lag = 5, .shaky = true, .startLag = 6, .turnShownLate = 2});
     check(heavy.turnsFound == 0 && heavy.hits * 100 >= heavy.locks * 85,
           "on a machine under load the turns are taken the other way round (" + std::to_string(heavy.turnsFound) + "), or pairs are not brought where the AI chose (" +
               std::to_string(heavy.hits) + " of " + std::to_string(heavy.locks) + ")");
@@ -1705,7 +1762,7 @@ static void testDriver() {
               std::to_string(learnt.hits) + " of " + std::to_string(learnt.locks) + ")");
     // The pad turns the other way round from what the driver sends: it finds so from the screen and sends the other button.
     DriveCounts swapped;
-    for (int k = 0; k < 2; ++k) driveRound(90 + uint64_t(k), 3, false, 2500, swapped, nullptr, nullptr, -1, true);
+    for (int k = 0; k < 2; ++k) driveRound(90 + uint64_t(k), swapped, {.lag = 3, .swapped = true});
     check(swapped.turnsFound == 2 && swapped.locks >= 40 && swapped.hits * 10 >= swapped.locks * 9,
           "through a pad that turns the other way round, the driver does not find so (" + std::to_string(swapped.turnsFound) + " of 2 rounds) or does not bring the pairs where the AI chose (" +
               std::to_string(swapped.hits) + " of " + std::to_string(swapped.locks) + ")");
@@ -1717,7 +1774,7 @@ static void testDriver() {
     // pair; the driver begins with a lag of 6 (with these, 96 to 99% of the pictures of a record are where the engine has
     // the pair).
     DriveCounts real;
-    for (int k = 0; k < 2; ++k) driveRound(112 + uint64_t(k), 4, false, 2500, real, nullptr, nullptr, 6, true, 0, nullptr, false, 0, nullptr, 0, 2, 1, true);
+    for (int k = 0; k < 2; ++k) driveRound(112 + uint64_t(k), real, {.lag = 4, .startLag = 6, .swapped = true, .hidden = 2, .movedHidden = 1, .quietLanding = true});
     check(real.turnsFound == 2 && real.lagTaken == 2 && real.locks >= 40 && real.hits * 10 >= real.locks * 9,
           "through a pad as the real game: the turns the other way round found in " + std::to_string(real.turnsFound) + " rounds of 2, the lag of 4 taken in " +
               std::to_string(real.lagTaken) + ", pairs brought where the AI chose " + std::to_string(real.hits) + " of " + std::to_string(real.locks) + ", put right " +
@@ -1732,7 +1789,8 @@ static void testDriver() {
     // on without it as the game did, nothing was put right, and the pair went down a column short of its placement: five
     // pairs of 45 in that record, the one move of their way chosen for such a frame.)
     DriveCounts skipped;
-    for (int k = 0; k < 2; ++k) driveRound(112 + uint64_t(k), 5, false, 2500, skipped, nullptr, nullptr, 6, true, 0, nullptr, false, 0, nullptr, 0, 2, 1, true, 20);
+    for (int k = 0; k < 2; ++k) driveRound(112 + uint64_t(k), skipped, {.lag = 5, .startLag = 6, .swapped = true, .hidden = 2, .movedHidden = 1, .quietLanding = true,
+                                                                        .skipOneIn = 20});
     check(skipped.locks >= 40 && skipped.hits * 100 >= skipped.locks * 98,
           "with the driver not called in one frame of 20, pairs brought where the AI chose " + std::to_string(skipped.hits) + " of " + std::to_string(skipped.locks));
     // A turn taken with a move, or just after another turn, shown up to 6 frames late (the real game's eighth record):
@@ -1741,7 +1799,8 @@ static void testDriver() {
     // the child on the left.)
     DriveCounts crowded;
     for (int k = 0; k < 2; ++k)
-        driveRound(112 + uint64_t(k), 5, false, 2500, crowded, nullptr, nullptr, 6, true, 0, nullptr, false, 0, nullptr, 0, 2, 1, true, 20, 6);
+        driveRound(112 + uint64_t(k), crowded, {.lag = 5, .startLag = 6, .swapped = true, .hidden = 2, .movedHidden = 1, .quietLanding = true, .skipOneIn = 20,
+                                                .crowdedLate = 6});
     check(crowded.locks >= 40 && crowded.hits * 100 >= crowded.locks * 98 && crowded.corrected * 4 <= crowded.locks,
           "with turns shown 6 frames late after a move or a turn, pairs brought where the AI chose " + std::to_string(crowded.hits) + " of " + std::to_string(crowded.locks) +
               ", put right " + std::to_string(crowded.corrected) + " times");
@@ -1767,7 +1826,8 @@ static void testTapsHeld() {
     //  later in one frame of 8: 83.7% where the AI chose with taps of a frame, over 3 x 6 rounds; 92.1% with taps of two)
     DriveCounts shaken;
     for (int k = 0; k < 2; ++k)
-        driveRound(112 + uint64_t(k), 5, true, 2500, shaken, nullptr, nullptr, 6, true, 0, prepared(), false, 0, nullptr, 0, 2, 1, true);
+        driveRound(112 + uint64_t(k), shaken, {.lag = 5, .shaky = true, .startLag = 6, .swapped = true, .given = prepared(), .hidden = 2, .movedHidden = 1,
+                                               .quietLanding = true});
     check(shaken.locks >= 40 && shaken.hits * 100 >= shaken.locks * 88,
           "through a pad as the real game under load, pairs of the mode's AI brought where it chose " + std::to_string(shaken.hits) + " of " + std::to_string(shaken.locks));
     // (no pair is left to fall by itself: a pair the engine has put, the screen not yet showing it so, is held down
@@ -1778,7 +1838,7 @@ static void testTapsHeld() {
     //  11 pairs of 361 elsewhere in 10 rounds, none when taken as one run)
     DriveCounts crowded;
     for (const uint64_t seed : {300, 302})
-        driveRound(seed, 5, false, 2500, crowded, nullptr, nullptr, 6, false, 0, prepared(), false, 0, nullptr, 0, 2, 1, true, 20, 6);
+        driveRound(seed, crowded, {.lag = 5, .startLag = 6, .given = prepared(), .hidden = 2, .movedHidden = 1, .quietLanding = true, .skipOneIn = 20, .crowdedLate = 6});
     check(crowded.locks >= 40 && crowded.hits * 100 >= crowded.locks * 98,
           "with turns shown 6 frames late, pairs of the mode's AI brought where it chose " + std::to_string(crowded.hits) + " of " + std::to_string(crowded.locks) +
               ", put right " + std::to_string(crowded.corrected) + " times");
@@ -1799,7 +1859,7 @@ static void testUnseenPairsInARow() {
     for (int k = 0; k < 2; ++k) {
         std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
         Driver::prepare(a.get());
-        driveRound(120 + uint64_t(k), 5, false, 2500, lit, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 120);
+        driveRound(120 + uint64_t(k), lit, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = 120});
     }
     check(lit.locks >= 50 && (lit.locks - lit.hits) * 100 <= lit.locks * 2 && lit.leftAlone == 0,
           "with pairs begun unseen one after the other, pairs brought where the AI chose " + std::to_string(lit.hits) + " of " + std::to_string(lit.locks) + ", left alone " +
@@ -1811,10 +1871,10 @@ static void testUnseenPairsInARow() {
 // three appears, 6 pieces of garbage before each of them): the engine knows of no garbage, and the game's pair lies on a
 // field higher than the engine's. It goes down by itself until it is turned and moved where it goes, and can still be
 // moved as it lies. (Held down from the first frame, 8 pairs of 85 in these rounds lay down before their last move; not
-// held down, 3 or 4 of 78 or 79 in rounds drawn otherwise.) Kept below the 13th row (Driver::keepLow) the rounds end
-// sooner, 70 or 71 pairs: the last pair of a round, whose only placement that does not lose is reached through the 13th
-// row, was begun unseen 3 frames late and locked where it appeared, in 2 or 3 of the rounds drawn otherwise; besides
-// those, 2 pairs elsewhere than chosen.
+// held down, 3 or 4 of 78 or 79 in rounds drawn otherwise.) A pair begun unseen after garbage the screen showed come to
+// rest is planned on the field the screen showed: begun on the engine's field, which knows of no garbage, the last pair
+// of a round, kept below the 13th row (Driver::keepLow), was planned over a column the garbage had made twelve high and
+// locked where it appeared (2 or 3 such pairs in the rounds drawn otherwise).
 static void testUnseenPairsUnderGarbage() {
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
@@ -1824,18 +1884,18 @@ static void testUnseenPairsUnderGarbage() {
             for (int k = 0; k < 2; ++k) {
                 std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
                 Driver::prepare(a.get(), keepLow);
-                driveRound(120 + uint64_t(k), 5, false, 2500, keepLow ? low : n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0,
-                           light, 6);
+                driveRound(120 + uint64_t(k), keepLow ? low : n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true,
+                                                                  .litAsAppears = light, .garbageAsLit = 6});
             }
     const auto counts = [](const DriveCounts& c) {
-        return "pairs brought where the AI chose " + std::to_string(c.hits) + " of " + std::to_string(c.locks) + " (" + std::to_string(c.lostMisses) +
-               " elsewhere that lost the round), left alone " + std::to_string(c.leftAlone);
+        return std::to_string(c.hits) + " of " + std::to_string(c.locks) + " where the AI chose (" + std::to_string(c.garbageMisses) + " elsewhere after garbage, " +
+               std::to_string(c.unseenGarbageMisses) + " of them after garbage the screen did not show), left alone " + std::to_string(c.leftAlone);
     };
-    check(n.locks >= 60 && (n.locks - n.hits) * 100 <= n.locks * 6 && n.leftAlone == 0, "with garbage before pairs begun unseen, " + counts(n));
-    check(low.locks >= 60 && (low.locks - low.hits - low.lostMisses) * 100 <= low.locks * 6 && low.leftAlone == 0,
+    // (planned on the engine's field, 3 of 78 and 4 of 70 pairs - kept below the 13th row - went elsewhere)
+    check(n.locks >= 60 && (n.locks - n.hits) * 100 <= n.locks * 4 && n.leftAlone == 0, "with garbage before pairs begun unseen, " + counts(n));
+    check(low.locks >= 60 && (low.locks - low.hits) * 100 <= low.locks * 4 && low.leftAlone == 0,
           "with garbage before pairs begun unseen, the pairs kept below the 13th row, " + counts(low));
-    std::cout << "garbage before pairs begun unseen: " << n.hits << " of " << n.locks << " where the AI chose; kept below the 13th row " << low.hits << " of "
-              << low.locks << " (" << low.lostMisses << " elsewhere that lost the round)\n";
+    std::cout << "garbage before pairs begun unseen: " << counts(n) << "; kept below the 13th row " << counts(low) << "\n";
 }
 
 // The screen of 2P not to be read as a pair appears (a light over it, 30 frames: the real game in its thirteenth record,
@@ -1851,7 +1911,7 @@ static void testPairsLitAsTheyAppear() {
     for (int k = 0; k < 2; ++k) {
         std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
         Driver::prepare(a.get());
-        driveRound(120 + uint64_t(k), 5, false, 2500, lit, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 30);
+        driveRound(120 + uint64_t(k), lit, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = 30});
     }
     check(lit.locks >= 40 && lit.leftAlone == 0,
           "with the screen of 2P lit as a pair appears, pairs of 2P left to fall by themselves " + std::to_string(lit.leftAlone) + " times (" + std::to_string(lit.locks) + " pairs)");
@@ -1869,7 +1929,8 @@ static void testPairsLitAsTheyAppear() {
     for (int k = 0; k < 2; ++k) {
         std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
         Driver::prepare(a.get());
-        driveRound(120 + uint64_t(k), 5, false, 2500, fallen, &notes, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 30, 6);
+        driveRound(120 + uint64_t(k), fallen, {.lag = 5, .notes = &notes, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true,
+                                               .litAsAppears = 30, .garbageAsLit = 6});
     }
     int unseen = 0, off = 0;
     const std::string begun = "begun unseen: the screen not showing it, the engine had it appear in frame ";
@@ -1892,10 +1953,40 @@ static void testPairsLitAsTheyAppear() {
                                      " times (" + std::to_string(fallen.locks) + " pairs)");
     check(lit.downAtSpawn == 0 && fallen.downAtSpawn == 0, "with the screen of 2P lit as a pair appears, pairs that took the down button as they appeared: " +
                                                                std::to_string(lit.downAtSpawn) + ", with garbage before it " + std::to_string(fallen.downAtSpawn));
+    // (no pair waits longer for its first button than one begun unseen: 6 frames at most here)
+    check(lit.mostUnbegun <= 10 && fallen.mostUnbegun <= 10, "with the screen of 2P lit as a pair appears, a pair in play waited " + std::to_string(lit.mostUnbegun) +
+                                                                 " frames for a button sent for it, with garbage before it " + std::to_string(fallen.mostUnbegun));
     check(fallen.miscounted == 0, "with garbage falling on 2P before a pair its screen is lit for, " + std::to_string(fallen.miscounted) + " pairs of " +
                                       std::to_string(fallen.spawnsSeen) + " seen are counted otherwise than the round gave them");
     std::cout << "the screen of 2P lit as a pair appears: no pair left alone, " << lit.hits << " of " << lit.locks << " where the AI chose, " << lit.spawnsSeen
-              << " pairs seen counted as the round gave them; with garbage before it, " << unseen << " pairs begun unseen as they appeared, none left alone\n";
+              << " pairs seen counted as the round gave them; with garbage before it, " << unseen << " pairs begun unseen as they appeared, none left alone; "
+              << lit.mostUnbegun << " and " << fallen.mostUnbegun << " frames at most before a button sent for a pair reached it\n";
+}
+
+// The first pair of a round lit as it appears is begun unseen as the pairs after it are, once the round has begun (the
+// first pair of 1P seen) or the window has moved on. (Begun only once the screen showed it, under a light of 80 frames
+// it fell by itself for 76 frames; in these rounds its frames in play with no button were 224 and 4 were left alone.)
+static void testFirstPairLit() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n, plain;
+    for (const int light : {80, 40, 0})
+        for (const uint64_t seed : {120, 121}) {
+            std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+            Driver::prepare(a.get());
+            driveRound(seed, light ? n : plain, {.lag = 5, .frames = 600, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true,
+                                                  .litFirst = light});
+        }
+    const auto counts = [](const DriveCounts& c) {
+        return std::to_string(c.firstIdle) + " frames of the first pairs in play took no button, " + std::to_string(c.leftAlone) + " pairs left alone, " +
+               std::to_string(c.mostUnbegun) + " frames at most before a button sent for a pair reached it; " + std::to_string(c.hits) + " of " +
+               std::to_string(c.locks) + " where the AI chose (" + std::to_string(c.untargeted) + " with none chosen)";
+    };
+    // (a pair begun unseen takes its first button BLIND_AFTER and the lag after it appeared: 7 frames at most here)
+    check(n.leftAlone == 0 && n.firstIdle <= plain.firstIdle + 4 * 10 && n.mostUnbegun <= 10 && n.untargeted == 0 && plain.untargeted == 0 &&
+              n.hits * 100 >= n.locks * 90,
+          "the first pair lit as it appears: " + counts(n) + "; not lit, " + counts(plain));
+    std::cout << "the first pair lit as it appears: " << counts(n) << "; not lit, " << counts(plain) << "\n";
 }
 
 // An unread window may be a missing picture rather than the next pair. The release must expire while the field is
@@ -2087,7 +2178,8 @@ static void testLongLights() {
             for (const uint64_t seed : {120, 121}) {
                 auto a = ai::makeAgent("x3", narrow);
                 Driver::prepare(a.get());
-                driveRound(seed, 5, false, 2500, n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, light, garbage);
+                driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = light,
+                                     .garbageAsLit = garbage});
             }
             const std::string where = "light " + std::to_string(light) + ", garbage " + std::to_string(garbage) + ": ";
             check(n.locks >= 20 && n.leftAlone == 0, where + std::to_string(n.leftAlone) + " pairs left alone in " + std::to_string(n.locks) + " locks");
@@ -2100,7 +2192,7 @@ static void testLongLights() {
     DriveCounts lifted;
     auto a = ai::makeAgent("x3", narrow);
     Driver::prepare(a.get());
-    driveRound(121, 5, false, 2500, lifted, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 80, 0, 27);
+    driveRound(121, lifted, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = 80, .noiseStream = 27});
     check(lifted.locks >= 20 && lifted.leftAlone == 0, "light 80, noise 27: " + std::to_string(lifted.leftAlone) + " pairs left alone in " + std::to_string(lifted.locks) + " locks");
     check(lifted.downAtSpawn == 0 && lifted.miscounted == 0, "light 80, noise 27: the down button carried to the next pair or a pair miscounted");
     // (and of another: a pair came and was put while the screen was lit, and a piece drawn once where pairs appear, of
@@ -2108,7 +2200,8 @@ static void testLongLights() {
     DriveCounts stray;
     auto b = ai::makeAgent("x3", narrow);
     Driver::prepare(b.get());
-    driveRound(120, 5, false, 2500, stray, nullptr, nullptr, 6, false, 0, std::move(b), false, 0, nullptr, 0, 2, 1, true, 0, 0, 80, 6, 17);
+    driveRound(120, stray, {.lag = 5, .startLag = 6, .given = std::move(b), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = 80, .garbageAsLit = 6,
+                            .noiseStream = 17});
     check(stray.locks >= 10 && stray.leftAlone == 0 && stray.miscounted == 0,
           "light 80, garbage 6, noise 17: " + std::to_string(stray.miscounted) + " pairs miscounted, " + std::to_string(stray.leftAlone) + " left alone in " +
               std::to_string(stray.locks) + " locks");
@@ -2129,8 +2222,8 @@ static void testStrayAfterLight() {
             for (const uint64_t seed : {120, 121, 122}) {
                 auto a = ai::makeAgent("x3", narrow);
                 Driver::prepare(a.get());
-                driveRound(seed, 5, false, 2500, n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, light, 0, 7, -1, -1, 0, 0, 0, 0,
-                           where);
+                driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = light,
+                                     .strayAfterLight = where});
             }
         const std::string place = where == 1 ? "where pairs appear" : "half a cell below where pairs appear";
         check(n.strays >= 4 && n.miscounted == 0 && n.leftAlone == 0, "a piece of a pair put under a light drawn once " + place + ": " + std::to_string(n.strays) +
@@ -2184,20 +2277,22 @@ static void testLateHoldsNothingAway() {
             auto a = std::make_unique<KickAgent>();
             a->lateScript = &late;
             Driver::prepare(a.get(), keepLow);
-            driveRound(seed, 5, false, 2500, keepLow ? low : n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true);
+            driveRound(seed, keepLow ? low : n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
         }
     // (the pair falls by itself while its choice is late, and that alone takes a placement out of reach now and then: with
     //  the down button held at once 24 pairs of 46 were sent to the nearest placement, held as said 3 of 131. Kept below
-    //  the 13th row - Driver::keepLow -, a placement it reached so as it appeared may need the pair taken up there once it
-    //  has fallen, and the pair goes to the nearest: 13 of 128)
+    //  the 13th row - Driver::keepLow -, the AI chooses from the placements reached below it as the pair appears, some of
+    //  them only while the pair is still high: fallen by itself while the choice is late, 10 to 16 pairs of 128 to 131
+    //  in the rounds drawn otherwise went to the nearest, none of them reached through the 13th row either - steeredLow)
     const auto counts = [](const DriveCounts& c) {
-        return std::to_string(c.rerouted) + " pairs found their placement out of reach as the choice came, " + std::to_string(c.steered) + " sent to the nearest; " +
-               std::to_string(c.hits) + " of " + std::to_string(c.locks) + " where the AI chose, " + std::to_string(c.leftAlone) + " left alone";
+        return std::to_string(c.rerouted) + " pairs found their placement out of reach as the choice came, " + std::to_string(c.steered) + " sent to the nearest (" +
+               std::to_string(c.steeredLow) + " of them reached through the 13th row only); " + std::to_string(c.hits) + " of " + std::to_string(c.locks) +
+               " where the AI chose, " + std::to_string(c.leftAlone) + " left alone";
     };
     check(n.locks >= 40 && n.rerouted == 0 && n.steered * 20 <= n.locks && n.leftAlone == 0, "with every choice 8 frames late: " + counts(n));
-    check(low.locks >= 40 && low.rerouted == 0 && low.leftAlone == 0, "with every choice 8 frames late, the pairs kept below the 13th row: " + counts(low));
-    std::cout << "every choice 8 frames late: no placement out of reach as it came (" << n.locks << " pairs; kept below the 13th row " << low.locks << ", "
-              << low.steered << " to the nearest)\n";
+    check(low.locks >= 40 && low.rerouted == 0 && low.steered * 100 <= low.locks * 15 && low.leftAlone == 0,
+          "with every choice 8 frames late, the pairs kept below the 13th row: " + counts(low));
+    std::cout << "every choice 8 frames late: " << counts(n) << "; kept below the 13th row " << counts(low) << "\n";
 }
 
 static void testKicksShownLate() {
@@ -2208,7 +2303,7 @@ static void testKicksShownLate() {
         for (const int late : {2, 0}) {
             auto a = std::make_unique<KickAgent>();
             Driver::prepare(a.get());
-            driveRound(seed, 5, false, 2500, late ? n : atOnce, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 0, 0, 7, -1, -1, late);
+            driveRound(seed, late ? n : atOnce, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .kickShown = late});
         }
     const std::string counts = std::to_string(n.kicks) + " such turns (" + std::to_string(n.kickMoves) + " two columns), put right " + std::to_string(n.kickCorrected) +
                                " times after them, " + std::to_string(n.kickHits) + " of " + std::to_string(n.kickLocks) + " pairs turned so where the AI chose; all pairs " +
@@ -2233,7 +2328,7 @@ static void testTapsWhole() {
         Driver::prepare(a.get());
         DriveCounts n;
         std::vector<uint8_t> sent;
-        driveRound(seed, 4, false, 2500, n, nullptr, &sent, 6, true, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true);
+        driveRound(seed, n, {.lag = 4, .sentOut = &sent, .startLag = 6, .swapped = true, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
         for (const uint8_t kind : {uint8_t(BTN_CW | BTN_CCW), uint8_t(BTN_LEFT | BTN_RIGHT)})
             for (size_t i = 1; i + 1 < sent.size(); ++i) {
                 const uint8_t b = sent[i] & kind;
@@ -2260,7 +2355,7 @@ static void testTurnApartFromMove() {
         std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3");
         Driver::prepare(a.get());
         std::vector<uint8_t> sent;
-        driveRound(seed, 4, false, 2500, n, nullptr, &sent, 6, true, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true);
+        driveRound(seed, n, {.lag = 4, .sentOut = &sent, .startLag = 6, .swapped = true, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
         for (size_t i = 1; i < sent.size(); ++i) {
             const uint8_t begun = uint8_t(sent[i] & ~sent[i - 1]);
             both += (begun & (BTN_CW | BTN_CCW)) && (begun & (BTN_LEFT | BTN_RIGHT));
@@ -2287,8 +2382,7 @@ static void testLiftsShownLate() {
         for (const int late : {6, 0}) {
             std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
             Driver::prepare(a.get());
-            driveRound(seed, 5, false, 2500, late ? n : atOnce, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 0, 0, 7, -1, -1, 0,
-                       late);
+            driveRound(seed, late ? n : atOnce, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .liftShown = late});
         }
     const std::string counts = std::to_string(n.lifts) + " such turns, put right " + std::to_string(n.liftCorrected) + " times after them, " +
                                std::to_string(n.liftHits) + " of " + std::to_string(n.liftLocks) + " pairs turned so where the AI chose; all pairs " + std::to_string(n.hits) +
@@ -2310,11 +2404,14 @@ static void testKeepsLow() {
     for (const uint64_t seed : {120, 121, 122, 123, 124, 125}) {
         std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
         Driver::prepare(a.get());
-        driveRound(seed, 5, false, 2500, n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true);
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
     }
-    const std::string counts = std::to_string(n.highPairs) + " pairs taken up into the 13th row, " + std::to_string(n.climbs) + " let do so; " + std::to_string(n.hits) +
-                               " of " + std::to_string(n.locks) + " pairs where the AI chose, " + std::to_string(n.leftAlone) + " left alone";
-    check(n.locks >= 150 && n.highPairs <= n.climbs && n.leftAlone == 0 && n.hits * 100 >= n.locks * 95, "pairs kept below the 13th row: " + counts);
+    // (each pair taken up there is one the AI let go so, PlacementAgent::climbing; of the rounds drawn otherwise, 199 of
+    //  199 to 204 of 205 pairs went where the AI chose)
+    const std::string counts = std::to_string(n.highPairs) + " pairs taken up into the 13th row (" + std::to_string(n.highUnallowed) + " not let do so), " +
+                               std::to_string(n.climbs) + " let do so; " + std::to_string(n.hits) + " of " + std::to_string(n.locks) + " pairs where the AI chose, " +
+                               std::to_string(n.leftAlone) + " left alone";
+    check(n.locks >= 150 && n.highUnallowed == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 98, "pairs kept below the 13th row: " + counts);
     std::cout << "pairs kept below the 13th row: " << counts << "\n";
 }
 
@@ -2329,12 +2426,13 @@ static void testTapsNotTakenBack() {
         for (const int twice : {3, 0}) {
             auto a = ai::makeAgent("x3", narrow);
             Driver::prepare(a.get());
-            driveRound(seed, 5, false, 2500, twice ? n : once, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 0, 0, 7, -1,
-                       -1, 0, 0, 0, twice);
+            driveRound(seed, twice ? n : once, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .twiceOneIn = twice});
         }
     const std::string counts = std::to_string(n.hits) + " of " + std::to_string(n.locks) + " pairs where the AI chose; called once a frame " + std::to_string(once.hits) +
                                " of " + std::to_string(once.locks);
-    check(n.locks - n.hits <= once.locks - once.hits + 1 && n.leftAlone == 0, "the driver called twice in a frame now and then: " + counts);
+    // (of the rounds drawn otherwise, 159 of 160 or 160 of 161 either way)
+    check(n.locks - n.hits <= once.locks - once.hits + 1 && n.hits * 100 >= n.locks * 98 && once.hits * 100 >= once.locks * 98 && n.leftAlone == 0,
+          "the driver called twice in a frame now and then: " + counts);
     std::cout << "the driver called twice in a frame now and then: " << counts << "\n";
 }
 
@@ -2351,13 +2449,17 @@ static void testOnePictureOff() {
         for (const int glitch : {4, 0}) {
             auto a = ai::makeAgent("x3", narrow);
             Driver::prepare(a.get());
-            driveRound(seed, 5, false, 2500, glitch ? n : plain, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 0, 0, 7, -1,
-                       -1, 0, 0, glitch);
+            driveRound(seed, glitch ? n : plain, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true,
+                                                  .glitchAfterTurn = glitch});
         }
     const std::string counts = std::to_string(n.glitches) + " such pictures (" + std::to_string(n.glitchesRead) + " read so), " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
                                " pairs where the AI chose (pictures put right " + std::to_string(n.corrected) + "); drawn without them " + std::to_string(plain.hits) +
                                " of " + std::to_string(plain.locks) + " (put right " + std::to_string(plain.corrected) + ")";
-    check(n.glitches >= 50 && n.locks - n.hits <= plain.locks - plain.hits + 1 && n.leftAlone == 0, "one picture off as a pair turns: " + counts);
+    // (the pictures are read as drawn, and none of them puts a pair right; of the rounds drawn otherwise, 225 of 225 to 227
+    //  of 228 with them, 225 of 226 to 230 of 231 without)
+    check(n.glitches >= 50 && n.glitchesRead * 10 >= n.glitches * 9 && n.corrected <= plain.corrected && n.locks - n.hits <= plain.locks - plain.hits + 1 &&
+              n.hits * 100 >= n.locks * 98 && plain.hits * 100 >= plain.locks * 98 && n.leftAlone == 0,
+          "one picture off as a pair turns: " + counts);
     std::cout << "one picture off as a pair turns: " << counts << "\n";
 }
 
@@ -2370,7 +2472,7 @@ static void testCoveredField() {
     for (const uint64_t seed : {120, 121}) {
         auto a = ai::makeAgent("x3", narrow);
         Driver::prepare(a.get());
-        driveRound(seed, 5, false, 2500, n, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 0, 0, 7, 600);
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .coveredFrom = 600});
     }
     check(n.locks >= 20 && n.leftAlone == 0, "with words over the field of 2P: " + std::to_string(n.leftAlone) + " pairs left alone in " + std::to_string(n.locks) + " locks");
     check(n.downAtSpawn == 0, "with words over the field of 2P: " + std::to_string(n.downAtSpawn) + " pairs took the previous pair's down button");
@@ -2896,6 +2998,28 @@ static void testSeenAsWindowSettles() {
     std::cout << "a pair seen as the window settles after a pair put unseen: numbered after it\n";
 }
 
+// A frame of the pad lost as the pair of 2P comes to rest on the ground (a machine under load): it may be the down button
+// that was to lock it. After its engine has locked the pair the driver holds the down button two frames more, also when
+// the screen shows the pair lying (let go as the screen showed it lying, a pair whose down button was lost lay unlocked
+// with no button for 10 frames and more: once in the rounds of the words, drawn with the noise otherwise).
+static void testDownLostAtLock() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {120, 121, 122, 123}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .loseAtGround = true});
+    }
+    // (the round in which it was found: the pair put right a frame before its engine locked it, the pad a frame late
+    //  in the frame after)
+    driveRound(121, n, {.lag = 2, .shaky = true, .noiseStream = 27, .wordsFrom = 300});
+    const std::string counts = std::to_string(n.leftAlone) + " pairs left alone, " + std::to_string(n.downAtSpawn) + " took the down button as they appeared; " +
+                               std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose";
+    check(n.locks >= 100 && n.leftAlone == 0 && n.downAtSpawn == 0 && n.hits * 100 >= n.locks * 95, "a frame of the pad lost as the pair comes to rest: " + counts);
+    std::cout << "a frame of the pad lost as the pair comes to rest: " << counts << "\n";
+}
+
 // The words of an all clear stand over the field of 2P for many frames (on the real game more than 900), behind its
 // pieces. The pairs that come under them are counted as they appear and seen in play, and the screen puts right a pair
 // the engine has elsewhere (a shaky pad).
@@ -2904,7 +3028,7 @@ static void testWordsBehindPairs() {
     //  rounds went from 90% to 88% of the pairs where the AI chose for that alone; over 16 rounds 94.2% either way)
     DriveCounts n;
     for (const uint64_t seed : {120, 121, 122, 123, 124, 125, 126, 127})
-        driveRound(seed, 2, true, 2500, n, nullptr, nullptr, -1, false, 0, nullptr, false, 0, nullptr, 0, 0, 0, false, 0, 0, 0, 0, 7, -1, 300);
+        driveRound(seed, n, {.lag = 2, .shaky = true, .wordsFrom = 300});
     const std::string counts = std::to_string(n.wordsSeen) + " of " + std::to_string(n.wordsSpawns) + " pairs under the words seen to appear, seen in play in " +
                                std::to_string(n.wordsPairSeen) + " of " + std::to_string(n.wordsControl) + " frames, " + std::to_string(n.wordsCorrected) + " put right";
     check(n.wordsSpawns >= 20 && n.wordsSeen * 10 >= n.wordsSpawns * 9 && n.miscounted == 0, counts + ", " + std::to_string(n.miscounted) + " counted wrong");
@@ -3057,11 +3181,11 @@ static void testRecord(const std::string& folder) {
     DriveCounts plain, noted, shakyNoted;
     std::vector<uint8_t> sentPlain, sentNoted;
     std::vector<std::pair<int64_t, std::string>> notes, shakyNotes;
-    driveRound(62, 2, false, 1500, plain, nullptr, &sentPlain);
-    driveRound(62, 2, false, 1500, noted, &notes, &sentNoted);
+    driveRound(62, plain, {.lag = 2, .frames = 1500, .sentOut = &sentPlain});
+    driveRound(62, noted, {.lag = 2, .frames = 1500, .notes = &notes, .sentOut = &sentNoted});
     check(sentPlain == sentNoted && plain.hits == noted.hits, "the driver noting what it does sends other buttons");
     check(hasNote(notes, " begun") && hasNote(notes, "brought to column") && hasNote(notes, "lag measured: 2 frames"), "the driver does not note the pairs begun, the placements or the lag");
-    driveRound(71, 2, true, 1500, shakyNoted, &shakyNotes);
+    driveRound(71, shakyNoted, {.lag = 2, .shaky = true, .frames = 1500, .notes = &shakyNotes});
     check(shakyNoted.corrected == 0 || hasNote(shakyNotes, "put right: the engine had"), "the driver does not note a pair put right");
     std::cout << "the record of a reading: read back the same, pictures kept as they should be; the driver noting sends the same buttons (" << notes.size() << " notes)\n";
 }
@@ -3102,6 +3226,7 @@ int main(int argc, char** argv) {
         testDriver();
         testTapsHeld();
         testPairsLitAsTheyAppear();
+        testFirstPairLit();
         testLongLights();
         testStrayAfterLight();
         testWindowReleaseBounded();
@@ -3121,6 +3246,7 @@ int main(int argc, char** argv) {
         testNoPairWithoutTheWindow();
         testSeenAsWindowSettles();
         testWordsBehindPairs();
+        testDownLostAtLock();
         testKicksShownLate();
         testLiftsShownLate();
         testKeepsLow();

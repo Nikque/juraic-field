@@ -24,6 +24,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -71,65 +73,88 @@ inline int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// One connection.
+/// One connection. It owns its socket: closed when the line is closed, given another socket or gone.
 struct Line {
     Socket s = NO_SOCKET;
-    std::string in, out;
+    std::string in, out; // what has come (from inAt on: not taken as lines yet), what is to go (from outAt on)
+    size_t inAt = 0, outAt = 0;
     bool closed = false;
     int64_t heardAt = 0; // nowMs() of the last bytes that came
-    static constexpr size_t MOST_IN = 1 << 22; // a line longer than this closes the connection
+    static constexpr size_t MOST_IN = 1 << 22; // more than this come and not taken as lines closes the connection
+
+    Line() = default;
+    Line(const Line&) = delete;
+    Line& operator=(const Line&) = delete;
+    Line(Line&& o) noexcept { take(o); }
+    Line& operator=(Line&& o) noexcept {
+        if (this != &o) drop(), take(o);
+        return *this;
+    }
+    ~Line() { drop(); }
 
     bool open() const { return s != NO_SOCKET && !closed; }
     void send(const std::string& line) {
         if (open()) out += line, out += '\n';
     }
-    // Reads what has come and writes what can go. False once the connection is gone.
+    // Reads what has come and writes what can go. False once the connection is gone (nothing is read after).
     bool pump() {
-        if (s == NO_SOCKET) return false;
+        if (!open()) return false;
+        if (inAt) in.erase(0, inAt), inAt = 0; // (the lines taken since the last time, at once)
         char buf[65536];
         for (;;) {
             const int n = int(recv(s, buf, sizeof buf, 0));
             if (n > 0) {
                 in.append(buf, size_t(n)), heardAt = nowMs();
-                if (in.size() > MOST_IN) closed = true;
+                if (in.size() > MOST_IN) return closed = true, false;
                 continue;
             }
             if (n == 0 || !wouldBlock()) closed = true;
             break;
         }
-        while (!out.empty() && !closed) {
-            const int n = int(::send(s, out.data(), int(out.size() > 1 << 20 ? 1 << 20 : out.size()), 0));
+        while (outAt < out.size() && !closed) {
+            const size_t left = out.size() - outAt;
+            const int n = int(::send(s, out.data() + outAt, int(left > 1 << 20 ? 1 << 20 : left), 0));
             if (n > 0) {
-                out.erase(0, size_t(n));
+                outAt += size_t(n);
                 continue;
             }
             if (!wouldBlock()) closed = true;
             break;
         }
+        if (outAt == out.size() || outAt > 1 << 20) out.erase(0, outAt), outAt = 0;
         return !closed;
     }
     bool nextLine(std::string& line) {
-        const size_t nl = in.find('\n');
+        const size_t nl = in.find('\n', inAt);
         if (nl == std::string::npos) return false;
-        line = in.substr(0, nl);
+        line.assign(in, inAt, nl - inAt);
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        in.erase(0, nl + 1);
+        inAt = nl + 1;
         return true;
     }
+    // Sends what is still to go, as far as it goes at once, and closes the socket.
     void close() {
-        if (s != NO_SOCKET) {
-            pump();
-            closeSocket(s);
-        }
+        pump();
+        drop();
+    }
+
+private:
+    void drop() {
+        if (s != NO_SOCKET) closeSocket(s);
         s = NO_SOCKET, closed = true;
+    }
+    void take(Line& o) {
+        s = o.s, in = std::move(o.in), out = std::move(o.out), inAt = o.inAt, outAt = o.outAt, closed = o.closed, heardAt = o.heardAt;
+        o.s = NO_SOCKET, o.closed = true, o.inAt = o.outAt = 0;
     }
 };
 
-// Connects to host:port (blocking for the connect itself, then not blocking).
-inline bool connectTo(const std::string& host, int port, Line& line) {
+// A socket connected to host:port (NO_SOCKET: none), not blocking once connected. The name is looked up and the connect
+// waited for here, for as long as they take.
+inline Socket connectSocket(const std::string& host, int port) {
     addrinfo hints{}, *list = nullptr;
     hints.ai_family = AF_UNSPEC, hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &list) != 0) return false;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &list) != 0) return NO_SOCKET;
     Socket s = NO_SOCKET;
     for (addrinfo* a = list; a; a = a->ai_next) {
         s = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
@@ -138,12 +163,57 @@ inline bool connectTo(const std::string& host, int port, Line& line) {
         closeSocket(s), s = NO_SOCKET;
     }
     freeaddrinfo(list);
-    if (s == NO_SOCKET) return false;
-    noBlockNoDelay(s);
-    line = Line{};
-    line.s = s, line.heardAt = nowMs();
-    return true;
+    if (s != NO_SOCKET) noBlockNoDelay(s);
+    return s;
 }
+// Connects to host:port, waiting for it.
+inline bool connectTo(const std::string& host, int port, Line& line) {
+    line = Line{};
+    line.s = connectSocket(host, port), line.heardAt = nowMs();
+    return line.s != NO_SOCKET;
+}
+
+// A connection made on a thread of its own, so that the caller does not wait for the name to be looked up nor for the
+// server to answer (a server that does not answer keeps a connect waiting for many seconds). Given up with the Call: a
+// socket that comes after is closed by the thread.
+class Call {
+public:
+    Call(const std::string& host, int port) : state(std::make_shared<State>()) {
+        std::thread([s = state, host, port] {
+            const Socket made = connectSocket(host, port);
+            std::lock_guard<std::mutex> lock(s->m);
+            if (s->given) {
+                if (made != NO_SOCKET) closeSocket(made);
+            } else {
+                s->socket = made, s->done = true;
+            }
+        }).detach();
+    }
+    ~Call() {
+        std::lock_guard<std::mutex> lock(state->m);
+        state->given = true;
+        if (state->socket != NO_SOCKET) closeSocket(state->socket);
+    }
+    Call(const Call&) = delete;
+    Call& operator=(const Call&) = delete;
+    // 0: still on its way; 1: connected, the socket given to `line`; -1: no connection.
+    int take(Line& line) {
+        std::lock_guard<std::mutex> lock(state->m);
+        if (!state->done) return 0;
+        if (state->socket == NO_SOCKET) return -1;
+        line = Line{};
+        line.s = state->socket, line.heardAt = nowMs(), state->socket = NO_SOCKET;
+        return 1;
+    }
+
+private:
+    struct State {
+        std::mutex m;
+        bool done = false, given = false;
+        Socket socket = NO_SOCKET;
+    };
+    std::shared_ptr<State> state;
+};
 
 // Listens on address:port (IPv4; "127.0.0.1" = this machine only, "0.0.0.0" = every network of it).
 inline Socket listenOn(const std::string& address, int port) {
