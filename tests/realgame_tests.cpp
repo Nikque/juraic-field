@@ -1307,6 +1307,9 @@ struct DriveCounts {
     // kickShown: the turns of 2P that changed the column of its pair in their frame, the pictures that put the engine's
     // pair right up to 4 frames after one, and the pairs locked after such a turn and those of them where the AI chose.
     long kicks = 0, kickMoves = 0, kickCorrected = 0, kickLocks = 0, kickHits = 0;
+    // liftShown: the turns of 2P that changed the row of its pair, the pictures put right up to 8 frames after one,
+    // and the pairs locked after such a turn and those of them where the AI chose.
+    long lifts = 0, liftCorrected = 0, liftLocks = 0, liftHits = 0;
 };
 
 // A round of this program whose 2P the AI plays through the screen and a pad `lag` frames late (shaky: now and then a
@@ -1333,13 +1336,15 @@ struct DriveCounts {
 // that changes the column of the pair of 2P in its frame (pushed aside from a wall or a stack, a move with it) is drawn
 // that many frames late, the pair in the column before and then in the column between, the way it was before (on the
 // real game a pair turned so from its child up in the 12th row, a column beside it high, was shown in the column
-// before, then in the column between, its child in the hidden 13th row: its records).
+// before, then in the column between, its child in the hidden 13th row: its records). liftShown: a turn that changes
+// the row of the pair of 2P (a quick turn, a floor kick) is drawn that many frames late, the pair where and as it was
+// (on the real game a quick turn in the 12th row showed its lifted child 6 frames after the engine had it).
 static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCounts& n, std::vector<std::pair<int64_t, std::string>>* notes = nullptr,
                        std::vector<uint8_t>* sentOut = nullptr, int startLag = -1, bool swapped = false, int turnShownLate = 0,
                        std::unique_ptr<ai::Agent> given = nullptr, bool keepLag = false, int lit = 0, std::unique_ptr<ai::Agent> later = nullptr,
                        int laterAt = 0, int hidden = 0, int movedHidden = 0, bool quietLanding = false, int skipOneIn = 0, int crowdedLate = 0,
                        int litAsAppears = 0, int garbageAsLit = 0, uint64_t noiseStream = 7, int coveredFrom = -1, int wordsFrom = -1,
-                       int kickShown = 0) {
+                       int kickShown = 0, int liftShown = 0) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -1380,6 +1385,10 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
     uint8_t kickDir = 0;
     int64_t kickAt = -100;   // the frame of the clock of that turn
     bool kickPair = false;   // the pair in play has turned so
+    int liftFor = 0;         // liftShown: pictures left that show the pair of 2P as before its turn that changed its row
+    PairControl liftFrom{};
+    int64_t liftAt = -100;
+    bool liftPair = false;
     for (int f = 0; f < frames && r.state == RoundState::Playing; ++f, ++clock) {
         if (!words && wordsFrom >= 0 && f >= wordsFrom) {
             int h[W];
@@ -1387,11 +1396,18 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
             words = std::max({h[1], h[2], h[3], h[4]}) <= 8;
             correctedBefore = d.corrected;
         }
-        if (oldFor > 0 || hideFor > 0 || kickFor > 0) {
+        if (oldFor > 0 || hideFor > 0 || kickFor > 0 || liftFor > 0) {
             Round shown = r;
             if (oldFor > 0) shown.player[1].pair.dir = oldDir, --oldFor;
             // (a pair turned so in the 12th row is read clear, its child in the hidden 13th row as it turns)
-            const bool kickTop = kickFor > 0 && shown.player[1].phase == Phase::Control && shown.player[1].pair.y >= 11;
+            const bool kickTop = (kickFor > 0 || liftFor > 0) && shown.player[1].phase == Phase::Control && shown.player[1].pair.y >= 11;
+            if (liftFor > 0) {
+                if (shown.player[1].phase == Phase::Control) {
+                    PairControl& q = shown.player[1].pair;
+                    q.x = liftFrom.x, q.y = liftFrom.y, q.upper = liftFrom.upper, q.dir = liftFrom.dir;
+                }
+                --liftFor;
+            }
             if (kickFor > 0) {
                 if (shown.player[1].phase == Phase::Control)
                     shown.player[1].pair.x = int8_t(kickFor == kickShown ? kickFrom : kickFrom + (kickTo > kickFrom ? 1 : -1)), shown.player[1].pair.dir = kickDir;
@@ -1433,6 +1449,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
             const int correctedNow = d.corrected;
             sent[size_t(clock - first)] = d.tick(follow, clock);
             if (clock - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
+            if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
         }
         if (d.played != played) played = d.played, target = -1, begunAt = clock;
         if (d.target() >= 0) target = d.target();
@@ -1449,6 +1466,7 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         PlayerEvents e[2];
         const uint8_t dirBefore = r.player[1].pair.dir;
         const int8_t columnBefore = r.player[1].pair.x;
+        const PairControl pairBefore = r.player[1].pair;
         alone = r.player[1].phase == Phase::Control && buttons[1] == 0 ? alone + 1 : 0;
         if (alone == 10) ++n.leftAlone;
         n.control += r.player[1].phase == Phase::Control;
@@ -1474,7 +1492,11 @@ static void driveRound(uint64_t seed, int lag, bool shaky, int frames, DriveCoun
         // (a pair the AI found no placement for - the field full - is not counted)
         if (e[1].locked && target >= 0) n.locks += 1, n.hits += placementId(r.player[1].pair.placement()) == target;
         if (e[1].locked && target >= 0 && kickPair) n.kickLocks += 1, n.kickHits += placementId(r.player[1].pair.placement()) == target;
-        if (e[1].locked) kickPair = false, kickFor = 0;
+        if (liftShown && e[1].control.rotated && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control &&
+            (r.player[1].pair.y != pairBefore.y || r.player[1].pair.upper != pairBefore.upper))
+            ++n.lifts, liftFrom = pairBefore, liftFor = liftShown, liftAt = clock, liftPair = true;
+        if (e[1].locked && target >= 0 && liftPair) n.liftLocks += 1, n.liftHits += placementId(r.player[1].pair.placement()) == target;
+        if (e[1].locked) kickPair = false, kickFor = 0, liftPair = false, liftFor = 0;
         if (garbageAsLit && e[1].locked && spawns % 3 == 2) r.player[1].incoming.confirmed += garbageAsLit;
         ++n.frames;
     }
@@ -1918,6 +1940,29 @@ static void testKicksShownLate() {
     check(n.kickCorrected == 0 && n.locks - n.hits <= atOnce.locks - atOnce.hits && n.leftAlone == 0 && n.downAtSpawn == 0,
           "turns that change the column shown late: " + counts);
     std::cout << "turns that change the column shown late: " << counts << "\n";
+}
+
+// A turn that changes the row of the pair (a quick turn between two high columns, a floor kick) is shown late: the pair
+// where and as it was for 6 frames. Those pictures are no pair elsewhere. (Put right for one on the real game, the quick
+// turn already sent was lost to the engine and sent again: the pair, kept between two columns twelve high to go up onto
+// one of them, went down in the third column with its child below, and 2P lost the round.)
+static void testLiftsShownLate() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n, atOnce;
+    for (const uint64_t seed : {120, 121, 122, 123})
+        for (const int late : {6, 0}) {
+            std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
+            Driver::prepare(a.get());
+            driveRound(seed, 5, false, 2500, late ? n : atOnce, nullptr, nullptr, 6, false, 0, std::move(a), false, 0, nullptr, 0, 2, 1, true, 0, 0, 0, 0, 7, -1, -1, 0,
+                       late);
+        }
+    const std::string counts = std::to_string(n.lifts) + " such turns, put right " + std::to_string(n.liftCorrected) + " times after them, " +
+                               std::to_string(n.liftHits) + " of " + std::to_string(n.liftLocks) + " pairs turned so where the AI chose; all pairs " + std::to_string(n.hits) +
+                               " of " + std::to_string(n.locks) + ", with such turns shown at once " + std::to_string(atOnce.hits) + " of " + std::to_string(atOnce.locks);
+    check(n.lifts >= 20, "too few turns that change the row: " + counts);
+    check(n.liftCorrected == 0 && n.locks - n.hits <= atOnce.locks - atOnce.hits && n.leftAlone == 0 && n.downAtSpawn == 0, "turns that change the row shown late: " + counts);
+    std::cout << "turns that change the row shown late: " << counts << "\n";
 }
 
 // Words the screen draws over the field and leaves there read as pieces in a clear reading, and the pairs that come
@@ -2676,6 +2721,7 @@ int main(int argc, char** argv) {
         testSeenAsWindowSettles();
         testWordsBehindPairs();
         testKicksShownLate();
+        testLiftsShownLate();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
         testMenus();

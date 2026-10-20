@@ -650,14 +650,29 @@ private:
         const juraic::PairControl* row = at(g);
         if (!row) return false;
         if (samePlace(*row, seen, c)) return true;
-        if (row->y != seen.y || row->upper != seen.upper) return false;
+        // (the row: as in g, or as before a turn that changed it up to TURN_LATEST frames before - a quick turn or a floor
+        //  kick is shown late as a turn is: on the real game a quick turn in the 12th row showed its lifted child 6 frames
+        //  after the engine had it, and put right for the picture before it, the pair was turned again and went down in
+        //  the third column)
+        bool rowShown = row->y == seen.y && row->upper == seen.upper;
+        for (int64_t q = g; q > g - TURN_LATEST && !rowShown; --q) {
+            const juraic::PairControl* after = at(q);
+            const juraic::PairControl* before = at(q - 1);
+            if (after && before && after->dir != before->dir && (after->y != before->y || after->upper != before->upper)) {
+                if (samePlace(*before, seen, c)) return true; // (as it was before that turn: a pair of one colour either way round)
+                rowShown = before->y == seen.y && before->upper == seen.upper;
+            }
+        }
+        if (!rowShown) return false;
         bool column = false;
         for (int k = 0; k <= MOVE_SHOWN && !column; ++k)
             if (const juraic::PairControl* p = at(g - k)) column = p->x == seen.x;
-        for (int k = 0; k <= KICK_SHOWN && !column; ++k) {
+        // (KICK_SHOWN frames after such a turn; TURN_LATEST when it changed the row too, shown as late as the row)
+        for (int k = 0; k <= TURN_LATEST && !column; ++k) {
             const juraic::PairControl* after = at(g - k);
             const juraic::PairControl* before = at(g - k - 1);
-            if (after && before && after->dir != before->dir && after->x != before->x)
+            if (after && before && after->dir != before->dir && after->x != before->x &&
+                (k <= KICK_SHOWN || after->y != before->y || after->upper != before->upper))
                 column = seen.x >= std::min(before->x, after->x) && seen.x <= std::max(before->x, after->x);
         }
         if (!column) return false;
