@@ -88,13 +88,9 @@ public:
     // play, the one before let go on a thread of its own (it waits for a search it may have begun, as long as its
     // level lets it think: the pad is not to wait for that).
     void replaceAgent(std::unique_ptr<juraic::ai::Agent> given) {
-        prepare(given.get(), keepLow);
+        prepare(given.get());
         nextAgent = std::move(given);
     }
-    // The pairs are kept below the 13th row (PlacementAgent::keepLow): the real game's screen does not show it, and what
-    // its pair does there is not what the engine does (of the pairs of its records the engine took up there and then
-    // turned or moved, 32 of 49 went elsewhere; turned quickly, 15 of 16). As given to prepare.
-    bool keepLow = true;
 
     // An AI that plays 2P of the real game: while its second choice is on its way, the pair goes straight down in every
     // frame in which that loses nothing (PlacementAgent::holdSecond, Params::thinkHold). The third pair is known only as
@@ -104,9 +100,8 @@ public:
     // frames take the buttons of the frame before or after now and then, and a tap of one frame is then lost or runs into
     // the next one (rounds drawn as the real game, a frame sooner or later in one frame of 8: 83.7% of the pairs where
     // the AI chose with taps of one frame, 97.7% with taps of two; 98.4% and 97.8% with no frame sooner or later).
-    // keepLow: its pairs are kept below the 13th row (Driver::keepLow).
-    static void prepare(juraic::ai::Agent* agent, bool keepLow = true) {
-        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true, placing->tapHold = 2, placing->keepLow = keepLow;
+    static void prepare(juraic::ai::Agent* agent) {
+        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true, placing->tapHold = 2;
     }
 
     // The middle of the lags the pictures of the last pairs fitted best; -1: none yet.

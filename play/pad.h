@@ -127,9 +127,21 @@ private:
     }
 #endif
 
+    // XInputGetState of xinput1_4.dll, the XInput of programs of the desktop, loaded by its name (null: none). Linked
+    // through windowsapp.lib, XInputGetState is that of XInputUap.dll, the XInput of store apps, which leaves most presses
+    // unseen while the window is in front and every one while another window is.
+    using GetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+    static GetState xinputGetState() {
+        static const GetState get = [] {
+            const HMODULE m = LoadLibraryW(L"xinput1_4.dll");
+            return m ? reinterpret_cast<GetState>(reinterpret_cast<void*>(GetProcAddress(m, "XInputGetState"))) : nullptr;
+        }();
+        return get;
+    }
     static bool readXInput(DWORD index, uint64_t& bits) {
         XINPUT_STATE s{};
-        if (XInputGetState(index, &s) != ERROR_SUCCESS) return false;
+        const GetState get = xinputGetState();
+        if (!get || get(index, &s) != ERROR_SUCCESS) return false;
         const WORD b = s.Gamepad.wButtons;
         static const WORD order[10] = {XINPUT_GAMEPAD_A,             XINPUT_GAMEPAD_B,              XINPUT_GAMEPAD_X,    XINPUT_GAMEPAD_Y,
                                        XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_START,
@@ -223,6 +235,20 @@ public:
 #ifdef JURAIC_PADS_SDL
         for (auto& [id, g] : sdlPads) state.push_back(readGamepad(g)), xbox.push_back(true), bySdl.push_back(true);
 #endif
+    }
+    // The file of the library XInput is read through, in lower case (empty: none).
+    static std::wstring xinputLibrary() {
+        HMODULE m = nullptr;
+        wchar_t path[MAX_PATH] = L"";
+        if (!xinputGetState() ||
+            !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(reinterpret_cast<void*>(xinputGetState())), &m) ||
+            !GetModuleFileNameW(m, path, MAX_PATH))
+            return L"";
+        std::wstring name = path;
+        name = name.substr(name.find_last_of(L"\\/") + 1);
+        for (wchar_t& c : name) c = wchar_t(towlower(c));
+        return name;
     }
     int count() const { return int(state.size()); }
     uint64_t raw(int index) const { return index >= 0 && index < count() ? state[size_t(index)] : 0; }

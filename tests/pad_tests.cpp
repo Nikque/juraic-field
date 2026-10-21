@@ -48,6 +48,11 @@ int main(int argc, char** argv) {
     // (SDL would set the timer of Windows to 1 ms for the whole program: the game's timing stays as it was)
     check(is(hint(SDL_HINT_TIMER_RESOLUTION), "0"), "the timer resolution of Windows is left alone");
 
+    // XInput is read through xinput1_4.dll, the XInput of programs of the desktop. (Through windowsapp.lib XInputGetState
+    // was that of XInputUap.dll, the XInput of store apps: a virtual Xbox 360 pad's button held 120 ms was seen 5 times
+    // of 40 with the window in front and never with another window in front; through xinput1_4.dll 40 times of 40.)
+    check(Pads::xinputLibrary() == L"xinput1_4.dll", "XInput is read through xinput1_4.dll");
+
     // A raw controller of Windows is read unless SDL reads the same kind of pad.
     const std::vector<Pads::Id> bySdl = {{0x057E, 0x2009}, {0x054C, 0x09CC}};
     check(!Pads::rawWanted(0x057E, 0x2009, bySdl), "a Pro Controller read by SDL is not read raw");

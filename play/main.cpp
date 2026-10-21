@@ -50,6 +50,9 @@
 #include "view.h"
 #ifdef _WIN32
 #include "realgame_win.h"
+#if JURAIC_REALGAME_DEBUG
+#include "stall_win.h"
+#endif
 #endif
 #include <chrono>
 #include <map>
@@ -724,7 +727,7 @@ struct App {
         if (change && m.change(change)) {
             if (heard) audio.play(SND_ROTATE);
             // (the AI plays as soon as the window is read: changed now, it plays so from its next pair on)
-            if ((m.row == RealGameMode::ROW_STYLE || m.row == RealGameMode::ROW_LEVEL || m.row == RealGameMode::ROW_HIGH) && m.playing) startRealGameAI();
+            if ((m.row == RealGameMode::ROW_STYLE || m.row == RealGameMode::ROW_LEVEL) && m.playing) startRealGameAI();
         }
         const bool ok = nav(NAV_OK); // (read once in a frame: a key is down in it only the first time it is asked)
         if (ok && m.row == RealGameMode::ROW_READ) {
@@ -1545,10 +1548,10 @@ struct App {
         const RealGameMode::Hold hold(m.state); // (the thread of the play changes what is shown)
         gfx.text(L"実機の 2P を Juraic が操作", 0, 30, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         const unsigned tint = levelColor(m.level);
-        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", L"13 段目を通る動き", m.reading == RealGameMode::Reading::Off ? L"読み始める" : L"読むのを止める",
+        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル", m.reading == RealGameMode::Reading::Off ? L"読み始める" : L"読むのを止める",
                                                        m.playing ? L"2P の操作を止める" : L"2P を操作する",
                                                        m.pressing() ? L"押すのを止める" : L"2P のボタンを押す", L"戻る"};
-        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level), m.keepLow ? L"使わない" : L"使う",
+        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level),
                                                          m.reading == RealGameMode::Reading::On ? L"読んでいます" : m.reading == RealGameMode::Reading::Choosing ? L"窓を選んでいます" : L"",
                                                          m.playing ? L"操作しています" : L"",
                                                          m.pressing() ? (m.pressSeconds() ? L"あと " + std::to_wstring(m.pressSeconds()) + L" 秒で " : std::wstring(L"今 ")) +
@@ -1556,7 +1559,7 @@ struct App {
                                                                       : L"5 秒後に " + std::wstring(RealGameMode::PRESS_BUTTON_NAMES[m.pressButton]) + L" を 1 回",
                                                          L""};
         for (int i = 0; i < RealGameMode::ROWS; ++i) {
-            const float y = 88 + float(i) * 34;
+            const float y = 88 + float(i) * 38;
             const bool on = i == m.row;
             if (on) gfx.round(rectF(40, y - 4, 640, y + 34), 8, rgb(84, 104, 190));
             gfx.text(rows[i], 64, y, 260, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
@@ -1639,7 +1642,7 @@ struct App {
         }
         const wchar_t* notes[] = {L"同じ PC の実機のオフラインの 2P 対戦で、2P を Juraic が操作します（1P はあなた。オンラインの対戦では使えません）。",
                                   L"この画面を開くと Juraic が実機の窓を読み始め、2P の欄・キャラクター・操作の種類を選び、対戦が始まると 2P を操作します。",
-                                  L"AI とレベルは開くたびに設定の 2P 側から、13 段目を通る動きは「使わない」から始まります。仮想のパッドには ViGEmBus のドライバーが要ります。"};
+                                  L"AI とレベルは開くたびに設定の 2P 側から始まります。仮想のパッドには ViGEmBus のドライバーが要ります。"};
         for (int i = 0; i < 3; ++i) gfx.text(notes[i], 0, 592 + float(i) * 18, CANVAS_W, 18, 0, rgb(150, 158, 186), 0);
         gfx.text(debug ? L"↑↓ で選ぶ　←→ で変える　Enter で決定　S で今の実機の画面を保存　Esc で戻る" : L"↑↓ で選ぶ　←→ で変える　Enter で決定　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
     }
@@ -2025,13 +2028,13 @@ struct App {
             // The screen of the mode that plays the real game's 2P (updateRealGame). Result 16 when it does not do what
             // it says: it opens with the AI of the 2P side in the settings, on the row of the AI; to the left there - the
             // other AI; down to the row of the level and to the right LEVELS times, a press at a time - round past Lv 36
-            // and back at the level it began with; the settings stay as they were; down to the row of the 13th row, which
-            // opens kept below it, to the right and back. The picture: that row chosen.
+            // and back at the level it began with; the settings stay as they were; down to the row that begins and stops
+            // the reading, and up again. The picture: the row of the level chosen.
             const int style = settings.aiStyle, level = settings.aiLevel;
             realGame.open(style, level);
             bool good = realGame.style == style && realGame.level == level && realGame.row == RealGameMode::ROW_STYLE;
             const auto frame = [&](unsigned held) { selfNav = held, updateRealGame(), selfNavWas = selfNav; };
-            const unsigned right = 1u << NAV_RIGHT, left = 1u << NAV_LEFT, below = 1u << NAV_DOWN;
+            const unsigned right = 1u << NAV_RIGHT, left = 1u << NAV_LEFT, below = 1u << NAV_DOWN, above = 1u << NAV_UP;
             frame(left), frame(0);
             good = good && realGame.style == 1 - style;
             frame(below), frame(0);
@@ -2044,11 +2047,9 @@ struct App {
             frame(right), frame(0), frame(left | right), frame(0);
             good = good && realGame.level == level && settings.aiStyle == style && settings.aiLevel == level && screen == Screen::RealGame;
             frame(below), frame(0);
-            good = good && realGame.row == RealGameMode::ROW_HIGH && realGame.keepLow;
-            frame(right), frame(0);
-            good = good && !realGame.keepLow;
-            frame(left), frame(0);
-            good = good && realGame.keepLow;
+            good = good && realGame.row == RealGameMode::ROW_READ;
+            frame(above), frame(0);
+            good = good && realGame.row == RealGameMode::ROW_LEVEL;
             selfNav = selfNavWas = 0;
             if (!good) result = 16;
             say(good ? L"the screen of the real game's 2P: its rows change as they should" : L"the screen of the real game's 2P: a row is not what it should be");
@@ -2490,6 +2491,29 @@ LRESULT CALLBACK windowProc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(w, m, wp, lp);
 }
+#if JURAIC_REALGAME_DEBUG
+// The screen the window's thread is on, for the file of the stall watch (play/stall_win.h).
+const char* screenName(Screen s) {
+    switch (s) {
+    case Screen::Menu: return "menu";
+    case Screen::Toko: return "toko";
+    case Screen::Versus: return "versus";
+    case Screen::Replay: return "replay";
+    case Screen::Settings: return "settings";
+    case Screen::Bindings: return "bindings";
+    case Screen::NetLobby: return "net lobby";
+    case Screen::Net: return "net";
+    case Screen::ArenaLobby: return "arena lobby";
+    case Screen::Arena: return "arena";
+    case Screen::RealGame: return "real game";
+    }
+    return "?";
+}
+// --stall-test <seconds>: the window's thread stops that long a second after the start (the stall watch tried).
+__declspec(noinline) void stallForTest(int seconds) {
+    for (volatile int left = seconds; left > 0; left = left - 1) Sleep(1000); // (a loop: the call stays on the stack)
+}
+#endif
 #else
 // What the window was told since the last frame (SDL): keys, typed text, the mouse, focus, a dropped file, closing.
 void handleEvents(App& a) {
@@ -2605,7 +2629,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::filesystem::path board, replay;
+    [[maybe_unused]] int stallTest = 0; // (--stall-test, the build with the parts for finding faults)
     for (int i = 1; i + 1 < argc; ++i) {
+#if JURAIC_REALGAME_DEBUG
+        if (std::wstring(argv[i]) == L"--stall-test") stallTest = _wtoi(argv[i + 1]);
+#endif
         if (std::wstring(argv[i]) == L"--board") board = argv[i + 1];
         if (std::wstring(argv[i]) == L"--replay") replay = argv[i + 1];
         if (std::wstring(argv[i]) == L"--check-replay") return checkReplay(argv[i + 1]);
@@ -2642,12 +2670,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     if (!replay.empty()) a.openReplay(replay);
     ShowWindow(a.window, show);
+#if JURAIC_REALGAME_DEBUG
+    static StallWatch stall;
+    stall.start(a.window, a.userDirectory);
+#endif
 
     // Game frames are 1/60 s whatever the display does; drawing waits for the display.
     using Clock = std::chrono::steady_clock;
     const std::chrono::nanoseconds frameTime(1000000000 / FPS);
     Clock::time_point next = Clock::now();
     for (MSG msg;;) {
+#if JURAIC_REALGAME_DEBUG
+        stall.beat(screenName(a.screen));
+        if (stallTest > 0 && a.uiFrame >= 60) stallForTest(stallTest), stallTest = 0;
+#endif
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 a.net.leave(); // (the other end of a match is told)

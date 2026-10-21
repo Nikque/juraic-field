@@ -56,9 +56,15 @@ if(MSVC)
     target_link_libraries(juraic_field_game PRIVATE vigem_client)
     # The parts of that mode for finding faults (play/realgame_win.h): the record of each reading, a table read from
     # realgame_layout.txt, the key S that saves a picture of the real game, and the counters on the screen of the mode.
+    # With them, the watch over the window's thread (play/stall_win.h): where every thread is when the window stops
+    # answering, named from the PDB built next to the program.
     option(JURAIC_REALGAME_DEBUG "Build the parts of the mode of the real game for finding faults" OFF)
     if(JURAIC_REALGAME_DEBUG)
+        target_sources(juraic_field_game PRIVATE play/stall_win.h)
         target_compile_definitions(juraic_field_game PRIVATE JURAIC_REALGAME_DEBUG=1)
+        target_compile_options(juraic_field_game PRIVATE /Zi)
+        target_link_options(juraic_field_game PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+        target_link_libraries(juraic_field_game PRIVATE dbghelp)
     endif()
     # The pads of Sony and Nintendo are read through SDL 3 (play/pad.h), built as a static library and found by
     # CMAKE_PREFIX_PATH. Without it they are read as raw controllers of Windows, as every pad other than Xbox pads.
