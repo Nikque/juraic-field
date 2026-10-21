@@ -126,6 +126,13 @@ public:
         step = 0;
         reach(o, o.self().pair, target, ~0u);
     }
+    // The pair in play taken up again where it is, after it had been taken as put (play/realgame_drive.h: the game stopped
+    // and went on): a choice begun for the next pair is dropped, and the way to the placement chosen is planned again.
+    void resume(const Observation& o) {
+        finish();
+        revising = false;
+        steer(o);
+    }
     // The placement the pair in play is brought to (-1: none yet).
     int targetPlacement() const { return target; }
 

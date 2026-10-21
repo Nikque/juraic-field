@@ -766,9 +766,19 @@ struct SideTrack {
     Words words;
 };
 
+// The real game as its records show it where they differ from the frame tables of game/timing.h: no turn is taken for 4
+// to 7 frames after a quick turn (of the pairs that turned quickly and were turned again 4 frames after, none was turned
+// - with Timing::quickTurnLock 3 the engine turned them, and 4 of 25 such pairs went where the engine locked them, 12 of 25
+// with 4 to 7 -, and two turned 8 frames after were). The longest of them is taken.
+inline juraic::Timing realGameTiming() {
+    juraic::Timing t;
+    t.quickTurnLock = 7;
+    return t;
+}
+
 class Tracker {
 public:
-    juraic::Timing timing = juraic::DEFAULT_TIMING;
+    juraic::Timing timing = realGameTiming();
     int stillFrames = 2;
     // Both fields empty, with no pair, for this many frames: a new round (the screen before a round shows them so). A
     // reading otherwise for fewer than roundBreak frames in a row does not end the empty time (a light read as a piece).

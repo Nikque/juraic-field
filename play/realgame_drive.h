@@ -157,6 +157,7 @@ public:
             wait(f, now);
             if (blindDue(f, now)) beginBlind(f, now);
         }
+        if (!active && overdue(f)) resume(f, now);
         if (!active) return holdDown(f, now);
         correct(f);
         const int64_t at = now + lag;
@@ -234,7 +235,7 @@ private:
         // A pair read as lying can lift again while earlier buttons arrive. Resume its down button when a clear
         // picture shows it in the air; one such pair was left for 10 frames after a light of 80 frames.
         const bool heldBefore = untilLocked;
-        if (following && side.pairs == pairsSeen && side.inHand && side.clear && side.pair.seen && !pairLying(side.pair, side.under)) untilLocked = true;
+        if (shownInAir(f)) untilLocked = true;
         if (!heldBefore && untilLocked) note(t.frame, "2P pair " + std::to_string(pairsSeen) + " held down again: the screen shows it in the air");
         // So too, the window not moved on since the pair appeared, a pair Follower no longer finds lying, or takes as
         // put with no chain and nothing of it at rest: a clear picture that shows pieces of a colour above the pieces
@@ -305,6 +306,8 @@ private:
     // read just then, the pair let go of it fell on slowly by itself (seen on the real game: 100 frames for one pair).
     bool untilLocked = false;
     int64_t lockedAt = -1; // the frame of the clock the engine locked the pair in (lies)
+    int64_t airSeenAt = -1; // overdue: the last clear picture that showed the pair put in the air,
+    int airHeight = 0;      // ... the half cells of its axis then
     int liftedFor = -1; // the pair held down again as a clear picture showed pieces of a colour in the air after it was put
     int64_t windowReadAt = -1, windowPauseAt = -1; // last stable window, and the bounded release when it became unread
     juraic::Pair standing[2]{};                     // ... the window as it stood then
@@ -612,7 +615,60 @@ private:
         bool turnOnItsWay = false;
         for (int k = 0; k <= lag && !turnOnItsWay; ++k) turnOnItsWay = (padAt(f.tracker.frame - k) & (juraic::BTN_CW | juraic::BTN_CCW)) != 0;
         if (m.lying && m.index == pairsSeen - 1 && !turnOnItsWay && f.tracker.frame >= lockedAt + LOCK_DOWN) return true;
+        // (a clear picture shows the pair in the air: the next pair comes only after it lies, whatever the engine foresees
+        //  - the game stopped for 390 frames, the engine went on and foresaw the next pair, and the pair fell by itself
+        //  for 320 frames on the real game once it went on)
+        if (shownInAir(f)) return false;
         return following && own.phase == juraic::Phase::Next && own.wait <= 2;
+    }
+    // A clear picture shows the pair the engine has put (it still in hand on the screen) in the air.
+    bool shownInAir(const Follower& f) const {
+        const SideTrack& side = f.tracker.side[me];
+        return following && side.pairs == pairsSeen && side.inHand && side.clear && side.pair.seen && !pairLying(side.pair, side.under);
+    }
+    // The game has stopped and gone on (or is far behind the engine for another reason): RESUME_AFTER frames of the clock
+    // after the engine put the pair, two clear pictures in a row - the second no higher than the first - still show it in
+    // the air. (On the real game the round stopped for 390 frames, a pair in play: the engine went on and put it, and the
+    // game's pair was then in the air for 320 frames.) The pictures show a pair locked for a few frames at most: the
+    // lag, the frames a picture is behind.
+    static constexpr int RESUME_AFTER = 30;
+    bool overdue(const Follower& f) {
+        const Tracker& t = f.tracker;
+        if (!shownInAir(f) || t.frame - lockedAt <= RESUME_AFTER) {
+            airSeenAt = -1;
+            return false;
+        }
+        const juraic::PairControl& seen = t.side[me].pair.at;
+        const int height = 2 * seen.y + (seen.upper ? 1 : 0);
+        const bool twice = airSeenAt >= 0 && t.frame - airSeenAt <= 2 && height <= airHeight;
+        if (t.frame != airSeenAt) airSeenAt = t.frame, airHeight = height;
+        return twice;
+    }
+    // ... the engine takes the pair from the last picture, on the field it was begun on, and the way to the placement the
+    // agent chose for it is planned again from there (held down where it was, the pair went down elsewhere than the AI
+    // chose, 6 of 24 pairs in rounds drawn so).
+    void resume(const Follower& f, int64_t now) {
+        const Tracker& t = f.tracker;
+        size_t i = past.size();
+        while (i > 0 && past[i - 1].state.phase != juraic::Phase::Control) --i;
+        if (i == 0) return;
+        juraic::Player again = past[i - 1].state;
+        const juraic::PairControl& seen = t.side[me].pair.at;
+        juraic::PairControl& p = again.pair;
+        p = juraic::PairControl{};
+        p.x = seen.x, p.y = seen.y, p.dir = seen.dir, p.upper = seen.upper;
+        own = again;
+        next = t.frame + 1;
+        shots.clear(); // (not fitted: its engine is not begun as it appeared)
+        airSeenAt = -1;
+        if (auto* placing = placer()) {
+            juraic::ai::Observation o;
+            f.observeAt(me, rules, own, next, o);
+            tellHeld();
+            placing->resume(o);
+        }
+        start(f, now + lag, "2P pair " + std::to_string(pairsSeen) + " taken up again: the engine put it in frame " + std::to_string(lockedAt) + ", the picture shows " +
+                                controlText(seen));
     }
 
     void steer(const Follower& f) {

@@ -195,7 +195,7 @@ private:
         k = k << 4 | p.landings;
         k = k << 6 | p.groundFrames;
         k = k << 5 | p.quickWindow;
-        k = k << 2 | p.quickLock;
+        k = k << 4 | p.quickLock; // (up to 15: Timing::quickTurnLock is 7 for the real game, play/realgame_read.h)
         return k;
     }
 
