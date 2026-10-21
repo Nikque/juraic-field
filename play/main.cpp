@@ -46,6 +46,7 @@
 #include "replay.h"
 #include "session.h"
 #include "settings.h"
+#include "start_beat.h"
 #include "udp.h"
 #include "view.h"
 #ifdef _WIN32
@@ -162,6 +163,7 @@ struct App {
     unsigned tokoHeld = 0; // actions held in the previous frame of toko
     Lever lever[2];        // the directions of each person, when the diagonal is off
     HeldAtStart heldAtStart[2]; // the buttons of each person held as a game began (beginGame)
+    StartBeat startBeat;        // the beat before each round of a match
     Toko toko;
     Versus versus;
     Viewer viewer;
@@ -639,6 +641,12 @@ struct App {
         if (e.allClear) audio.play(SND_ALL_CLEAR);
         if (e.died) audio.play(SND_OVER);
     }
+    // The beat before a round (play/start_beat.h) of a frame `untilSpawn` frames before the first pair appears.
+    void beat(int untilSpawn) {
+        if (untilSpawn < 0) return;
+        const Beat b = startBeat.at(untilSpawn);
+        if (b != Beat::None) audio.play(b == Beat::High ? SND_BEAT_GO : SND_BEAT);
+    }
 
     // ---- one game frame (1/60 s) ----
     void updateMenu() {
@@ -1008,6 +1016,7 @@ struct App {
             for (int i = 0; i < 2; ++i)
                 if (!v.agent[i]) heldAtStart[i].watch(heldButtons(actionsOf(v.device[i], input, pads, focused), upHeld(v.device[i], pads, focused), settings.quickDrop != 0));
             if (--v.timer <= 0) v.state = Versus::Play;
+            beat(v.timer + v.game.round.timing.firstSpawn + 1); // (the frames of the countdown left, then the round's)
             return;
         }
         if (v.state == Versus::RoundEnd) {
@@ -1077,6 +1086,7 @@ struct App {
             buttons[i] = v.agent[i] ? v.agentButtons(i)
                                     : personButtons(i, actionsOf(v.device[i], input, pads, focused), upHeld(v.device[i], pads, focused), settings.quickDrop != 0);
         PlayerEvents e[2];
+        beat(v.game.round.timing.firstSpawn - int(v.game.round.frame));
         v.game.step(buttons, e);
         for (int i = 0; i < 2; ++i) sounds(e[i], v.game.round.player[i]);
         if (v.game.round.state != RoundState::Playing) {
@@ -1214,6 +1224,9 @@ struct App {
         const int device = netDevice[0];
         // (the quick drop of the match, which is the host's: net.settings, not this machine's own)
         const uint8_t buttons = personButtons(net.seat(), actionsOf(device, input, pads, focused), upHeld(device, pads, focused), net.settings.quickDrop != 0);
+        // (the countdown is counted down in tick)
+        if (net.stage == NetPlay::Ready) beat(net.timer + net.link.round.timing.firstSpawn);
+        else if (net.stage == NetPlay::Play) beat(net.link.round.timing.firstSpawn - int(net.link.round.frame));
         net.tick(buttons, [&](int seat, const PlayerEvents& e) { sounds(e, net.link.round.player[seat]); });
         if (net.matchEnded) {
             net.matchEnded = false;
@@ -1298,6 +1311,11 @@ struct App {
         const int device = arenaDevice[0];
         const uint8_t buttons = arena.watcher || !arena.match.on ? uint8_t(0)
                                                                  : personButtons(arena.seat(), actionsOf(device, input, pads, focused), upHeld(device, pads, focused), arena.match.rules.quickDrop);
+        if (!arena.watcher && arena.match.roundOn && !arena.match.roundEnded && arena.match.seat >= 0) {
+            // (the countdown is counted down in tick, and the own seat's frames are played after it)
+            const int first = arena.match.round.link.round.timing.firstSpawn;
+            beat(arena.ready > 0 ? arena.ready + first : first - int(arena.match.round.played(arena.match.seat)));
+        }
         arena.tick(buttons, [&](int seat, const PlayerEvents& e) { sounds(e, arena.match.round.player(seat)); });
     }
     void updateViewer() {

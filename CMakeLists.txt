@@ -46,7 +46,7 @@ endif()
 
 if(MSVC)
     # The playable game (Direct2D, XAudio2). One self-contained executable.
-    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_capture_win.h play/realgame_pad_win.h play/realgame_log.h play/realgame_menu.h game/link.h)
+    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_capture_win.h play/realgame_pad_win.h play/realgame_log.h play/realgame_menu.h play/start_beat.h game/link.h)
     set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
     target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32 d3d11 dxgi dwmapi)
     # The pad the mode of the real game presses 2P with: the client of the driver ViGEmBus (third_party/ViGEmClient, MIT).
@@ -90,7 +90,7 @@ elseif(ANDROID)
     add_subdirectory("${JURAIC_SDL_SOURCE}" sdl)
     add_library(juraic_field_game SHARED play/main.cpp play/third_party_impl.cpp play/session.h play/view.h play/view_state.h play/canvas.h
                 play/gfx.h play/gfx_soft.h play/raster.h play/platform_sdl.h play/pad_sdl.h play/keys.h play/keyboard.h play/audio.h
-                play/media.h play/settings.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h game/link.h)
+                play/media.h play/settings.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/start_beat.h game/link.h)
     set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME main)
     target_link_libraries(juraic_field_game PRIVATE juraic_engine SDL3::SDL3)
 else()
@@ -100,7 +100,7 @@ else()
     if(SDL3_FOUND)
         add_executable(juraic_field_game play/main.cpp play/third_party_impl.cpp play/session.h play/view.h play/view_state.h play/canvas.h
                        play/gfx.h play/gfx_soft.h play/raster.h play/platform_sdl.h play/pad_sdl.h play/keys.h play/keyboard.h play/audio.h
-                       play/media.h play/settings.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h game/link.h)
+                       play/media.h play/settings.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/start_beat.h game/link.h)
         set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
         target_link_libraries(juraic_field_game PRIVATE juraic_engine SDL3::SDL3)
         if(APPLE)
@@ -161,7 +161,7 @@ if(BUILD_TESTING)
     add_test(NAME game_rules COMMAND game_tests "${CMAKE_CURRENT_BINARY_DIR}/game-test.log")
     # Frame-by-frame game: measured frame tables, agreement with the move level,
     # and what the controller can reach.
-    add_executable(frame_tests tests/frame_tests.cpp)
+    add_executable(frame_tests tests/frame_tests.cpp play/start_beat.h)
     add_test(NAME game_frames COMMAND frame_tests)
     add_executable(link_tests tests/link_tests.cpp game/link.h)
     add_test(NAME game_linked_rounds COMMAND link_tests)
