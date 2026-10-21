@@ -9,7 +9,8 @@
 // notice changes what it shows).
 //
 // The 13th and 14th rows are not on the screen (it shows twelve): their pieces are those the placements followed put
-// there - in the 13th row where the screen shows the column twelve high, in the 14th always (they never move).
+// there - in the 13th row where the screen shows the column twelve high, in the 14th always (they never move) - and
+// garbage that fell into the 13th row of a column twelve high as far as the screen tells (withGarbage).
 //
 // What the screen does not tell: the points of the down key (a point a row, which count towards garbage), so the
 // garbage a chain sends is reckoned short by a little at times (Follower::slack).
@@ -34,6 +35,7 @@ struct SideModel {
     juraic::GameField with;   // ... and it put there
     int sends = 0;            // the garbage its chain would send
     int inAir = 0;            // clear readings in a row with one piece more at rest and a piece of a colour in the air
+    uint8_t unsure = 0;       // columns read twelve high whose 13th row is a guess (garbage that may have fallen there)
 };
 
 class Follower {
@@ -87,8 +89,14 @@ public:
                     ++checks;
                     if (!fits(withHidden(t.under, m.core.field), m.core.field)) ++misses;
                 }
-                // (the 13th and 14th rows are not on the screen: their pieces, put there by the moves followed, stay)
-                m.core.field = withHidden(t.under, m.core.field);
+                // (the 13th and 14th rows are not on the screen: their pieces, put there by the moves followed, stay; and
+                //  garbage the screen shows fallen since may have reached the 13th row of a column read twelve high)
+                const juraic::GameField was = m.core.field;
+                m.core.field = withHidden(t.under, was);
+                if (m.known && t.under.f.count() > shown(was).f.count() && fits(m.core.field, was))
+                    m.core.field = withGarbage(t.under, was, rules.maxGarbagePerDrop / juraic::W, m.unsure);
+                else
+                    m.unsure &= twelveHigh(t.under);
                 m.known = true;
                 // (its chain has ended: what it sent is in the notice of the other side)
                 model[1 - s].budget = 0;
@@ -162,6 +170,40 @@ public:
             for (int y = h[x]; y < r[x]; ++y)
                 if (read.f.get(x, y) != juraic::GARBAGE) return false;
         return true;
+    }
+    // The columns of `read` twelve high.
+    static uint8_t twelveHigh(const juraic::GameField& read) {
+        int h[juraic::W];
+        read.heights(h);
+        uint8_t columns = 0;
+        for (int x = 0; x < juraic::W; ++x)
+            if (h[x] == 12) columns |= uint8_t(1u << x);
+        return columns;
+    }
+    // `read` over `before` with garbage fallen on it since (fits): withHidden, and in the 13th row of a column read twelve
+    // high the garbage that reached it as far as the screen tells. Garbage falls as many pieces on every column, the rest
+    // one each on as many others (game/turn.h dropGarbage; `most`: the most on every column, Rules::maxGarbagePerDrop / W),
+    // up to the 13th row: a column not read twelve high shows how many fell on it, as many as on every column or one more.
+    // `unsure`: the columns read twelve high whose 13th row is a guess (garbage when as many as every column took can
+    // have reached it).
+    static juraic::GameField withGarbage(const juraic::GameField& read, const juraic::GameField& before, int most, uint8_t& unsure) {
+        juraic::GameField g = withHidden(read, before);
+        unsure &= twelveHigh(read);
+        int was[juraic::W], now[juraic::W];
+        before.heights(was);
+        read.heights(now);
+        int lo = 0, hi = most; // the pieces every column took
+        for (int x = 0; x < juraic::W; ++x)
+            if (now[x] < 12) lo = std::max(lo, now[x] - was[x] - 1), hi = std::min(hi, now[x] - was[x]);
+        if (lo > hi) return g; // (not garbage as the game lets it fall)
+        for (int x = 0; x < juraic::W; ++x) {
+            if (now[x] != 12 || was[x] > 12 || g.f.get(x, 12) != juraic::EMPTY) continue;
+            const int need = 13 - was[x]; // (the pieces that put one into the 13th row)
+            if (hi >= need) g.f.set(x, 12, juraic::GARBAGE);
+            if (lo < need && hi + 1 >= need) unsure |= uint8_t(1u << x);
+            else unsure &= uint8_t(~(1u << x));
+        }
+        return g;
     }
 
 private:

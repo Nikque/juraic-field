@@ -135,6 +135,11 @@ public:
         return g;
     }
 
+    // The columns whose 13th or 14th row the pair in play was begun with is not sure of (shareHidden), and the field it
+    // was begun with.
+    uint8_t unsureColumns() const { return unsure; }
+    const juraic::GameField& begunField() const { return startOwn.field; }
+
     // The placement the pair in play is brought to (-1: none).
     int target() const {
         const auto* placing = placer();
@@ -183,7 +188,7 @@ private:
         windowReadAt = windowPauseAt = -1;
         own = juraic::Player{};
         past.clear();
-        round = t.rounds, pairsSeen = 0, blindFor = -1, shiftBegun = -1;
+        round = t.rounds, pairsSeen = 0, blindFor = -1, shiftBegun = -1, unsure = 0;
         agent->startRound(me, seed++);
         stop();
         shots.clear(); // (a pair of the round before is not fitted: its pictures may be cut short)
@@ -285,6 +290,8 @@ private:
     juraic::Player own;
     juraic::Tsumo tsumo;
     int64_t next = 0; // the frame of the game the engine plays next
+    uint8_t unsure = 0; // shareHidden: the columns whose 13th or 14th row the pair in play was begun with is not sure of
+    juraic::GameField unsureRows; // ... and the twelve rows it was begun with
     std::deque<Past> past;
     bool active = false;
     uint8_t held = 0;
@@ -435,6 +442,33 @@ private:
         }
     }
 
+    // The engine begins pair `pair` with the 13th and 14th rows the AI is shown (Follower::withHidden: those Follower
+    // made out, and the engine's own in the 13th row where Follower has none there), not those the engine made by
+    // putting the pairs, which knows of no garbage: in rounds drawn as the real game, of the pieces in those rows one of
+    // them had where the other had none, the engine was right in 49 of 233, Follower in 184. The columns where they
+    // differ, those Follower guessed garbage in (SideModel::unsure) and `guessed` are not sure (unsureColumns), and stay
+    // so while their twelve rows stay as they were (begun with the same rows, the engine no longer differs there).
+    void shareHidden(const Follower& f, int pair, uint8_t guessed) {
+        const SideModel& m = f.model[me];
+        const juraic::GameField shownNow = Follower::shown(own.field);
+        uint8_t kept = 0;
+        for (int x = 0; x < juraic::W; ++x)
+            if ((unsure >> x & 1) && shownNow.f.occupied().column(x) == unsureRows.f.occupied().column(x)) kept |= uint8_t(1u << x);
+        unsure = uint8_t(guessed | (kept & Follower::twelveHigh(shownNow)));
+        unsureRows = shownNow;
+        if (!m.known) return;
+        const juraic::GameField& made = m.core.field;
+        const uint8_t both = uint8_t(Follower::twelveHigh(Follower::shown(own.field)) & Follower::twelveHigh(Follower::shown(made)));
+        for (int x = 0; x < juraic::W; ++x)
+            if ((both >> x & 1) && (own.field.f.get(x, 12) != made.f.get(x, 12) || own.field.row14[size_t(x)] != made.row14[size_t(x)])) unsure |= uint8_t(1u << x);
+        unsure |= uint8_t(m.unsure & Follower::twelveHigh(Follower::shown(own.field)));
+        own.field = Follower::withHidden(own.field, made);
+        if (!unsure) return;
+        std::string columns;
+        for (int x = 0; x < juraic::W; ++x)
+            if (unsure >> x & 1) columns += " " + std::to_string(x + 1);
+        note(f.tracker.frame, "2P pair " + std::to_string(pair) + ": the 13th and 14th rows not sure over columns" + columns);
+    }
     // A new own pair was seen: the engine takes the side as it was then (the pair about to appear), with the pairs
     // the screen has shown.
     void begin(const Follower& f, const SideTrack& side) {
@@ -446,6 +480,7 @@ private:
         own = juraic::Player{};
         own.field = f.model[me].known ? f.model[me].core.field : side.under; // (with the 13th and 14th rows the moves followed put there)
         if (sameRound) own.field = hiddenFromEngine(own.field, engine);
+        shareHidden(f, side.pairs, 0);
         own.phase = juraic::Phase::Next;
         own.wait = 1;
         own.nextPair = own.moves = side.pairs - 1;
@@ -510,15 +545,19 @@ private:
         }
         if (own.phase != juraic::Phase::Next) return;
         // (garbage the screen showed come to rest after the pair before: the field as the last clear picture showed it,
-        //  standing, with the engine's 13th and 14th rows where the twelve are the same - begun on the engine's field,
-        //  which knows of no garbage, the pair was planned over a column the garbage had made twelve high and locked
-        //  where it appeared, 3 pairs of 78 in rounds drawn so)
+        //  standing, with the engine's 13th and 14th rows, and garbage in the 13th row of a column read twelve high as
+        //  far as the screen tells - begun on the engine's field, which knows of no garbage, the pair was planned over a
+        //  column the garbage had made twelve high and locked where it appeared, 3 pairs of 78 in rounds drawn so; with
+        //  the 13th row as the engine had it, over a column the garbage had made thirteen high, and went two columns
+        //  short)
         const SideTrack& side = t.side[me];
         const juraic::GameField engineShown = Follower::shown(own.field);
+        uint8_t guessed = 0;
         if (side.loose == 0 && !(side.resting == engineShown) && Follower::fits(side.resting, engineShown)) {
-            own.field = hiddenFromEngine(side.resting, own.field);
+            own.field = Follower::withGarbage(side.resting, own.field, rules.maxGarbagePerDrop / juraic::W, guessed);
             note(t.frame, "2P pair " + std::to_string(side.pairs + side.unseen + 1) + ": the field with the garbage the screen showed");
         }
+        shareHidden(f, side.pairs + side.unseen + 1, guessed);
         // (the colours learnt since the last pair begun: from the third pair begun unseen in a row on, the engine had
         //  none, put pairs of no colour, and its field stayed lower than the game's)
         learnPairs(t);

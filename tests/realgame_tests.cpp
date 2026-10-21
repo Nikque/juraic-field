@@ -1010,6 +1010,44 @@ static void testRow13Kept() {
     std::cout << "a pair put with a piece in the 13th row, which the screen does not show, is found and the piece kept\n";
 }
 
+// Garbage that falls on a column twelve high goes into its 13th row, which the screen does not show (on rounds drawn as
+// the real game, a pair begun over such a column was planned as if the 13th row were empty and locked two columns
+// short). Fields with columns twelve high and garbage let fall as the game lets it (dropGarbage): the 13th rows
+// Follower::withGarbage tells for certain are those of the game, and its guesses are counted.
+static void testGarbageIntoRow13() {
+    Rng rng(20261022, 3);
+    const Rules rules;
+    const int most = rules.maxGarbagePerDrop / W;
+    long told = 0, guessed = 0, guessedRight = 0, filled = 0;
+    for (int i = 0; i < 20000; ++i) {
+        GameField before;
+        for (int x = 0; x < W; ++x) addGarbage(before, x, rng.below(3) ? 12 - int(rng.below(3)) : int(rng.below(12)));
+        GameField after = before;
+        Incoming in{0, 1 + int(rng.below(30))};
+        Rng fall(uint64_t(i), 5);
+        int placed[W];
+        dropGarbage(after, in, rules, fall, placed);
+        const GameField read = Follower::shown(after);
+        if (!(read.f.count() > Follower::shown(before).f.count()) || !Follower::fits(read, Follower::shown(before))) continue;
+        uint8_t unsure = 0;
+        const GameField g = Follower::withGarbage(read, before, most, unsure);
+        for (int x = 0; x < W; ++x) {
+            if (!(Follower::twelveHigh(read) >> x & 1) || before.f.get(x, 12) != EMPTY) continue;
+            const bool game = after.f.get(x, 12) != EMPTY, made = g.f.get(x, 12) != EMPTY;
+            filled += game;
+            if (unsure >> x & 1) {
+                ++guessed, guessedRight += game == made;
+                continue;
+            }
+            ++told;
+            check(game == made, "garbage in the 13th row told for certain otherwise than it fell (field " + std::to_string(i) + ", column " + std::to_string(x + 1) + ")");
+        }
+    }
+    check(told > 0 && guessed > 0 && guessedRight * 10 >= guessed * 7, "garbage into the 13th row: " + std::to_string(guessedRight) + " of " + std::to_string(guessed) + " guesses right");
+    std::cout << "garbage into the 13th row of a column twelve high (" << filled << " of " << told + guessed << " columns): " << told << " told for certain, "
+              << guessedRight << " of " << guessed << " guesses right\n";
+}
+
 // A pair lying with both pieces shown, then one picture of it with a piece missing (a piece that moves drawn over it,
 // as in a lock or the first picture of a chain), where a placement with the other piece in the 13th row of a column
 // twelve high fits too: the pair is still where it lay, and nothing is put in the 13th row. The same picture read in
@@ -1342,6 +1380,10 @@ struct DriveCounts {
     // Turns of 2P the round took up to realGameTiming().quickTurnLock frames after a quick turn of its pair (frames in which
     // the driver's engine takes no turn), and the pairs with such a turn
     long quickEarly = 0, quickEarlyPairs = 0;
+    // The pieces in the 13th and 14th rows of 2P as each pair was begun, of the columns whose twelve rows the driver had as
+    // the round: in the round or in the driver's field, of them otherwise in the driver's, and of those over columns it
+    // was not sure of (Driver::unsureColumns)
+    long hiddenCells = 0, hiddenWrong = 0, hiddenWrongUnsure = 0;
 };
 
 // How a round of this program is drawn, read and played (driveRound): its 2P played by the AI through the screen and a
@@ -1586,7 +1628,19 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             if (clock - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
         }
-        if (d.played != played) played = d.played, target = -1, begunAt = clock;
+        if (d.played != played) {
+            played = d.played, target = -1, begunAt = clock;
+            const GameField &begun = d.begunField(), &game = r.player[1].field;
+            for (int x = 0; x < W; ++x) {
+                if (Follower::shown(begun).f.occupied().column(x) != Follower::shown(game).f.occupied().column(x)) continue;
+                for (const bool row14 : {false, true}) {
+                    const bool there = row14 ? game.row14[size_t(x)] != EMPTY : game.f.get(x, 12) != EMPTY;
+                    const bool had = row14 ? begun.row14[size_t(x)] != EMPTY : begun.f.get(x, 12) != EMPTY;
+                    if (!there && !had) continue;
+                    n.hiddenCells += 1, n.hiddenWrong += there != had, n.hiddenWrongUnsure += there != had && (d.unsureColumns() >> x & 1);
+                }
+            }
+        }
         if (d.target() >= 0) target = d.target();
         // The next frame of the round takes what was sent `lag` frames before it (a shaky pad: now and then a frame
         // sooner or later).
@@ -1933,7 +1987,11 @@ static void keepLowIn(ai::Agent* agent) {
 // held down, 3 or 4 of 78 or 79 in rounds drawn otherwise.) A pair begun unseen after garbage the screen showed come to
 // rest is planned on the field the screen showed: begun on the engine's field, which knows of no garbage, the last pair
 // of a round, kept below the 13th row (keepLowIn), was planned over a column the garbage had made twelve high and
-// locked where it appeared (2 or 3 such pairs in the rounds drawn otherwise).
+// locked where it appeared (2 or 3 such pairs in the rounds drawn otherwise). The garbage that fell on a column twelve
+// high went into its 13th row, which the screen does not show: the pairs are begun with it as far as the screen tells
+// (Follower::withGarbage), and with the 13th and 14th rows the AI is shown (Driver::shareHidden). (Begun with the
+// engine's 13th and 14th rows, 30 of 47 pieces there were otherwise than in the rounds; Follower had 14 otherwise, 11 of
+// them garbage; and a pair kept below the 13th row went two columns short.)
 static void testUnseenPairsUnderGarbage() {
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
@@ -1949,12 +2007,14 @@ static void testUnseenPairsUnderGarbage() {
             }
     const auto counts = [](const DriveCounts& c) {
         return std::to_string(c.hits) + " of " + std::to_string(c.locks) + " where the AI chose (" + std::to_string(c.garbageMisses) + " elsewhere after garbage, " +
-               std::to_string(c.unseenGarbageMisses) + " of them after garbage the screen did not show), left alone " + std::to_string(c.leftAlone);
+               std::to_string(c.unseenGarbageMisses) + " of them after garbage the screen did not show), left alone " + std::to_string(c.leftAlone) + ", the 13th and 14th rows " +
+               std::to_string(c.hiddenWrong) + " pieces of " + std::to_string(c.hiddenCells) + " otherwise (" + std::to_string(c.hiddenWrongUnsure) + " of them not sure)";
     };
     // (planned on the engine's field, 3 of 78 and 4 of 70 pairs - kept below the 13th row - went elsewhere)
     check(n.locks >= 60 && (n.locks - n.hits) * 100 <= n.locks * 4 && n.leftAlone == 0, "with garbage before pairs begun unseen, " + counts(n));
     check(low.locks >= 60 && (low.locks - low.hits) * 100 <= low.locks * 4 && low.leftAlone == 0,
           "with garbage before pairs begun unseen, the pairs kept below the 13th row, " + counts(low));
+    check((n.hiddenWrong + low.hiddenWrong) * 4 <= n.hiddenCells + low.hiddenCells, "with garbage before pairs begun unseen, the 13th and 14th rows: " + counts(n) + "; " + counts(low));
     std::cout << "garbage before pairs begun unseen: " << counts(n) << "; kept below the 13th row " << counts(low) << "\n";
 }
 
@@ -2482,7 +2542,10 @@ static void testKeepsLow() {
 }
 
 // The AI of the mode as the mode plays it (Driver::prepare alone) takes its pairs through the 13th row as the AI of a match
-// does: the same rounds as testKeepsLow, pairs taken up there, none left alone.
+// does: the same rounds as testKeepsLow, pairs taken up there, none left alone. The pairs are begun with the 13th and 14th
+// rows the AI is shown (Driver::shareHidden): with the engine's own, which put the pairs, of the 251 to 325 pieces there
+// in the 18 rounds of testTurnAfterQuickTurn with no turn for 3 frames (the noise of four streams), 13 to 34 were
+// otherwise than in the round; Follower, whose rows the AI is shown, had 6 to 13 otherwise.
 static void testModeUsesThirteenthRow() {
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
@@ -2495,8 +2558,11 @@ static void testModeUsesThirteenthRow() {
         driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
     }
     const std::string counts = std::to_string(n.highPairs) + " pairs taken up into the 13th row; " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
-                               " pairs where the AI chose, " + std::to_string(n.leftAlone) + " left alone";
-    check(!kept && n.locks >= 150 && n.highPairs > 0 && n.leftAlone == 0, "the AI of the mode, the 13th row used: " + counts);
+                               " pairs where the AI chose, " + std::to_string(n.leftAlone) + " left alone; the 13th and 14th rows " + std::to_string(n.hiddenWrong) +
+                               " pieces of " + std::to_string(n.hiddenCells) + " otherwise (" + std::to_string(n.hiddenWrongUnsure) + " of them not sure)";
+    // (with the noise of four streams, 0 to 12 pieces of 87 to 143 otherwise, every one of them over a column not sure)
+    check(!kept && n.locks >= 150 && n.highPairs > 0 && n.leftAlone == 0 && n.hiddenWrong * 5 <= n.hiddenCells && (n.hiddenWrong - n.hiddenWrongUnsure) * 20 <= n.hiddenCells,
+          "the AI of the mode, the 13th row used: " + counts);
     std::cout << "the AI of the mode, the 13th row used: " << counts << "\n";
 }
 
@@ -3429,6 +3495,7 @@ int main(int argc, char** argv) {
         testChainAfterMissedLanding();
         testPairsAfterLight();
         testRow13Kept();
+        testGarbageIntoRow13();
         testLyingPieceHidden();
         testSecondChoiceHeld();
         testDriver();
