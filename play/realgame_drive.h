@@ -100,8 +100,11 @@ public:
     // frames take the buttons of the frame before or after now and then, and a tap of one frame is then lost or runs into
     // the next one (rounds drawn as the real game, a frame sooner or later in one frame of 8: 83.7% of the pairs where
     // the AI chose with taps of one frame, 97.7% with taps of two; 98.4% and 97.8% with no frame sooner or later).
+    // No turn is pressed while a quick turn's lock lasts (PlacementAgent::waitQuickLock): the real game takes turns again
+    // 4 to 7 frames after a quick turn, the engine 8 frames after (realGameTiming), and a turn pressed in between, one the
+    // engine does not take, turned the pair once more on a round that takes turns again sooner.
     static void prepare(juraic::ai::Agent* agent) {
-        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true, placing->tapHold = 2;
+        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true, placing->tapHold = 2, placing->waitQuickLock = true;
     }
 
     // The middle of the lags the pictures of the last pairs fitted best; -1: none yet.

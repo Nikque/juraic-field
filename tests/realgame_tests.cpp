@@ -1339,6 +1339,9 @@ struct DriveCounts {
     // Pairs of 2P turned quickly by buttons sent for them, locked, of them where the AI chose, and of the others those
     // the round was lost with (the last pair locked)
     long quickLocks = 0, quickHits = 0, quickLost = 0;
+    // Turns of 2P the round took up to realGameTiming().quickTurnLock frames after a quick turn of its pair (frames in which
+    // the driver's engine takes no turn), and the pairs with such a turn
+    long quickEarly = 0, quickEarlyPairs = 0;
 };
 
 // How a round of this program is drawn, read and played (driveRound): its 2P played by the AI through the screen and a
@@ -1460,6 +1463,8 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     bool highPair = false; // the pair in play has been taken up into the 13th row
     bool quickPair = false; // ... turned quickly
     bool quickMissed = false; // the last pair of 2P locked was turned quickly and locked elsewhere than the AI chose
+    int sinceQuick = -1;      // frames since the pair of 2P in play last turned quickly (-1: it has not)
+    bool earlyPair = false;   // ... and it took a turn sooner after it than the driver's engine takes one
     int spawnIndex = -1;   // ... its number
     int64_t garbageAt = -1, clearAt = -1, lockedAt = -1; // the frames of the clock garbage last fell on 2P, its last clear picture, its last lock
     bool beginning = false; // the pair in play has taken no button sent for it yet ...
@@ -1652,6 +1657,10 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             n.highUnallowed += !placing || std::find(placing->climbing.begin(), placing->climbing.end(), spawnIndex) == placing->climbing.end();
         }
         if (!leftOver && !e[1].spawned && e[1].control.quickTurned) quickPair = true;
+        if (e[1].spawned) sinceQuick = -1;
+        else if (sinceQuick >= 0 && ++sinceQuick <= realGameTiming().quickTurnLock && e[1].control.rotated) ++n.quickEarly, earlyPair = true;
+        if (!leftOver && !e[1].spawned && e[1].control.quickTurned) sinceQuick = 0;
+        if (e[1].locked) n.quickEarlyPairs += earlyPair, earlyPair = false, sinceQuick = -1;
         if (e[1].locked && quickPair && target >= 0) n.quickLocks += 1, n.quickHits += placementId(r.player[1].pair.placement()) == target;
         if (e[1].locked) quickMissed = quickPair && target >= 0 && placementId(r.player[1].pair.placement()) != target;
         if (e[1].locked) quickPair = false;
@@ -2491,6 +2500,71 @@ static void testModeUsesThirteenthRow() {
     std::cout << "the AI of the mode, the 13th row used: " << counts << "\n";
 }
 
+// A way planned again while a quick turn's lock lasts (a second choice, a pair put right): with the engine's lock of the
+// real game (realGameTiming, 7 frames) a turn pressed in that lock is not taken, and a way may press one before the turn
+// it counts on; the real game, which takes turns again 4 to 7 frames after a quick turn, then turns the pair once more
+// (in the rounds drawn as the real game: a pair to lie on the second column with its child to the right locked with its
+// child up). The AI of the mode (Driver::prepare) presses no turn in the lock: on high fields, from every frame of a way
+// in which a quick turn's lock lasts, the way to every placement locks the pair there with a lock of 3, 4, 5 and 7
+// frames (without it: 731 ways of 51727 pressed a turn in the lock, and 471, 306, 204 and 0 locked elsewhere).
+static void testWaysInQuickTurnLock() {
+    auto agent = ai::makeAgent("x3", ai::Params{});
+    const auto* placing = dynamic_cast<const ai::PlacementAgent*>(agent.get());
+    check(placing && !placing->waitQuickLock, "an AI not given to the driver waits for no lock of a quick turn");
+    Driver::prepare(agent.get());
+    check(placing->waitQuickLock && placing->tapHold == 2, "the AI of the mode presses turns in a quick turn's lock");
+    const Timing seven = realGameTiming();
+    long counted[2][6] = {}; // (without, with) ways, of them pressing a turn in the lock, elsewhere with a lock of 3, 4, 5, 7
+    for (const bool wait : {false, true}) {
+        Rng rng(20261021, 5);
+        ai::InputPlanner planner;
+        planner.tapHold = 2, planner.waitQuickLock = wait;
+        ai::InputPath path, again;
+        long* n = counted[wait];
+        for (int i = 0; i < 1000; ++i) {
+            GameField g;
+            for (int x = 0; x < W; ++x) addGarbage(g, x, rng.below(4) ? 9 + int(rng.below(5)) : int(rng.below(14)));
+            if (g.dead()) continue;
+            const unsigned legal = legalPlacements(g);
+            for (int id = 0; id < PLACEMENTS; ++id) {
+                if (!(legal >> id & 1) || !planner.plan(g, spawnPair(seven), placement(id), seven, 100, path)) continue;
+                PairControl p = spawnPair(seven);
+                for (size_t f = 0; f < path.buttons.size() && !p.locked; ++f) {
+                    stepPair(p, g, path.buttons[f], seven);
+                    if (!p.quickLock || p.locked) continue;
+                    for (int other = 0; other < PLACEMENTS; ++other) {
+                        const Placement target = placement(other);
+                        if (!(legal >> other & 1) || !planner.plan(g, p, target, seven, 100, again)) continue;
+                        ++n[0];
+                        PairControl e = p;
+                        bool early = false;
+                        for (const uint8_t b : again.buttons) early = early || ((b & ~e.held & (BTN_CW | BTN_CCW)) && e.quickLock), stepPair(e, g, b, seven);
+                        n[1] += early;
+                        int k = 2;
+                        for (const int lock : {3, 4, 5, 7}) {
+                            Timing t = seven;
+                            t.quickTurnLock = lock;
+                            PairControl r = p;
+                            r.quickLock = uint8_t(std::max(0, p.quickLock - (seven.quickTurnLock - lock))); // (the same quick turn, a shorter lock)
+                            for (const uint8_t b : again.buttons)
+                                if (!r.locked) stepPair(r, g, b, t);
+                            n[k++] += !(r.locked && r.x == target.x && r.dir == target.dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const auto text = [](const long* n) {
+        return std::to_string(n[1]) + " of " + std::to_string(n[0]) + " ways planned in a quick turn's lock press a turn in it, elsewhere with a lock of 3, 4, 5, 7: " +
+               std::to_string(n[2]) + ", " + std::to_string(n[3]) + ", " + std::to_string(n[4]) + ", " + std::to_string(n[5]);
+    };
+    const long* with = counted[1];
+    check(counted[0][1] > 0 && with[0] == counted[0][0] && with[1] == 0 && with[2] + with[3] + with[4] + with[5] == 0,
+          "the ways of the mode in a quick turn's lock: " + text(with) + " (without waiting: " + text(counted[0]) + ")");
+    std::cout << "the ways of the mode in a quick turn's lock: " << text(with) << " (without waiting: " << text(counted[0]) << ")\n";
+}
+
 // The real game takes no turn for some frames after a quick turn: of the pairs of its records that turned quickly and
 // were turned again 4 frames after, none was turned (the engine's quickTurnLock 3 turned them), and two turned 8 frames
 // after were. The rounds of testModeUsesThirteenthRow and more (in copies of the tests with the noise of other streams
@@ -2511,10 +2585,25 @@ static void testTurnAfterQuickTurn() {
         }
         const std::string counts = "no turn for " + std::to_string(lock) + " frames after a quick turn: " + std::to_string(n.quickHits) + " of " +
                                    std::to_string(n.quickLocks) + " pairs turned quickly (" + std::to_string(n.quickLost) + " of the others the last of a round lost) and " +
-                                   std::to_string(n.hits) + " of " + std::to_string(n.locks) + " in all where the AI chose, " + std::to_string(n.leftAlone) + " left alone";
+                                   std::to_string(n.hits) + " of " + std::to_string(n.locks) + " in all where the AI chose, " + std::to_string(n.leftAlone) + " left alone, " +
+                                   std::to_string(n.quickEarly) + " turns taken in " + std::to_string(n.quickEarlyPairs) + " pairs sooner after a quick turn than the engine takes one";
         check(n.quickLocks >= 5 && (n.quickHits + n.quickLost) * 10 >= n.quickLocks * 9 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 98, counts);
         std::cout << counts << "\n";
     }
+    // A round in which a turn pressed in the engine's lock was taken (a light as one pair in three appears, no turn for 3
+    // frames after a quick turn): the AI of the mode presses none in it (without waiting for the lock, the one pair turned
+    // quickly took such a turn and locked elsewhere than the AI chose, 36 of 37 pairs where it chose). (With the noise of
+    // another stream a pair turned quickly there locked a column short, kicked from a piece in the 13th row of the
+    // engine's field that the round did not have: not counted here.)
+    DriveCounts lit;
+    auto a = ai::makeAgent("x3", narrow);
+    Driver::prepare(a.get());
+    driveRound(121, lit, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = 50, .quickTurnLock = 3});
+    const std::string counts = "lit as pairs appear, no turn for 3 frames after a quick turn: " + std::to_string(lit.quickHits) + " of " + std::to_string(lit.quickLocks) +
+                               " pairs turned quickly and " + std::to_string(lit.hits) + " of " + std::to_string(lit.locks) + " in all where the AI chose, " +
+                               std::to_string(lit.quickEarly) + " turns taken sooner after a quick turn than the engine takes one, " + std::to_string(lit.leftAlone) + " left alone";
+    check(lit.quickLocks > 0 && lit.quickEarly == 0 && lit.leftAlone == 0, counts);
+    std::cout << counts << "\n";
 }
 
 // The driver called twice in a frame of the clock: a tap the first call gave - the last of a way, as the engine locks the
@@ -3371,6 +3460,7 @@ int main(int argc, char** argv) {
         testLiftsShownLate();
         testKeepsLow();
         testModeUsesThirteenthRow();
+        testWaysInQuickTurnLock();
         testTurnAfterQuickTurn();
         testOnePictureOff();
         testTapsNotTakenBack();

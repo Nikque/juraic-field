@@ -103,6 +103,8 @@ public:
     // The ways keep the pairs below the 13th row and turn none quickly (InputPlanner::keepLow), and with pathCheck only
     // placements reached so are chosen - when every one of those fills the 12th row of the third column, any reached.
     bool keepLow = false;
+    // No turn is pressed while a quick turn's lock lasts (InputPlanner::waitQuickLock).
+    bool waitQuickLock = false;
     int64_t climbs = 0;    // pairs for which every placement reached below the 13th row filled it (for tools)
     std::vector<int> climbing; // ... and the pairs whose ways were let go up into the 13th row so, by their number (for tools)
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
@@ -309,6 +311,7 @@ private:
     void tune() {
         planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
         planner.keepLow = keepLow && lowWays;
+        planner.waitQuickLock = waitQuickLock;
     }
     // The placements choose() is offered for the pair `colors` (counted: a first choice, for climbs).
     unsigned offered(const Observation& o, Pair colors, bool counted) {

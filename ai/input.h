@@ -48,6 +48,9 @@ public:
     // No way takes the pair's axis up into the 13th row (a floor kick or a quick turn that lifts it there) nor turns the
     // pair quickly, and no way locks it with its axis there; a pair that is up there already is planned as it may.
     bool keepLow = false;
+    // No turn is pressed while a quick turn's lock lasts (PairControl::quickLock): a game that takes turns again sooner
+    // than Timing::quickTurnLock says does not take a turn the way did not count on.
+    bool waitQuickLock = false;
 
     // `from` is the pair before the first frame of the path (PairControl::held =
     // the buttons of the frame before). For a pair that is about to appear:
@@ -104,6 +107,9 @@ private:
     static constexpr int ROW_13 = 12; // (row index)
     bool low = false; // keepLow for the way being planned
 
+    // waitQuickLock: a turn pressed now would not be taken.
+    bool locked(const PairControl& p) const { return waitQuickLock && p.quickLock; }
+
     // A step that keepLow forbids: a quick turn, or the axis lifted into the 13th row.
     bool tooHigh(const ControlEvents& e, const PairControl& p) const { return low && (e.quickTurned || p.y >= ROW_13); }
 
@@ -136,7 +142,7 @@ private:
         for (int frame = 1; frame <= MAX_FRAMES; ++frame) {
             uint8_t b = BTN_DOWN;
             const uint8_t turn = turnButton(p.dir, target.dir);
-            if (turn && !(p.held & turn)) b |= turn;
+            if (turn && !(p.held & turn) && !locked(p)) b |= turn;
             const uint8_t side = p.x < target.x ? BTN_RIGHT : p.x > target.x ? BTN_LEFT : 0;
             if (side && !(p.held & side)) b |= side;
             const ControlEvents e = stepPair(p, field, b, timing, speedPercent);
@@ -163,7 +169,7 @@ private:
             for (int k = 0; k < 2; ++k) {
                 if (p.held & KIND[k]) {
                     if (on[k] < tapHold) b |= uint8_t(p.held & KIND[k]);
-                } else if (want[k] && off[k] >= tapHold && !(k == 1 && (b & ~p.held & KIND[0]))) {
+                } else if (want[k] && off[k] >= tapHold && !(k == 1 && (b & ~p.held & KIND[0])) && !(k == 0 && locked(p))) {
                     // (a move does not begin in the frame a turn begins: which the game does first is not known)
                     b |= want[k];
                 }
@@ -258,6 +264,7 @@ private:
             for (uint8_t macro = 0; macro <= WAIT; ++macro) {
                 // (taps held: no turn and move together - which of them the game does first in a frame is not known)
                 if (tapHold > 1 && macro >= 4 && macro < WAIT) continue;
+                if (macro != WAIT && (TAPS[macro] & (BTN_CW | BTN_CCW)) && locked(nodes[size_t(parent)].pair)) continue;
                 Node n{nodes[size_t(parent)].pair, parent, nodes[size_t(parent)].frames, macro};
                 bool high = false;
                 if (macro != WAIT)
