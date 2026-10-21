@@ -1,10 +1,12 @@
 #pragma once
 // The watch over the window's thread, in the build with the parts for finding faults (JURAIC_REALGAME_DEBUG): when no
-// frame has been played for QUIET_MS and the window does not answer within ANSWER_MS (Windows would call it not
-// responding), where every thread of the program is is written to hang\<date and time>.txt in the folder of one's own
-// files - the module, the function and the line of each frame of its stack, the names from the program's PDB next to
-// it. While the stall lasts it is written again every AGAIN_MS, SAMPLES times at most, and the time the window answered
-// again is added. Windows x64 only.
+// frame has been played for QUIET_MS, where every thread of the program is is written to hang\<date and time>.txt in the
+// folder of one's own files - the module, the function and the line of each frame of its stack, the names from the
+// program's PDB next to it -, with whether the window answers a message sent to it within ANSWER_MS and whether Windows
+// calls it not responding. (A thread waiting in a call of COM answers the messages sent to its windows and takes no
+// input: not responding to Windows all the same. Moving the window by its title stops the frames too.) While the stall
+// lasts it is written again every AGAIN_MS, SAMPLES times at most, and the time the frames went on is added. Windows x64
+// only.
 #include <windows.h>
 #include <dbghelp.h>
 #include <tlhelp32.h>
@@ -22,7 +24,7 @@ namespace play {
 
 class StallWatch {
 public:
-    static constexpr int QUIET_MS = 2000, ANSWER_MS = 1000, AGAIN_MS = 5000, SAMPLES = 6;
+    static constexpr int QUIET_MS = 3000, ANSWER_MS = 500, AGAIN_MS = 5000, SAMPLES = 6;
     static constexpr int FRAMES = 48;   // frames of a stack written
     static constexpr int THREADS = 256; // threads written at most
 
@@ -80,13 +82,14 @@ private:
             Sleep(250);
             const int64_t now = clock(), quiet = now - last;
             if (quiet < QUIET_MS) {
-                if (!file.empty()) write(file, "the window answered again after " + std::to_string((now - began) / 1000.0) + " s\n");
+                if (!file.empty()) write(file, "the frames went on again after " + std::to_string((now - began) / 1000.0) + " s\n");
                 file.clear(), samples = 0;
                 continue;
             }
             if (!file.empty() && (samples >= SAMPLES || now - sampled < AGAIN_MS)) continue;
             DWORD_PTR answer = 0;
-            if (SendMessageTimeoutW(watched, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, ANSWER_MS, &answer)) continue; // (a dialog, the window moved: it answers)
+            const bool answers = SendMessageTimeoutW(watched, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, ANSWER_MS, &answer) != 0;
+            const bool hung = IsHungAppWindow(watched) != FALSE;
             if (file.empty()) {
                 began = now - quiet;
                 std::error_code ignored;
@@ -95,8 +98,9 @@ private:
             }
             sampled = clock(), ++samples;
             const int count = take(stacks);
-            std::string text = "== " + narrow(stamp(false)) + ": no frame for " + std::to_string(quiet) + " ms, the window does not answer (screen " + shown.load() +
-                               ", sample " + std::to_string(samples) + ")\n";
+            std::string text = "== " + narrow(stamp(false)) + ": no frame for " + std::to_string(quiet) + " ms, the window " +
+                               (answers ? "answers a message sent to it" : "does not answer") + (hung ? ", not responding to Windows" : "") + " (screen " +
+                               shown.load() + ", sample " + std::to_string(samples) + ")\n";
             for (int k = 0; k < count; ++k) text += describe(me, stacks[size_t(k)], symbols);
             write(file, text);
         }

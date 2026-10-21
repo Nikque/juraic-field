@@ -2510,8 +2510,19 @@ const char* screenName(Screen s) {
     return "?";
 }
 // --stall-test <seconds>: the window's thread stops that long a second after the start (the stall watch tried).
-__declspec(noinline) void stallForTest(int seconds) {
-    for (volatile int left = seconds; left > 0; left = left - 1) Sleep(1000); // (a loop: the call stays on the stack)
+// --stall-test-answering <seconds>: the same, the messages sent to the window answered meanwhile, as a call of COM waits
+// (Windows calls the window not responding all the same: its input is not taken).
+__declspec(noinline) void stallForTest(int seconds, bool answering) {
+    const ULONGLONG end = GetTickCount64() + ULONGLONG(seconds) * 1000;
+    for (volatile ULONGLONG now = GetTickCount64(); now < end; now = GetTickCount64()) { // (a loop: the call stays on the stack)
+        if (!answering) {
+            Sleep(100);
+            continue;
+        }
+        MsgWaitForMultipleObjectsEx(0, nullptr, 100, QS_SENDMESSAGE, 0);
+        MSG m;
+        PeekMessageW(&m, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE); // (calls the window for the messages sent to it)
+    }
 }
 #endif
 #else
@@ -2630,9 +2641,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::filesystem::path board, replay;
     [[maybe_unused]] int stallTest = 0; // (--stall-test, the build with the parts for finding faults)
+    [[maybe_unused]] bool stallAnswering = false;
     for (int i = 1; i + 1 < argc; ++i) {
 #if JURAIC_REALGAME_DEBUG
-        if (std::wstring(argv[i]) == L"--stall-test") stallTest = _wtoi(argv[i + 1]);
+        if (std::wstring(argv[i]) == L"--stall-test" || std::wstring(argv[i]) == L"--stall-test-answering")
+            stallTest = _wtoi(argv[i + 1]), stallAnswering = std::wstring(argv[i]) == L"--stall-test-answering";
 #endif
         if (std::wstring(argv[i]) == L"--board") board = argv[i + 1];
         if (std::wstring(argv[i]) == L"--replay") replay = argv[i + 1];
@@ -2682,7 +2695,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     for (MSG msg;;) {
 #if JURAIC_REALGAME_DEBUG
         stall.beat(screenName(a.screen));
-        if (stallTest > 0 && a.uiFrame >= 60) stallForTest(stallTest), stallTest = 0;
+        if (stallTest > 0 && a.uiFrame >= 60) stallForTest(stallTest, stallAnswering), stallTest = 0;
 #endif
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
