@@ -1867,13 +1867,19 @@ static void testUnseenPairsInARow() {
     std::cout << "pairs begun unseen one after the other: " << lit.hits << " of " << lit.locks << " where the AI chose\n";
 }
 
+// The AI of the mode (Driver::prepare) with its pairs kept below the 13th row (PlacementAgent::keepLow), which the mode
+// itself does not ask for.
+static void keepLowIn(ai::Agent* agent) {
+    if (auto* placing = dynamic_cast<ai::PlacementAgent*>(agent)) placing->keepLow = true;
+}
+
 // Pairs begun unseen with garbage falling before them (a light of 30 or 50 frames over the screen of 2P as one pair in
 // three appears, 6 pieces of garbage before each of them): the engine knows of no garbage, and the game's pair lies on a
 // field higher than the engine's. It goes down by itself until it is turned and moved where it goes, and can still be
 // moved as it lies. (Held down from the first frame, 8 pairs of 85 in these rounds lay down before their last move; not
 // held down, 3 or 4 of 78 or 79 in rounds drawn otherwise.) A pair begun unseen after garbage the screen showed come to
 // rest is planned on the field the screen showed: begun on the engine's field, which knows of no garbage, the last pair
-// of a round, kept below the 13th row (Driver::keepLow), was planned over a column the garbage had made twelve high and
+// of a round, kept below the 13th row (keepLowIn), was planned over a column the garbage had made twelve high and
 // locked where it appeared (2 or 3 such pairs in the rounds drawn otherwise).
 static void testUnseenPairsUnderGarbage() {
     ai::Params narrow;
@@ -1883,7 +1889,8 @@ static void testUnseenPairsUnderGarbage() {
         for (const int light : {30, 50})
             for (int k = 0; k < 2; ++k) {
                 std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
-                Driver::prepare(a.get(), keepLow);
+                Driver::prepare(a.get());
+                if (keepLow) keepLowIn(a.get());
                 driveRound(120 + uint64_t(k), keepLow ? low : n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true,
                                                                   .litAsAppears = light, .garbageAsLit = 6});
             }
@@ -2276,12 +2283,13 @@ static void testLateHoldsNothingAway() {
         for (const bool keepLow : {false, true}) {
             auto a = std::make_unique<KickAgent>();
             a->lateScript = &late;
-            Driver::prepare(a.get(), keepLow);
+            Driver::prepare(a.get());
+            if (keepLow) keepLowIn(a.get());
             driveRound(seed, keepLow ? low : n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
         }
     // (the pair falls by itself while its choice is late, and that alone takes a placement out of reach now and then: with
     //  the down button held at once 24 pairs of 46 were sent to the nearest placement, held as said 3 of 131. Kept below
-    //  the 13th row - Driver::keepLow -, the AI chooses from the placements reached below it as the pair appears, some of
+    //  the 13th row - keepLowIn -, the AI chooses from the placements reached below it as the pair appears, some of
     //  them only while the pair is still high: fallen by itself while the choice is late, 10 to 16 pairs of 128 to 131
     //  in the rounds drawn otherwise went to the nearest, none of them reached through the 13th row either - steeredLow)
     const auto counts = [](const DriveCounts& c) {
@@ -2395,8 +2403,9 @@ static void testLiftsShownLate() {
 // The 13th row is not on the real game's screen, and what its pair does there is not what the engine does: of the pairs
 // of its records the engine took up there (a quick turn, a floor kick) and then turned or moved, 32 of 49 went elsewhere
 // than the engine locked them, of those it turned quickly 15 of 16, and the pictures could not tell (of the pairs kept
-// below, 2693 of 2875 went where the engine locked them). The AI of the mode keeps its pairs below the 13th row and turns
-// none quickly, unless every placement it reaches so fills the 12th row of the third column (the round lost).
+// below, 2693 of 2875 went where the engine locked them). The AI of the mode with keepLow keeps its pairs below the 13th
+// row and turns none quickly, unless every placement it reaches so fills the 12th row of the third column (the round
+// lost).
 static void testKeepsLow() {
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
@@ -2404,6 +2413,7 @@ static void testKeepsLow() {
     for (const uint64_t seed : {120, 121, 122, 123, 124, 125}) {
         std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
         Driver::prepare(a.get());
+        keepLowIn(a.get());
         driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
     }
     // (each pair taken up there is one the AI let go so, PlacementAgent::climbing; of the rounds drawn otherwise, 199 of
@@ -2413,6 +2423,25 @@ static void testKeepsLow() {
                                std::to_string(n.leftAlone) + " left alone";
     check(n.locks >= 150 && n.highUnallowed == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 98, "pairs kept below the 13th row: " + counts);
     std::cout << "pairs kept below the 13th row: " << counts << "\n";
+}
+
+// The AI of the mode as the mode plays it (Driver::prepare alone) takes its pairs through the 13th row as the AI of a match
+// does: the same rounds as testKeepsLow, pairs taken up there, none left alone.
+static void testModeUsesThirteenthRow() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    bool kept = false;
+    for (const uint64_t seed : {120, 121, 122, 123, 124, 125}) {
+        std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        if (auto* placing = dynamic_cast<ai::PlacementAgent*>(a.get())) kept = kept || placing->keepLow;
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
+    }
+    const std::string counts = std::to_string(n.highPairs) + " pairs taken up into the 13th row; " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
+                               " pairs where the AI chose, " + std::to_string(n.leftAlone) + " left alone";
+    check(!kept && n.locks >= 150 && n.highPairs > 0 && n.leftAlone == 0, "the AI of the mode, the 13th row used: " + counts);
+    std::cout << "the AI of the mode, the 13th row used: " << counts << "\n";
 }
 
 // The driver called twice in a frame of the clock: a tap the first call gave - the last of a way, as the engine locks the
@@ -3250,6 +3279,7 @@ int main(int argc, char** argv) {
         testKicksShownLate();
         testLiftsShownLate();
         testKeepsLow();
+        testModeUsesThirteenthRow();
         testOnePictureOff();
         testTapsNotTakenBack();
         testTapsWhole();
