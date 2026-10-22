@@ -2576,52 +2576,6 @@ static void testSpareFrame() {
     std::cout << "ways with a frame to spare: " << counts << "\n";
 }
 
-// While the other side's chain runs, the AI is shown it running (Follower: the chain of the pair it found put, played
-// on from the frame it lay with the rules of the game): its pieces as they are in that wave, the wave, the chain so far.
-// (Shown as pieces landing in their next frame, the field with the pieces let fall, the AI that weighs its moves against
-// the other side's chain saw none of it: in rounds drawn of X3 against X3, 2P through the screen and a pad of lag 5 won
-// 17 of 120, 33 shown the chain so; X3 by itself, 36 of 60.)
-static void testOpponentChainShown() {
-    const Layout l = sampleLayout();
-    const Rules rules;
-    ai::Params narrow;
-    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
-    long wave = 0, shownWave = 0, chainsRight = 0, fieldRight = 0;
-    for (const uint64_t seed : {120, 121, 122}) {
-        Round r;
-        r.start(rules, seed, 2);
-        Canvas canvas(1280, 720, l);
-        Rng noise(seed, 7);
-        const std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow), b = ai::makeAgent("x3", narrow);
-        a->startRound(0, seed), b->startRound(1, seed + 1);
-        Follower follow;
-        int64_t clock = 1000;
-        for (int f = 0; f < 45; ++f, ++clock) {
-            draw(canvas, l, r, true, noise);
-            follow.step(read(canvas.picture(), l), clock);
-        }
-        PlayerEvents e[2];
-        for (int f = 0; f < 4000 && r.state == RoundState::Playing; ++f, ++clock) {
-            draw(canvas, l, r, false, noise);
-            follow.step(read(canvas.picture(), l), clock);
-            if (r.player[0].phase == Phase::Wave) {
-                ai::Observation o;
-                follow.observeAt(1, rules, r.player[1], clock, o);
-                ++wave;
-                shownWave += o.player[0].phase == Phase::Wave;
-                chainsRight += o.player[0].chain.chains == r.player[0].chain.chains;
-                fieldRight += Follower::shown(o.player[0].field) == Follower::shown(r.player[0].field);
-            }
-            const uint8_t both[2] = {a->frame(ai::observe(r, 0)), b->frame(ai::observe(r, 1))};
-            r.step(both, e);
-        }
-    }
-    const std::string counts = std::to_string(wave) + " frames of chains of 1P: shown running " + std::to_string(shownWave) + ", the chain so far right " +
-                               std::to_string(chainsRight) + ", the twelve rows right " + std::to_string(fieldRight);
-    check(wave >= 300 && shownWave * 10 >= wave * 8 && chainsRight * 10 >= wave * 7 && fieldRight * 10 >= wave * 7, "the other side's chain: " + counts);
-    std::cout << "the other side's chain shown as it runs: " << counts << "\n";
-}
-
 // The AI of the mode goes straight down while its second choice is on its way (holdSecond), in every frame in which
 // that loses nothing: held so to the last frame from which a way still led to its first choice, a frame of the clock
 // the driver was not called in then took that way away (in a record of the real game, two pairs of 590 went down
@@ -3879,7 +3833,6 @@ int main(int argc, char** argv) {
         testTapsWhole();
         testSpareFrame();
         testWaitWithFrameToSpare();
-        testOpponentChainShown();
         testTurnApartFromMove();
         testLateHoldsNothingAway();
         testPicture(argc > 1 ? argv[1] : ".");

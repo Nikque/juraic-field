@@ -36,12 +36,6 @@ struct SideModel {
     int sends = 0;            // the garbage its chain would send
     int inAir = 0;            // clear readings in a row with one piece more at rest and a piece of a colour in the air
     uint8_t unsure = 0;       // columns read twelve high whose 13th row is a guess (garbage that may have fallen there)
-    int64_t lyingSince = -1;  // the frame the pair in play was first found lying
-    // The chain of the pair last found put, played with the rules of the game from the frame it was found lying, a frame
-    // a reading: what the AI is shown of this side while it runs (complete).
-    juraic::Player run;
-    bool running = false;
-    int64_t runAt = -1; // the frame of the clock `run` is of
 };
 
 class Follower {
@@ -86,9 +80,7 @@ public:
         for (int s = 0; s < 2; ++s) {
             const SideTrack& t = tracker.side[s];
             SideModel& m = model[s];
-            if (m.running) playOn(m, at);
             if (tracker.spawned[s]) {
-                m.running = false;
                 if (!m.lying && m.known && previous[s].pairs == t.pairs - 1 && m.followed < t.pairs - 2)
                     recover(s, previous[s], at);
                 if (m.lying) lock(s, at);
@@ -144,10 +136,6 @@ private:
         for (int s = 0; s < 2; ++s) {
             juraic::Player& p = o.player[s];
             p.field = withHidden(p.field, model[s].core.field); // (the 13th and 14th rows as the moves followed put them)
-            if (s != o.me && model[s].running) {
-                const juraic::Player& run = model[s].run;
-                p.field = run.field, p.phase = run.phase, p.wait = run.wait, p.chain = run.chain, p.wave = run.wave, p.placed = run.placed;
-            }
             p.incoming = {};
             (tracker.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = notice[s];
             if (model[s].known) p.scoring = model[s].core.scoring;
@@ -273,7 +261,6 @@ private:
                     juraic::GameField g = base;
                     juraic::place(g, juraic::placement(id), colors);
                     if (!(shown(g).f == seen.f)) continue;
-                    if (!was) m.lyingSince = at;
                     m.lying = true, m.index = t.pairs - 1, m.at = juraic::placement(id), m.colors = colors, m.base = base, m.with = t.resting;
                     juraic::PlayerCore core = m.core;
                     juraic::Incoming other{0, notice[1 - s]};
@@ -322,36 +309,11 @@ private:
     void lock(int s, int64_t at) {
         SideModel& m = model[s];
         SideModel& o = model[1 - s];
-        const juraic::Scoring scoring = m.core.scoring;
         m.core.incoming = {0, notice[s]}, o.core.incoming = {0, notice[1 - s]};
         const juraic::TurnResult result = move(m.core, o.core.incoming, m.base, m.at, m.colors, at);
-        // (its chain from the frame it was found lying - not one found only as the next pair appeared, whose frame is
-        //  not known)
-        m.running = result.chains > 0 && m.lyingSince >= 0 && m.lyingSince <= at && m.followed != m.index;
-        if (m.running) {
-            juraic::Player& p = m.run;
-            p = juraic::Player{};
-            p.field = m.base, p.scoring = scoring;
-            p.placed = juraic::place(p.field, m.at, m.colors);
-            const int split = tracker.timing.splitFrames(p.placed.split, m.at.x, p.placed.lockY);
-            p.phase = split ? juraic::Phase::Split : juraic::Phase::Land;
-            p.wait = split ? split : tracker.timing.landFrames;
-            m.runAt = m.lyingSince;
-            playOn(m, at);
-        }
-        m.followed = m.index, m.placed = m.at, m.chains = result.chains, m.lying = false, m.lyingSince = -1;
+        m.followed = m.index, m.placed = m.at, m.chains = result.chains, m.lying = false;
         ++placements;
         o.budget += result.sent;
-    }
-    // The chain of `m` played on to the frame `at` of the clock (no garbage, no buttons); over as it is decided.
-    void playOn(SideModel& m, int64_t at) const {
-        const juraic::Tsumo none;
-        while (m.running && m.runAt < at) {
-            juraic::Incoming nobody;
-            juraic::advancePlayer(m.run, nobody, 0, none, rules, tracker.timing, tracker.roundFrame(m.runAt));
-            ++m.runAt;
-            if (m.run.phase != juraic::Phase::Split && m.run.phase != juraic::Phase::Land && m.run.phase != juraic::Phase::Wave) m.running = false;
-        }
     }
 
     // The notice of side s: Tracker's (read the same for a few frames), unless more than can have been sent. (Less is
