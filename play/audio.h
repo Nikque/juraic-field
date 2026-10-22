@@ -139,9 +139,10 @@ public:
         for (int i = 0; i < 5; ++i) tone(pcm[SND_ALL_CLEAR], 0.08 * i, notes[i], notes[i], 0.22, 0.3, 1);
         tone(pcm[SND_OVER], 0, 420, 90, 0.7, 0.45, 1);
         tone(pcm[SND_SELECT], 0, 720, 760, 0.06, 0.25, 0);
-        // The beat before a round (play/start_beat.h): A5 twice, then A6.
-        tone(pcm[SND_BEAT], 0, 880, 880, 0.07, 0.22, 0);
-        tone(pcm[SND_BEAT_GO], 0, 1760, 1760, 0.12, 0.22, 0);
+        // The beat before a round (play/start_beat.h): A5 twice, then A6, as soft squares (the overtones carry it over the
+        // music; as sines of 0.07 and 0.12 s at 0.22 they were hardly heard in a match).
+        tone(pcm[SND_BEAT], 0, 880, 880, 0.16, 0.9, 1);
+        tone(pcm[SND_BEAT_GO], 0, 1760, 1760, 0.28, 0.9, 1);
         // Chain n: two rising notes, one whole tone higher for every chain: C5 (523 Hz) for the first,
         // A#6 (1865 Hz) for the twelfth, C8 (4186 Hz) for the nineteenth.
         for (int n = 0; n < CHAIN_SOUNDS; ++n) {

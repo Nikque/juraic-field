@@ -105,8 +105,13 @@ public:
     // No turn is pressed while a quick turn's lock lasts (PlacementAgent::waitQuickLock): the real game takes turns again
     // 4 to 7 frames after a quick turn, the engine 8 frames after (realGameTiming), and a turn pressed in between, one the
     // engine does not take, turned the pair once more on a round that takes turns again sooner.
+    // No way is taken that a frame of the clock the driver is not called in leaves with no way to the placement, when the
+    // way that holds the down button later has none such (PlacementAgent::spareFrame): the next call plans the way again
+    // from where the pair is (steer), but not when that frame was the last before it would lock (in a record of the real
+    // game, the driver not called in 14% of its frames: 3 pairs of 590 went down a column short so).
     static void prepare(juraic::ai::Agent* agent) {
-        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) placing->holdSecond = true, placing->tapHold = 2, placing->waitQuickLock = true;
+        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent))
+            placing->holdSecond = true, placing->tapHold = 2, placing->waitQuickLock = true, placing->spareFrame = true;
     }
 
     // The middle of the lags the pictures of the last pairs fitted best; -1: none yet.

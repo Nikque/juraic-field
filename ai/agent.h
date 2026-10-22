@@ -105,6 +105,9 @@ public:
     bool keepLow = false;
     // No turn is pressed while a quick turn's lock lasts (InputPlanner::waitQuickLock).
     bool waitQuickLock = false;
+    // No way to the placement chosen is lost by a frame its sender is not called in, when one with the down button held
+    // later is not (InputPlanner::spareFrame).
+    bool spareFrame = false;
     // The cells of the 13th and 14th rows of the own field that may be the other way, and the frames after the pair is
     // shown elsewhere than its way has it by which a way from where it is then begins (InputPlanner::planSure: the ways
     // to the placement chosen).
@@ -317,7 +320,7 @@ private:
     void tune() {
         planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
         planner.keepLow = keepLow && lowWays;
-        planner.waitQuickLock = waitQuickLock;
+        planner.waitQuickLock = waitQuickLock, planner.spareFrame = spareFrame;
         planner.unsure13 = unsure13, planner.unsure14 = unsure14, planner.seenAfter = seenAfter;
     }
     // The placements choose() is offered for the pair `colors` (counted: a first choice, for climbs).

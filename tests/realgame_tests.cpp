@@ -2495,6 +2495,87 @@ static void testTapsWhole() {
     std::cout << "every tap held two frames (" << taps << " taps)\n";
 }
 
+// The thread of the play is not called in a frame of the clock now and then (14% of the frames of a record of the real
+// game, the next one called twice): the pad holds what it held, and a tap the way begins in that frame begins a frame
+// later. The way is planned again from there (Driver::steer), but a tap that was to come in the last frame before the
+// pair would lock comes too late: in that record a pair to go to the sixth column over a fifth ten high, its third move
+// in the frame it would lock, locked in the fifth (and two more so). The AI of the mode (Driver::prepare) takes no way
+// in which a frame a tap begins in, taking the buttons of the frame before, leaves the pair no way to its placement,
+// when the way that holds the down button only once the pair is turned and moved where it goes has no such frame
+// (InputPlanner::spareFrame).
+static void testSpareFrame() {
+    const Timing timing = realGameTiming();
+    // (a frame of `way` from `from` in which a tap begins, taking the buttons of the frame before, after which the pair
+    //  has no way to `target`: its number, -1 none)
+    const auto lostAt = [&](const GameField& g, const PairControl& from, Placement target, const ai::InputPath& way) {
+        ai::InputPlanner any;
+        any.tapHold = 2, any.waitQuickLock = true;
+        PairControl p = from;
+        for (size_t i = 0; i < way.buttons.size() && !p.locked; ++i) {
+            const uint8_t before = i ? way.buttons[i - 1] : from.held;
+            if (way.buttons[i] & ~before & (BTN_LEFT | BTN_RIGHT | BTN_CW | BTN_CCW)) {
+                PairControl skipped = p;
+                stepPair(skipped, g, before, timing);
+                ai::InputPath rest;
+                if (skipped.locked ? skipped.x != target.x || skipped.dir != target.dir : !any.plan(g, skipped, target, timing, 100, rest)) return int(i);
+            }
+            stepPair(p, g, way.buttons[i], timing);
+        }
+        return -1;
+    };
+    const auto locksAt = [&](const GameField& g, const PairControl& from, Placement target, const ai::InputPath& way) {
+        PairControl p = from;
+        for (const uint8_t b : way.buttons)
+            if (!p.locked) stepPair(p, g, b, timing);
+        for (int k = 0; k < 600 && !p.locked; ++k) stepPair(p, g, BTN_DOWN, timing);
+        return p.locked && p.x == target.x && p.dir == target.dir;
+    };
+    ai::InputPlanner planner, plain;
+    planner.tapHold = plain.tapHold = 2, planner.waitQuickLock = plain.waitQuickLock = true, planner.spareFrame = true;
+    // The pair of the record (the field the engine began it on, three frames gone by before its first button).
+    {
+        const char* rows[] = {"....5.", "....1.", "...315", "...413", ".44355", ".33445", "141133", "314134", "114514", "331554"};
+        GameField g;
+        for (int r = 0; r < 10; ++r)
+            for (int x = 0; x < W; ++x)
+                if (rows[r][x] != '.') g.f.set(x, 9 - r, Cell(rows[r][x] - '0'));
+        PairControl from = spawnPair(timing);
+        for (int k = 0; k < 3; ++k) stepPair(from, g, 0, timing);
+        const Placement sixth{5, UP};
+        ai::InputPath before, now;
+        check(plain.planSure(g, from, sixth, timing, 100, before) && lostAt(g, from, sixth, before) >= 0, "the way of the record's pair is lost by no frame left out");
+        const bool found = planner.planSure(g, from, sixth, timing, 100, now);
+        const int lost = lostAt(g, from, sixth, now);
+        check(found && locksAt(g, from, sixth, now) && lost < 0, "the record's pair, its frame " + std::to_string(lost) + " left out, has no way to the sixth column");
+    }
+    // High fields: every way locks the pair at its placement, and few are lost by a frame left out.
+    Rng rng(20261023, 7);
+    const PairControl from = spawnPair(timing);
+    long ways = 0, lostBefore = 0, lostNow = 0, framesBefore = 0, framesNow = 0;
+    for (int i = 0; i < 300; ++i) {
+        GameField g;
+        for (int x = 0; x < W; ++x) addGarbage(g, x, x == SPAWN_X ? 4 + int(rng.below(6)) : 3 + int(rng.below(9)));
+        const unsigned legal = legalPlacements(g);
+        for (int id = 0; id < PLACEMENTS; ++id) {
+            if (!(legal >> id & 1)) continue;
+            const Placement target = placement(id);
+            ai::InputPath a, b;
+            const bool found = plain.planSure(g, from, target, timing, 100, a);
+            check(found == planner.planSure(g, from, target, timing, 100, b), "spareFrame finds a way where planSure does not, or none where it does (field " + std::to_string(i) + ")");
+            if (!found) continue;
+            check(locksAt(g, from, target, b), "a way of spareFrame does not lock the pair at its placement (field " + std::to_string(i) + ")");
+            ++ways, lostBefore += lostAt(g, from, target, a) >= 0, lostNow += lostAt(g, from, target, b) >= 0, framesBefore += a.frames(), framesNow += b.frames();
+        }
+    }
+    const std::string counts = std::to_string(ways) + " ways, lost by a frame left out " + std::to_string(lostBefore) + " -> " + std::to_string(lostNow) + ", frames " +
+                               std::to_string(framesBefore) + " -> " + std::to_string(framesNow) + ", taken so " + std::to_string(planner.spareWays);
+    check(ways >= 1000 && lostBefore > 0 && lostNow * 4 <= lostBefore && planner.spareWays > 0, "ways with a frame to spare: " + counts);
+    std::unique_ptr<ai::Agent> a = ai::makeAgent("x3");
+    Driver::prepare(a.get());
+    check(dynamic_cast<ai::PlacementAgent&>(*a).spareFrame, "the AI of the mode takes ways with a frame to spare");
+    std::cout << "ways with a frame to spare: " << counts << "\n";
+}
+
 // No turn and move begin in the same frame: which the game does first in a frame (the engine turns first) was never
 // measured, and a way that needs that order is no way on the real game. (A pair to go up over a column twelve high
 // onto another, turned and moved in one frame in the 13th row, stayed in the column before on the real game: the move
@@ -3669,6 +3750,7 @@ int main(int argc, char** argv) {
         testOnePictureOff();
         testTapsNotTakenBack();
         testTapsWhole();
+        testSpareFrame();
         testTurnApartFromMove();
         testLateHoldsNothingAway();
         testPicture(argc > 1 ? argv[1] : ".");

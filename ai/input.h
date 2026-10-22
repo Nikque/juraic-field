@@ -56,6 +56,11 @@ public:
     uint8_t unsure13 = 0, unsure14 = 0;
     int seenAfter = 0;
     int64_t sureWays = 0, steadyWays = 0, probingWays = 0, seenWays = 0, blindWays = 0; // planSure's ways of each kind (for tools)
+    // With tapHold above 1: planSure gives no way in which a frame a tap begins in, taking the buttons of the frame before
+    // instead (a frame its sender is not called in), leaves the pair no way to the target (lostBySkip), when the way that
+    // holds the down button only once the pair is turned and moved where it goes (downWhenPlaced) is not lost so.
+    bool spareFrame = false;
+    int64_t spareWays = 0; // ways planSure took so (for tools)
 
     // A way to `target` when the cells unsure13 and unsure14 may be the other way (each of them on a field of its own):
     //  - plan()'s way, when it locks the pair at the target on each of those fields too (sureWays);
@@ -67,7 +72,38 @@ public:
     //  - else one with which it is shown otherwise before it locks, to go elsewhere from there (seenWays: the target out
     //    of its reach on such a field);
     //  - else plan()'s way (blindWays).
+    //  Then, with spareFrame, the way that holds the down button later when the one found is lost by a frame left out.
     bool planSure(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, InputPath& out) {
+        if (!planOver(field, from, target, timing, speedPercent, out)) return false;
+        if (spareFrame && tapHold > 1 && !downWhenPlaced && lostBySkip(field, from, target, timing, speedPercent, out)) {
+            InputPath later;
+            downWhenPlaced = true;
+            const bool found = planOver(field, from, target, timing, speedPercent, later);
+            downWhenPlaced = false;
+            if (found && !lostBySkip(field, from, target, timing, speedPercent, later)) out = std::move(later), ++spareWays;
+        }
+        return true;
+    }
+
+    // A frame of `way` from `from` in which a tap begins, taking the buttons of the frame before instead, leaves the
+    // pair no way to `target` (locks it elsewhere, or no way leads there from where it is then).
+    bool lostBySkip(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, const InputPath& way) {
+        PairControl p = from;
+        InputPath rest;
+        for (size_t i = 0; i < way.buttons.size() && !p.locked; ++i) {
+            const uint8_t before = i ? way.buttons[i - 1] : from.held;
+            if (way.buttons[i] & ~before & TAP_BUTTONS) {
+                PairControl skipped = p;
+                stepPair(skipped, field, before, timing, speedPercent);
+                if (skipped.locked ? skipped.x != target.x || skipped.dir != target.dir : !plan(field, skipped, target, timing, speedPercent, rest)) return true;
+            }
+            stepPair(p, field, way.buttons[i], timing, speedPercent);
+        }
+        return false;
+    }
+
+    // planSure's way with the cells not sure of (without spareFrame).
+    bool planOver(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, InputPath& out) {
         if (!plan(field, from, target, timing, speedPercent, out)) return false;
         if (!unsure13 && !unsure14) return true;
         std::vector<GameField> others;
