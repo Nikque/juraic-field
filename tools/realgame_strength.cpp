@@ -9,7 +9,15 @@
 // Environment: LAG (the pad's lag, 5), HID, QTL (the quick turn's lock of the round), ORACLE (bits of what 2P is shown
 // replaced by the round itself: 1 the other side, 2 own notice, 4 own score, 8 the frame, 16 the pairs, 32/64 own field,
 // 256 own side between pairs, 1024 own side, ...), PLACES (each pair put), TP (each 2P pair's frames), TPB=<frame> (2P's
-// buttons up to that frame), SHOWDIFF. EARLY and PADPAST act only with tools/realgame_early_begin.patch applied.
+// buttons up to that frame), SHOWDIFF, HOLDSTART=N (modes 0, 5, 6: 2P's first pair appears N frames late), AISEED (modes
+// 2-4: the AI of 2P draws its random numbers from seed + 1, as in modes 0, 5 and 6, not from 1 in every round),
+// P2PARAMS=name=value,... (settings of 2P's AI). In modes 0, 5 and 6, and in modes 2-4 with ORACLE (0 for nothing
+// replaced): CHOICES (each choice of 2P with what it saw, and 2P's field as each pair appears), RESEED (2P's random
+// numbers drawn again for each choice from the round and the pair, so that a pair chosen twice does not change the
+// choices after it), KNOWN2 (2P's own window never shows the third pair before its pair appears), SHOWSTART. EARLY and
+// PADPAST act only with tools/realgame_early_begin.patch applied; tools/realgame_air_again.patch (applied after it) asks
+// the second choice in the air too (PlacementAgent::askInAir, set by Driver::prepare).
+#include <sstream>
 #define main realgame_tests_main
 #include "tests/realgame_tests.cpp"
 using namespace juraic;
@@ -27,6 +35,27 @@ static void timePair(const Player& p, uint8_t b, const PlayerEvents& e, int64_t 
     }
 }
 #undef main
+static uint64_t fieldHash(const GameField& g) {
+    uint64_t h = 1469598103934665603ull;
+    for (int y = 0; y < 12; ++y)
+        for (int x = 0; x < W; ++x) h = (h ^ uint64_t(g.f.get(x, y))) * 1099511628211ull;
+    return h % 1000000;
+}
+// (CHOICES: 2P's field as each of its pairs appears)
+static void notePair(const Player& p, const PlayerEvents& e) {
+    if (e.spawned && std::getenv("CHOICES")) std::printf("SP %d own %06llu\n", p.nextPair - 1, (unsigned long long)fieldHash(p.field));
+}
+// P2PARAMS=name=value,...: settings of 2P's AI
+static ai::Params forTwo(ai::Params p) {
+    if (const char* s = std::getenv("P2PARAMS")) {
+        std::string t(s);
+        std::replace(t.begin(), t.end(), ',', '\n');
+        std::istringstream in(t);
+        std::string error;
+        if (!ai::loadParams(in, p, error)) std::fprintf(stderr, "P2PARAMS: %s\n", error.c_str()), std::exit(2);
+    }
+    return p;
+}
 static const Round* G_round = nullptr;
 static int G_locks[2] = {0, 0}, G_control[2] = {0, 0};
 static int G_state = 0, G_maxChain[2] = {0, 0}, G_frames = 0;
@@ -50,6 +79,9 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     Driver d;
     d.lag = how.startLag >= 0 ? how.startLag : how.lag, d.rules = rules, d.agent = how.given ? std::move(how.given) : ai::makeAgent("x3", narrow);
     d.notes = how.notes;
+    // (the AI's own random numbers as in modes 0, 5 and 6: the driver begins a round of its agent before the round and
+    //  again as it begins, and the second one draws from seed + 1)
+    if (std::getenv("AISEED")) d.seed = seed;
     d.takeLag = !how.keepLag;
     d.unsureWays = how.unsureWays;
     int64_t clock = 1000;
@@ -246,6 +278,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         const uint8_t pressed1 = buttons[1];
         r.step(buttons, e);
         timePair(r.player[1], pressed1, e[1], f);
+        notePair(r.player[1], e[1]);
         for (int s = 0; s < 2; ++s) G_maxChain[s] = std::max(G_maxChain[s], int(r.player[s].chain.chains)), G_locks[s] += e[s].locked, G_control[s] += r.player[s].phase == Phase::Control;
         if (std::getenv("PLACES")) for (int s = 0; s < 2; ++s) if (e[s].locked) std::printf("P%d %d %d f%d\n", s + 1, r.player[s].nextPair, placementId(r.player[s].pair.placement()), int(r.frame));
         G_frames = f;
@@ -352,15 +385,48 @@ struct Oracle : ai::X3Agent {
     }
     void unused() { std::printf("late frames %lld revised %lld rerouted %lld again asked %lld begun %lld switched %lld steered %lld\n", (long long)lateFrames, (long long)revisedChoices, (long long)rerouted, (long long)againAsked, (long long)againBegun, (long long)againSwitched, (long long)steered); }
     using ai::X3Agent::X3Agent;
+    uint64_t roundSeed = 0;
+    void startRound(int seat, uint64_t seed) override {
+        if (std::getenv("SHOWSTART")) std::printf("startRound %d %llu\n", seat, (unsigned long long)seed);
+        roundSeed = seed;
+        ai::X3Agent::startRound(seat, seed);
+    }
     long choices = 0, knownSum = 0, knownTab[6] = {};
     int choose(const ai::Observation& o, Pair pair, unsigned legal) override {
         const int index = o.self().nextPair - (o.self().phase == Phase::Control ? 1 : 0);
         int known = 0;
         for (int i = index; i < index + 5 && o.mine().known(i); ++i) ++known;
         ++choices, knownSum += known, ++knownTab[std::min(known, 5)];
-        return ai::X3Agent::choose(o, pair, legal);
+        // (RESEED: the random numbers of each choice drawn from the round and the pair, however often a pair is chosen)
+        if (std::getenv("RESEED")) rng = Rng(roundSeed * 1000003 + uint64_t(index), ai::AGENT_STREAM);
+        Rng probe = rng;
+        const int pick = ai::X3Agent::choose(o, pair, legal);
+        if (std::getenv("CHOICES")) {
+            // what the choice saw: own field, the other side's field, phase and chain, the notices, the pairs known, the
+            // next draw of the random numbers
+            const auto hash = fieldHash;
+            std::printf("CH %d moves %d own %06llu opp %06llu oppPhase %d oppChain %d inMine %d inTheirs %d known %d tie %llu pick %d\n", index, int(o.self().moves),
+                        (unsigned long long)hash(o.self().field), (unsigned long long)hash(o.player[1 - o.me].field), int(o.player[1 - o.me].phase), int(o.player[1 - o.me].chain.chains),
+                        int(o.self().incoming.total()), int(o.player[1 - o.me].incoming.total()), known, (unsigned long long)(probe.next() % 1000), pick);
+            const Player &m = o.self(), &t = o.opponent();
+            std::printf("CX %d frame %lld phase %d wait %d score %lld left %lld pend %d conf %d oScore %lld oLeft %lld oPend %d oConf %d oWait %d oNext %d oWave %d\n", index,
+                        (long long)o.frame, int(m.phase), int(m.wait), (long long)m.scoring.score, (long long)m.scoring.pool, m.incoming.pending, m.incoming.confirmed,
+                        (long long)t.scoring.score, (long long)t.scoring.pool, t.incoming.pending, t.incoming.confirmed, int(t.wait), int(t.nextPair), int(t.wave.longestFall));
+        }
+        return pick;
     }
-    uint8_t frame(const ai::Observation& o) override {
+    // KNOWN2: the pair after the next two is not shown by 2P's own window before its pair appears (only the window of
+    // the other side tells it), as for a choice made `lag` frames before the pair appears
+    ai::Observation cut;
+    const ai::Observation& knownTwo(const ai::Observation& o) {
+        if (!std::getenv("KNOWN2")) return o;
+        cut = o;
+        const int keep = std::max(o.self().nextPair + 2, ai::shownPairs(o.opponent(), o.timing));
+        if (cut.tsumo.count() > keep) cut.tsumo.pairs.resize(size_t(keep));
+        return cut;
+    }
+    uint8_t frame(const ai::Observation& given) override {
+        const ai::Observation& o = knownTwo(given);
         if (G_round) {
             const ai::Observation tr = ai::observe(*G_round, 1);
             const Player& mine = o.player[1];
@@ -460,8 +526,10 @@ int main(int argc, char** argv) {
         if (const char* q = std::getenv("QTL")) timing.quickTurnLock = std::atoi(q);
         Round r;
         r.start(rules, seed, 2, timing);
+        // (HOLDSTART=N: the first pair of 2P appears N frames after that of 1P, and all of 2P's round with it)
+        if (const char* h = std::getenv("HOLDSTART")) r.player[1].wait += std::atoi(h);
         auto a = ai::makeAgent("x3", narrow);
-        ai::Params seeing = narrow;
+        ai::Params seeing = forTwo(narrow);
         if (const char* e = std::getenv("SEELATE")) seeing.seeLate = std::atoi(e);
         std::unique_ptr<ai::Agent> b = std::make_unique<Oracle>(seeing);
         if (mode == 6) Driver::prepare(b.get());
@@ -472,11 +540,11 @@ int main(int argc, char** argv) {
         std::deque<uint8_t> late(size_t(delay), 0);
         for (; f < frames && r.state == RoundState::Playing; ++f) {
             uint8_t mine = b->frame(ai::observe(r, 1));
-            if (const char* h = std::getenv("HOLDSTART")) if (f < 7 + std::atoi(h)) mine = 0;
             if (delay) late.push_back(mine), mine = late.front(), late.pop_front();
             const uint8_t bs[2] = {a->frame(ai::observe(r, 0)), mine};
             r.step(bs, e);
             timePair(r.player[1], bs[1], e[1], f);
+            notePair(r.player[1], e[1]);
             for (int s = 0; s < 2; ++s) G_maxChain[s] = std::max(G_maxChain[s], int(r.player[s].chain.chains)), G_locks[s] += e[s].locked, G_control[s] += r.player[s].phase == Phase::Control;
         if (std::getenv("PLACES")) for (int s = 0; s < 2; ++s) if (e[s].locked) std::printf("P%d %d %d f%d\n", s + 1, r.player[s].nextPair, placementId(r.player[s].pair.placement()), int(r.frame));
         }
@@ -484,7 +552,7 @@ int main(int argc, char** argv) {
         for (int s = 0; s < 2; ++s) G_score[s] = r.player[s].scoring.score;
     } else {
         std::unique_ptr<ai::Agent> a;
-        if (const char* e = std::getenv("ORACLE")) { auto o = std::make_unique<Oracle>(narrow); o->bits = std::atoi(e); a = std::move(o); } else a = ai::makeAgent("x3", narrow);
+        if (const char* e = std::getenv("ORACLE")) { auto o = std::make_unique<Oracle>(forTwo(narrow)); o->bits = std::atoi(e); a = std::move(o); } else a = ai::makeAgent("x3", forTwo(narrow));
         if (mode >= 2) Driver::prepare(a.get());
         DriveCounts n;
         const int lag = std::getenv("LAG") ? std::atoi(std::getenv("LAG")) : 5;
