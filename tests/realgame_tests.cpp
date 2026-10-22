@@ -1384,6 +1384,9 @@ struct DriveCounts {
     // the round: in the round or in the driver's field, of them otherwise in the driver's, and of those over columns it
     // was not sure of (Driver::unsureColumns)
     long hiddenCells = 0, hiddenWrong = 0, hiddenWrongUnsure = 0;
+    // The ways of the AI to the placements it chose over cells of those rows not sure of (InputPlanner::planSure: sure,
+    // steady, probing, seen, blind), and the pictures a cell not sure of explained (Driver::explained)
+    long ways[5] = {}, explained = 0;
 };
 
 // How a round of this program is drawn, read and played (driveRound): its 2P played by the AI through the screen and a
@@ -1428,7 +1431,10 @@ struct DriveCounts {
 // stops for that many frames, a light over columns 2 to 4 of 2P from the 10th row to the 12th (on the real game the
 // round stopped so for 390 frames and for a minute, something bright that is no piece over the middle of the field, and
 // the driver's engine, on in the meantime, had the pair put long before the game went on). quickTurnLock: the round takes
-// no turn for that many frames after a quick turn (Timing::quickTurnLock; -1: as the engine's).
+// no turn for that many frames after a quick turn (Timing::quickTurnLock; -1: as the engine's). unsureWays: as
+// Driver::unsureWays. hiddenGarbage: as each pair of 2P locks, a piece of garbage in the 13th row of each column of 2P
+// twelve high (the screen does not show it), and Follower not sure of it, taking it for empty (a guess of
+// Follower::withGarbage gone wrong: SideModel::unsure).
 struct DriveScenario {
     int lag = 5;
     bool shaky = false;
@@ -1451,6 +1457,8 @@ struct DriveScenario {
     bool loseAtGround = false;
     int pauseFor = 0, pauseEvery = 4, pauseAfter = 20;
     int quickTurnLock = -1;
+    bool unsureWays = true; // Driver::unsureWays
+    bool hiddenGarbage = false;
 };
 // Such a round from `seed`, counted into n.
 static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
@@ -1471,6 +1479,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     d.lag = how.startLag >= 0 ? how.startLag : how.lag, d.rules = rules, d.agent = how.given ? std::move(how.given) : ai::makeAgent("x3", narrow);
     d.notes = how.notes;
     d.takeLag = !how.keepLag;
+    d.unsureWays = how.unsureWays;
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
@@ -1721,6 +1730,13 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         if (e[1].locked) n.highPairs += highPair, highPair = false;
         if (e[1].locked) kickPair = false, kickFor = 0, liftPair = false, liftFor = 0, beginning = false, lockedAt = clock;
         if (how.garbageAsLit && e[1].locked && spawns % 3 == 2) r.player[1].incoming.confirmed += how.garbageAsLit;
+        if (how.hiddenGarbage && e[1].locked && follow.model[1].known) {
+            int h[W];
+            r.player[1].field.heights(h);
+            for (int x = 0; x < W; ++x)
+                if (h[x] == 12 && x != SPAWN_X && (Follower::twelveHigh(follow.model[1].core.field) >> x & 1) && follow.model[1].core.field.f.get(x, 12) == EMPTY)
+                    r.player[1].field.f.set(x, 12, GARBAGE), follow.model[1].unsure |= uint8_t(1u << x);
+        }
         if (e[1].locked && pausedPair)
             n.pausedLocks += pausedTarget >= 0, n.pausedHits += pausedTarget >= 0 && placementId(r.player[1].pair.placement()) == pausedTarget, pausedPair = false;
         if (e[1].spawned) inPlay = 0;
@@ -1729,8 +1745,12 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     }
     n.corrected += d.corrected;
     n.quickLost += quickMissed && r.state != RoundState::Playing && r.state != RoundState::Won1;
-    if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get()))
+    if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get())) {
         n.rerouted += placing->rerouted, n.steered += placing->steered, n.steeredLow += placing->steeredLow, n.climbs += placing->climbs;
+        const ai::InputPlanner& w = placing->ways();
+        n.ways[0] += w.sureWays, n.ways[1] += w.steadyWays, n.ways[2] += w.probingWays, n.ways[3] += w.seenWays, n.ways[4] += w.blindWays;
+    }
+    n.explained += d.explained;
     if (words) n.wordsCorrected += d.corrected - correctedBefore;
     n.lagRounds += 1, n.lagRight += d.measuredLag() == how.lag;
     n.lagTaken += d.lag == how.lag, n.turnsFound += d.turnsSwapped;
@@ -1992,6 +2012,12 @@ static void keepLowIn(ai::Agent* agent) {
 // (Follower::withGarbage), and with the 13th and 14th rows the AI is shown (Driver::shareHidden). (Begun with the
 // engine's 13th and 14th rows, 30 of 47 pieces there were otherwise than in the rounds; Follower had 14 otherwise, 11 of
 // them garbage; and a pair kept below the 13th row went two columns short.)
+// The ways of the AI over cells of the 13th and 14th rows not sure of, and the pictures they explained.
+static std::string unsureWays(const DriveCounts& c) {
+    return "ways over cells not sure of: " + std::to_string(c.ways[0]) + " sure, " + std::to_string(c.ways[1]) + " steady, " + std::to_string(c.ways[2]) + " probing, " +
+           std::to_string(c.ways[3]) + " seen, " + std::to_string(c.ways[4]) + " blind; " + std::to_string(c.explained) + " pictures explained";
+}
+
 static void testUnseenPairsUnderGarbage() {
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
@@ -2008,7 +2034,8 @@ static void testUnseenPairsUnderGarbage() {
     const auto counts = [](const DriveCounts& c) {
         return std::to_string(c.hits) + " of " + std::to_string(c.locks) + " where the AI chose (" + std::to_string(c.garbageMisses) + " elsewhere after garbage, " +
                std::to_string(c.unseenGarbageMisses) + " of them after garbage the screen did not show), left alone " + std::to_string(c.leftAlone) + ", the 13th and 14th rows " +
-               std::to_string(c.hiddenWrong) + " pieces of " + std::to_string(c.hiddenCells) + " otherwise (" + std::to_string(c.hiddenWrongUnsure) + " of them not sure)";
+               std::to_string(c.hiddenWrong) + " pieces of " + std::to_string(c.hiddenCells) + " otherwise (" + std::to_string(c.hiddenWrongUnsure) + " of them not sure), " +
+               unsureWays(c);
     };
     // (planned on the engine's field, 3 of 78 and 4 of 70 pairs - kept below the 13th row - went elsewhere)
     check(n.locks >= 60 && (n.locks - n.hits) * 100 <= n.locks * 4 && n.leftAlone == 0, "with garbage before pairs begun unseen, " + counts(n));
@@ -2559,7 +2586,7 @@ static void testModeUsesThirteenthRow() {
     }
     const std::string counts = std::to_string(n.highPairs) + " pairs taken up into the 13th row; " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
                                " pairs where the AI chose, " + std::to_string(n.leftAlone) + " left alone; the 13th and 14th rows " + std::to_string(n.hiddenWrong) +
-                               " pieces of " + std::to_string(n.hiddenCells) + " otherwise (" + std::to_string(n.hiddenWrongUnsure) + " of them not sure)";
+                               " pieces of " + std::to_string(n.hiddenCells) + " otherwise (" + std::to_string(n.hiddenWrongUnsure) + " of them not sure), " + unsureWays(n);
     // (with the noise of four streams, 0 to 12 pieces of 87 to 143 otherwise, every one of them over a column not sure)
     check(!kept && n.locks >= 150 && n.highPairs > 0 && n.leftAlone == 0 && n.hiddenWrong * 5 <= n.hiddenCells && (n.hiddenWrong - n.hiddenWrongUnsure) * 20 <= n.hiddenCells,
           "the AI of the mode, the 13th row used: " + counts);
@@ -2629,6 +2656,113 @@ static void testWaysInQuickTurnLock() {
     check(counted[0][1] > 0 && with[0] == counted[0][0] && with[1] == 0 && with[2] + with[3] + with[4] + with[5] == 0,
           "the ways of the mode in a quick turn's lock: " + text(with) + " (without waiting: " + text(counted[0]) + ")");
     std::cout << "the ways of the mode in a quick turn's lock: " << text(with) << " (without waiting: " << text(counted[0]) << ")\n";
+}
+
+// Ways over cells of the 13th and 14th rows not sure of (InputPlanner::planSure; the AI of the mode is told them,
+// Driver::tellUnsure): on high fields, the 13th and 14th rows of columns twelve high not sure of, there is a way to every
+// placement plan() finds a way to, it locks the pair there on the field given, and one taken as locking it there either
+// way (sure, steady) does so with each of those cells the other way.
+static void testSureWays() {
+    Rng rng(20261022, 7);
+    const Timing timing = realGameTiming();
+    ai::InputPlanner planner, plain;
+    planner.tapHold = plain.tapHold = 2, planner.waitQuickLock = plain.waitQuickLock = true, planner.seenAfter = 8;
+    const PairControl from = spawnPair(timing);
+    long ways = 0, steadyChecked = 0;
+    for (int i = 0; i < 300; ++i) {
+        GameField g;
+        for (int x = 0; x < W; ++x) addGarbage(g, x, x == SPAWN_X ? 6 + int(rng.below(5)) : rng.below(2) ? 12 : 7 + int(rng.below(5)));
+        int h[W];
+        g.heights(h);
+        uint8_t u13 = 0, u14 = 0;
+        for (int x = 0; x < W; ++x) {
+            if (h[x] != 12) continue;
+            if (rng.below(3) == 0) g.f.set(x, 12, GARBAGE);
+            if (rng.below(2)) u13 |= uint8_t(1u << x);
+            if (rng.below(4) == 0) u14 |= uint8_t(1u << x);
+        }
+        planner.unsure13 = u13, planner.unsure14 = u14;
+        const unsigned legal = legalPlacements(g);
+        for (int id = 0; id < PLACEMENTS; ++id) {
+            if (!(legal >> id & 1)) continue;
+            const Placement target = placement(id);
+            ai::InputPath a, b;
+            const int64_t before = planner.sureWays + planner.steadyWays;
+            const bool found = plain.plan(g, from, target, timing, 100, a);
+            check(found == planner.planSure(g, from, target, timing, 100, b), "planSure finds a way where plan does not, or none where it does (field " + std::to_string(i) + ")");
+            if (!found) continue;
+            ++ways;
+            const auto locks = [&](const GameField& on) {
+                PairControl p = from;
+                for (const uint8_t button : b.buttons)
+                    if (!p.locked) stepPair(p, on, button, timing);
+                for (int k = 0; k < 600 && !p.locked; ++k) stepPair(p, on, BTN_DOWN, timing);
+                return p.locked && p.x == target.x && p.dir == target.dir;
+            };
+            check(locks(g), "a way of planSure does not lock the pair at its placement (field " + std::to_string(i) + ")");
+            if (planner.sureWays + planner.steadyWays == before) continue;
+            ++steadyChecked;
+            for (int x = 0; x < W; ++x)
+                for (const bool row14 : {false, true}) {
+                    if (!((row14 ? u14 : u13) >> x & 1)) continue;
+                    GameField other = g;
+                    if (row14) other.row14[size_t(x)] = other.row14[size_t(x)] == EMPTY ? GARBAGE : EMPTY;
+                    else other.f.set(x, 12, other.f.get(x, 12) == EMPTY ? GARBAGE : EMPTY);
+                    check(locks(other), "a way taken as sure does not lock the pair at its placement with a cell the other way (field " + std::to_string(i) + ")");
+                }
+        }
+    }
+    const std::string counts = std::to_string(ways) + " ways: " + std::to_string(planner.sureWays) + " sure, " + std::to_string(planner.steadyWays) + " steady, " +
+                               std::to_string(planner.probingWays) + " probing, " + std::to_string(planner.seenWays) + " seen, " + std::to_string(planner.blindWays) + " blind";
+    check(ways > 0 && planner.steadyWays > 0 && steadyChecked == planner.sureWays + planner.steadyWays, "ways over cells not sure of: " + counts);
+    std::cout << "ways over cells of the 13th and 14th rows not sure of: " << counts << "\n";
+}
+
+// A pair upside down, its axis turned up into the 13th row, its child alone in the 12th row: read as it is while it is
+// followed in hand (readPair, upsideDown: on rounds drawn as the real game the pair was lost so after a quick turn, and
+// not seen again as it came down), a pair of one colour as before (its child above the screen), and no pair of
+// another piece.
+static void testUpsideDownPair() {
+    SideRead side;
+    for (auto& column : side.point)
+        for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+    side.point[3][22] = side.point[3][23] = 2;
+    const GameField under;
+    PairSeen before;
+    before.seen = true, before.at.x = 3, before.at.y = 11, before.at.dir = UP, before.colors = {1, 2};
+    const PairSeen down = readPair(side, under, {1, 2}, &before, true);
+    check(down.seen && down.axisHidden && down.at.x == 3 && down.at.y == 12 && down.at.dir == DOWN && down.colors.axis == 1 && down.colors.child == 2,
+          "a pair upside down, its axis above the screen, is not read so");
+    check(!readPair(side, under, {1, 2}).seen, "a pair upside down is read where pairs are not followed in hand");
+    const PairSeen one = readPair(side, under, {2, 2}, &before, true);
+    check(one.seen && one.childHidden && !one.axisHidden && one.at.dir == UP && one.at.y == 11, "a pair of one colour, its child above the screen, is not read as before");
+    check(!readPair(side, under, {3, 1}, &before, true).seen, "a piece of no colour of the pair is read as the pair upside down");
+    PairSeen far = before;
+    far.at.x = 1;
+    check(!readPair(side, under, {1, 2}, &far, true).seen, "a piece two columns from where the pair was seen is read as the pair upside down");
+    std::cout << "a pair upside down, its axis above the screen, is read as it is while followed in hand\n";
+}
+
+// Garbage in the 13th row of columns twelve high that Follower is not sure of and takes for empty (DriveScenario::
+// hiddenGarbage): the AI of the mode plans its ways with those cells (InputPlanner::planSure) and a picture can tell
+// them (Driver::explain). Not worse than with them taken as they are, and no pair left alone.
+static void testUnsureCells() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts on, off;
+    for (const bool ways : {true, false})
+        for (uint64_t seed = 120; seed < 126; ++seed) {
+            std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
+            Driver::prepare(a.get());
+            driveRound(seed, ways ? on : off, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .unsureWays = ways, .hiddenGarbage = true});
+        }
+    const auto counts = [](const DriveCounts& c) {
+        return std::to_string(c.hits) + " of " + std::to_string(c.locks) + " where the AI chose, " + std::to_string(c.leftAlone) + " left alone, the 13th and 14th rows " +
+               std::to_string(c.hiddenWrong) + " pieces of " + std::to_string(c.hiddenCells) + " otherwise; " + unsureWays(c);
+    };
+    check(on.leftAlone == 0 && off.leftAlone == 0 && (on.locks - on.hits) * off.locks <= (off.locks - off.hits) * on.locks + on.locks / 50,
+          "garbage hidden in the 13th row: " + counts(on) + "; taken as it is " + counts(off));
+    std::cout << "garbage hidden in the 13th row: " << counts(on) << "; the cells taken as they are " << counts(off) << "\n";
 }
 
 // The real game takes no turn for some frames after a quick turn: of the pairs of its records that turned quickly and
@@ -3528,6 +3662,9 @@ int main(int argc, char** argv) {
         testKeepsLow();
         testModeUsesThirteenthRow();
         testWaysInQuickTurnLock();
+        testSureWays();
+        testUpsideDownPair();
+        testUnsureCells();
         testTurnAfterQuickTurn();
         testOnePictureOff();
         testTapsNotTakenBack();

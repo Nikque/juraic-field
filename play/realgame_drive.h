@@ -46,6 +46,8 @@ public:
     uint64_t seed = 1;                        // of the agent's rounds
     int played = 0;                           // pairs played
     int corrected = 0;                        // pictures that showed the pair elsewhere than the engine had it
+    int explained = 0;                        // ... of the others, those a cell of the 13th or 14th row not sure of explained (explain)
+    bool unsureWays = true; // the AI plans its ways with the cells not sure of (tellUnsure), and a picture can tell them (explain)
     std::vector<int> lags;                    // the lag the pictures of each pair fitted best, the last ones (at most 15)
     // The buttons of the two turns are sent the other way round: the game turns its pair so (fit).
     bool turnsSwapped = false;
@@ -137,7 +139,7 @@ public:
 
     // The columns whose 13th or 14th row the pair in play was begun with is not sure of (shareHidden), and the field it
     // was begun with.
-    uint8_t unsureColumns() const { return unsure; }
+    uint8_t unsureColumns() const { return uint8_t(unsure13 | unsure14); }
     const juraic::GameField& begunField() const { return startOwn.field; }
 
     // The placement the pair in play is brought to (-1: none).
@@ -188,7 +190,8 @@ private:
         windowReadAt = windowPauseAt = -1;
         own = juraic::Player{};
         past.clear();
-        round = t.rounds, pairsSeen = 0, blindFor = -1, shiftBegun = -1, unsure = 0;
+        round = t.rounds, pairsSeen = 0, blindFor = -1, shiftBegun = -1, unsure13 = unsure14 = 0;
+        found.clear();
         agent->startRound(me, seed++);
         stop();
         shots.clear(); // (a pair of the round before is not fitted: its pictures may be cut short)
@@ -290,8 +293,18 @@ private:
     juraic::Player own;
     juraic::Tsumo tsumo;
     int64_t next = 0; // the frame of the game the engine plays next
-    uint8_t unsure = 0; // shareHidden: the columns whose 13th or 14th row the pair in play was begun with is not sure of
-    juraic::GameField unsureRows; // ... and the twelve rows it was begun with
+    // shareHidden: the columns whose 13th and whose 14th row the pair in play was begun with is not sure of, and the
+    // twelve rows it was begun with
+    uint8_t unsure13 = 0, unsure14 = 0;
+    juraic::GameField unsureRows;
+    // A cell of the 13th or 14th row a picture told (explain), with the twelve rows of its column then.
+    struct Found {
+        int x;
+        bool row14;
+        juraic::Cell cell;
+        uint16_t rows;
+    };
+    std::vector<Found> found;
     std::deque<Past> past;
     bool active = false;
     uint8_t held = 0;
@@ -383,13 +396,14 @@ private:
     }
     // Where the state after the frame `frame` of the game is in past (past.size(): not there). (The frames of past follow
     // one another: the place is told by the first of them.)
-    size_t pastIndex(int64_t frame) const {
-        if (past.empty() || frame < past.front().frame || frame > past.back().frame) return past.size();
-        const size_t i = size_t(frame - past.front().frame);
-        if (past[i].frame == frame) return i;
-        for (size_t k = 0; k < past.size(); ++k)
-            if (past[k].frame == frame) return k;
-        return past.size();
+    size_t pastIndex(int64_t frame) const { return indexIn(past, frame); }
+    static size_t indexIn(const std::deque<Past>& in, int64_t frame) {
+        if (in.empty() || frame < in.front().frame || frame > in.back().frame) return in.size();
+        const size_t i = size_t(frame - in.front().frame);
+        if (in[i].frame == frame) return i;
+        for (size_t k = 0; k < in.size(); ++k)
+            if (in[k].frame == frame) return k;
+        return in.size();
     }
 
     void note(int64_t at, const std::string& line) {
@@ -445,29 +459,62 @@ private:
     // The engine begins pair `pair` with the 13th and 14th rows the AI is shown (Follower::withHidden: those Follower
     // made out, and the engine's own in the 13th row where Follower has none there), not those the engine made by
     // putting the pairs, which knows of no garbage: in rounds drawn as the real game, of the pieces in those rows one of
-    // them had where the other had none, the engine was right in 49 of 233, Follower in 184. The columns where they
-    // differ, those Follower guessed garbage in (SideModel::unsure) and `guessed` are not sure (unsureColumns), and stay
-    // so while their twelve rows stay as they were (begun with the same rows, the engine no longer differs there).
+    // them had where the other had none, the engine was right in 49 of 233, Follower in 184. The cells where they
+    // differ, those of columns Follower guessed garbage in (SideModel::unsure) and of `guessed` are not sure (unsure13,
+    // unsure14), and stay so while their columns' twelve rows stay as they were (begun with the same rows, the engine no
+    // longer differs there) - but for those a picture told since (found). The AI plans its ways with them so
+    // (PlacementAgent::unsure13).
     void shareHidden(const Follower& f, int pair, uint8_t guessed) {
         const SideModel& m = f.model[me];
-        const juraic::GameField shownNow = Follower::shown(own.field);
+        const juraic::GameField rows = Follower::shown(own.field);
+        const uint8_t high = Follower::twelveHigh(rows);
         uint8_t kept = 0;
         for (int x = 0; x < juraic::W; ++x)
-            if ((unsure >> x & 1) && shownNow.f.occupied().column(x) == unsureRows.f.occupied().column(x)) kept |= uint8_t(1u << x);
-        unsure = uint8_t(guessed | (kept & Follower::twelveHigh(shownNow)));
-        unsureRows = shownNow;
-        if (!m.known) return;
-        const juraic::GameField& made = m.core.field;
-        const uint8_t both = uint8_t(Follower::twelveHigh(Follower::shown(own.field)) & Follower::twelveHigh(Follower::shown(made)));
-        for (int x = 0; x < juraic::W; ++x)
-            if ((both >> x & 1) && (own.field.f.get(x, 12) != made.f.get(x, 12) || own.field.row14[size_t(x)] != made.row14[size_t(x)])) unsure |= uint8_t(1u << x);
-        unsure |= uint8_t(m.unsure & Follower::twelveHigh(Follower::shown(own.field)));
-        own.field = Follower::withHidden(own.field, made);
-        if (!unsure) return;
+            if (rows.f.occupied().column(x) == unsureRows.f.occupied().column(x)) kept |= uint8_t(1u << x);
+        unsure13 = uint8_t(guessed | (unsure13 & kept & high)), unsure14 &= uint8_t(kept & high);
+        unsureRows = rows;
+        if (m.known) {
+            const juraic::GameField& made = m.core.field;
+            const uint8_t both = uint8_t(high & Follower::twelveHigh(Follower::shown(made)));
+            for (int x = 0; x < juraic::W; ++x) {
+                if (!(both >> x & 1)) continue;
+                if (own.field.f.get(x, 12) != made.f.get(x, 12)) unsure13 |= uint8_t(1u << x);
+                if (own.field.row14[size_t(x)] != made.row14[size_t(x)]) unsure14 |= uint8_t(1u << x);
+            }
+            unsure13 |= uint8_t(m.unsure & high);
+            own.field = Follower::withHidden(own.field, made);
+        }
+        std::erase_if(found, [&](const Found& c) { return rows.f.occupied().column(c.x) != c.rows; });
+        for (const Found& c : found) (c.row14 ? unsure14 : unsure13) &= uint8_t(~(1u << c.x));
+        withFound(own.field);
+        tellUnsure();
+        if (!unsureColumns()) return;
         std::string columns;
         for (int x = 0; x < juraic::W; ++x)
-            if (unsure >> x & 1) columns += " " + std::to_string(x + 1);
+            if (unsureColumns() >> x & 1) columns += " " + std::to_string(x + 1);
         note(f.tracker.frame, "2P pair " + std::to_string(pair) + ": the 13th and 14th rows not sure over columns" + columns);
+    }
+    // The cells pictures told (found) in `g`, where their columns' twelve rows are as they were then.
+    void withFound(juraic::GameField& g) const {
+        const juraic::GameField rows = Follower::shown(g);
+        for (const Found& c : found) {
+            if (rows.f.occupied().column(c.x) != c.rows) continue;
+            if (c.row14) g.row14[size_t(c.x)] = c.cell;
+            else g.f.set(c.x, 12, c.cell);
+        }
+    }
+    // What the AI is shown with the own side `p` at the frame `at` (Follower::observeAt), with the cells pictures told.
+    void observe(const Follower& f, const juraic::Player& p, int64_t at, juraic::ai::Observation& o) const {
+        f.observeAt(me, rules, p, at, o);
+        withFound(o.player[me].field);
+    }
+    // The cells not sure of, for the ways of the AI (PlacementAgent::unsure13, seenAfter: a way planned again after a
+    // picture showed the pair otherwise begins lag + SEEN_AFTER frames after the frame shown - the next picture, and the
+    // frame the way is planned in).
+    static constexpr int SEEN_AFTER = 3;
+    void tellUnsure() {
+        if (auto* placing = placer())
+            placing->unsure13 = unsureWays ? unsure13 : 0, placing->unsure14 = unsureWays ? unsure14 : 0, placing->seenAfter = lag + SEEN_AFTER;
     }
     // A new own pair was seen: the engine takes the side as it was then (the pair about to appear), with the pairs
     // the screen has shown.
@@ -588,7 +635,7 @@ private:
     // agent decided other buttons than those the frame took.
     bool play(const Follower& f, bool send) {
         juraic::ai::Observation o;
-        f.observeAt(me, rules, own, next, o);
+        observe(f, own, next, o);
         tellHeld();
         const auto* placing = placer();
         const int64_t revisions = placing ? placing->revisedChoices : 0;
@@ -626,7 +673,7 @@ private:
                 following = false; // (it appeared in the engine after all: as below)
             } else {
                 juraic::ai::Observation o;
-                f.observeAt(me, rules, own, now, o);
+                observe(f, own, now, o);
                 agent->frame(o);
                 return;
             }
@@ -638,7 +685,7 @@ private:
         waiting.wait = 60; // (not about to appear: the AI does not choose yet)
         waiting.nextPair = waiting.moves = t.side[me].pairs;
         juraic::ai::Observation o;
-        f.observeAt(me, rules, waiting, now, o);
+        observe(f, waiting, now, o);
         agent->frame(o);
     }
 
@@ -705,7 +752,7 @@ private:
         airSeenAt = -1;
         if (auto* placing = placer()) {
             juraic::ai::Observation o;
-            f.observeAt(me, rules, own, next, o);
+            observe(f, own, next, o);
             tellHeld();
             placing->resume(o);
         }
@@ -716,7 +763,7 @@ private:
     void steer(const Follower& f) {
         if (auto* placing = placer()) {
             juraic::ai::Observation o;
-            f.observeAt(me, rules, own, next, o);
+            observe(f, own, next, o);
             tellHeld();
             placing->steer(o);
         }
@@ -849,13 +896,14 @@ private:
         fits.clear(); // (the tables were of the lag before)
     }
 
-    // The picture `seen` (pair colours `c`) of the frame g of the game shows the pair where the engine had it: its row as
-    // in g, its column as in g or MOVE_SHOWN frames before, the way of its child as in g or up to TURN_LATEST frames
-    // before.
-    bool shows(int64_t g, const juraic::PairControl& seen, juraic::Pair c) const {
+    // The picture `seen` (pair colours `c`) of the frame g of the game shows the pair where the engine had it (`in`: the
+    // engine's states, past): its row as in g, its column as in g or MOVE_SHOWN frames before, the way of its child as in g
+    // or up to TURN_LATEST frames before.
+    bool shows(int64_t g, const juraic::PairControl& seen, juraic::Pair c) const { return shows(past, g, seen, c); }
+    bool shows(const std::deque<Past>& in, int64_t g, const juraic::PairControl& seen, juraic::Pair c) const {
         const auto at = [&](int64_t frame) -> const juraic::PairControl* {
-            const size_t i = pastIndex(frame);
-            return i < past.size() && past[i].state.phase == juraic::Phase::Control ? &past[i].state.pair : nullptr;
+            const size_t i = indexIn(in, frame);
+            return i < in.size() && in[i].state.phase == juraic::Phase::Control ? &in[i].state.pair : nullptr;
         };
         const juraic::PairControl* row = at(g);
         if (!row) return false;
@@ -931,6 +979,54 @@ private:
         return other;
     }
 
+    // A picture to put the pair right for, explained by one cell of the 13th or 14th row not sure of (unsure13, unsure14)
+    // the other way: the engine played again from the pair's beginning with that cell so shows the pair where the picture
+    // does, and with no other such cell. The engine takes that field, the cell is found (found), and the way to the
+    // placement chosen is planned again from where the pair is (put right for the picture, the pair was planned again on
+    // the field that had made it go astray: InputPlanner::planSure counts on this).
+    bool explain(const Follower& f, const juraic::PairControl& seen, juraic::Pair c) {
+        if (!unsureWays || (!unsure13 && !unsure14) || past.empty() || past.front().frame != startNext) return false;
+        const Tracker& t = f.tracker;
+        std::deque<Past> again, taken;
+        juraic::GameField field;
+        int x = -1, ways = 0;
+        bool row14 = false;
+        for (int k = 0; k < 2 * juraic::W; ++k) {
+            const int cx = k % juraic::W;
+            const bool r14 = k >= juraic::W;
+            if (!((r14 ? unsure14 : unsure13) >> cx & 1)) continue;
+            juraic::Player p = startOwn;
+            if (r14) p.field.row14[size_t(cx)] = p.field.row14[size_t(cx)] == juraic::EMPTY ? juraic::GARBAGE : juraic::EMPTY;
+            else p.field.f.set(cx, 12, p.field.f.get(cx, 12) == juraic::EMPTY ? juraic::GARBAGE : juraic::EMPTY);
+            const juraic::GameField flipped = p.field;
+            again.clear();
+            for (const Past& q : past) {
+                juraic::Incoming nobody;
+                juraic::advancePlayer(p, nobody, q.buttons, tsumo, rules, t.timing, t.roundFrame(q.frame));
+                again.push_back({q.frame, p, q.buttons});
+            }
+            bool shown = false;
+            for (const int by : {0, 1, -1, 2, -2}) shown = shown || shows(again, t.frame + by, seen, c);
+            if (!shown) continue;
+            if (++ways > 1) return false;
+            taken = again, field = flipped, x = cx, row14 = r14;
+        }
+        if (ways != 1) return false;
+        ++explained;
+        past = taken, own = past.back().state, startOwn.field = field;
+        const juraic::Cell cell = row14 ? field.row14[size_t(x)] : field.f.get(x, 12);
+        found.push_back({x, row14, cell, Follower::shown(field).f.occupied().column(x)});
+        (row14 ? unsure14 : unsure13) &= uint8_t(~(1u << x));
+        tellUnsure();
+        note(t.frame, "2P pair " + std::to_string(pairsSeen) + ": the picture tells the " + (row14 ? "14th" : "13th") + " row of column " + std::to_string(x + 1) + " is " +
+                          (cell == juraic::EMPTY ? "empty" : "not empty") + " (the picture shows " + controlText(seen) + ")");
+        if (own.phase != juraic::Phase::Control) {
+            stop(), following = true, untilLocked = true, lockedAt = t.frame;
+            return true;
+        }
+        steer(f);
+        return true;
+    }
     // A clear picture of the pair against the engine in the frame of the picture (or up to two frames either side: the
     // pad is a frame early or late now and then, 7% of the frames of a record of the real game, and the pair put right
     // for it had the buttons in flight played again for the wrong frames, sent to and fro). Shown right a little before,
@@ -961,6 +1057,7 @@ private:
             if (!twice) return;
         }
         doubtAt = -1;
+        if (explain(f, seen, c) || (either && explain(f, other, c))) return;
         ++corrected;
         note(t.frame, "2P pair " + std::to_string(pairsSeen) + " put right: the engine had " + controlText(had) + ", the picture shows " + controlText(seen));
         // (put right, a pair of one colour keeps the way the engine has it, and so the piece it has as its axis: the

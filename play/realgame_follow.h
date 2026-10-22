@@ -234,7 +234,7 @@ private:
         // lost). Not once the window has moved on: the next pair, about to appear, is seen where pairs appear before it
         // is counted. (Taken as lying so, on the real game, the down button was let go: a turn on its way lifted one
         // pair into the air, and another, turned out of the 13th row, lay 28 frames before it locked.)
-        const bool whole = t.inHand && t.pair.seen && !t.pair.childHidden;
+        const bool whole = t.inHand && t.pair.seen && !t.pair.childHidden && !t.pair.axisHidden;
         const bool coming = t.shiftedAt > t.spawnedAt + tracker.pairGap;
         m.inAir = more == 1 && contains(t.resting, t.under) && (whole || (!coming && colouredAbove(tracker.last.side[s], t.resting) > 0)) ? m.inAir + 1 : 0;
         if ((more == 2 || more == 1) && contains(t.resting, t.under)) {

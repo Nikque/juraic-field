@@ -105,6 +105,12 @@ public:
     bool keepLow = false;
     // No turn is pressed while a quick turn's lock lasts (InputPlanner::waitQuickLock).
     bool waitQuickLock = false;
+    // The cells of the 13th and 14th rows of the own field that may be the other way, and the frames after the pair is
+    // shown elsewhere than its way has it by which a way from where it is then begins (InputPlanner::planSure: the ways
+    // to the placement chosen).
+    uint8_t unsure13 = 0, unsure14 = 0;
+    int seenAfter = 0;
+    const InputPlanner& ways() const { return planner; } // (for tools: InputPlanner::sureWays and the others)
     int64_t climbs = 0;    // pairs for which every placement reached below the 13th row filled it (for tools)
     std::vector<int> climbing; // ... and the pairs whose ways were let go up into the 13th row so, by their number (for tools)
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
@@ -218,7 +224,7 @@ public:
                 // The second choice has come while the pair is in the air: there, if a path still leads there.
                 if (secondId >= 0 && secondId != target) {
                     InputPath other;
-                    if (planner.plan(p.field, p.pair, placement(secondId), o.timing, o.rules.speedPercent, other)) path = other, step = 0, target = secondId, ++againSwitched;
+                    if (planner.planSure(p.field, p.pair, placement(secondId), o.timing, o.rules.speedPercent, other)) path = other, step = 0, target = secondId, ++againSwitched;
                     else ++againNoPath;
                 }
                 endSecond(secondFrames);
@@ -226,7 +232,7 @@ public:
             if (step >= path.frames() && target >= 0) {
                 // The path is over and the pair is still in the air (not seen): from where it is now.
                 step = 0;
-                if (!planner.plan(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) path.buttons.clear();
+                if (!planner.planSure(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) path.buttons.clear();
             }
         }
         if (late) {
@@ -312,6 +318,7 @@ private:
         planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
         planner.keepLow = keepLow && lowWays;
         planner.waitQuickLock = waitQuickLock;
+        planner.unsure13 = unsure13, planner.unsure14 = unsure14, planner.seenAfter = seenAfter;
     }
     // The placements choose() is offered for the pair `colors` (counted: a first choice, for climbs).
     unsigned offered(const Observation& o, Pair colors, bool counted) {
@@ -480,7 +487,7 @@ private:
             // (a placement that is legal and has no path from where a pair appears: the next legal one is taken)
             const int wanted = id;
             for (int tries = 0; id >= 0 && tries < PLACEMENTS; ++tries, id = (id + 1) % PLACEMENTS)
-                if ((legal >> id & 1) && planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
+                if ((legal >> id & 1) && planner.planSure(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
                     target = id;
                     break;
                 }
@@ -495,7 +502,7 @@ private:
     void reach(const Observation& o, const PairControl& pair, int id, unsigned legal) {
         const Player& p = o.self();
         for (;;) {
-            if ((legal >> id & 1) && planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
+            if ((legal >> id & 1) && planner.planSure(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
                 target = id;
                 return;
             }

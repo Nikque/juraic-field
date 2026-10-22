@@ -51,6 +51,91 @@ public:
     // No turn is pressed while a quick turn's lock lasts (PairControl::quickLock): a game that takes turns again sooner
     // than Timing::quickTurnLock says does not take a turn the way did not count on.
     bool waitQuickLock = false;
+    // planSure: the cells of the 13th and 14th rows that may be the other way (columns, a bit each), and the frames after
+    // the pair is shown elsewhere than a way has it by which a way from where it is then begins.
+    uint8_t unsure13 = 0, unsure14 = 0;
+    int seenAfter = 0;
+    int64_t sureWays = 0, steadyWays = 0, probingWays = 0, seenWays = 0, blindWays = 0; // planSure's ways of each kind (for tools)
+
+    // A way to `target` when the cells unsure13 and unsure14 may be the other way (each of them on a field of its own):
+    //  - plan()'s way, when it locks the pair at the target on each of those fields too (sureWays);
+    //  - else such a way planned on one of those fields (steadyWays);
+    //  - else a way with which, on each field where it locks the pair elsewhere, the pair is shown otherwise than on the
+    //    field given (a piece of it in the twelve rows a screen shows) early enough that a way from where it is seenAfter
+    //    frames later reaches the target there: plan()'s way, one planned on one of those fields, or one that begins
+    //    with a tap that shows it (probingWays);
+    //  - else one with which it is shown otherwise before it locks, to go elsewhere from there (seenWays: the target out
+    //    of its reach on such a field);
+    //  - else plan()'s way (blindWays).
+    bool planSure(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, InputPath& out) {
+        if (!plan(field, from, target, timing, speedPercent, out)) return false;
+        if (!unsure13 && !unsure14) return true;
+        std::vector<GameField> others;
+        // (not a cell the pair is in: it is empty)
+        const auto in = [&](int x, int y) { return (from.x == x && from.y == y) || (from.childX() == x && from.childY() == y); };
+        for (int x = 0; x < W; ++x) {
+            if ((unsure13 >> x & 1) && !in(x, ROW_13)) {
+                GameField g = field;
+                g.f.set(x, ROW_13, g.f.get(x, ROW_13) == EMPTY ? GARBAGE : EMPTY);
+                others.push_back(g);
+            }
+            if ((unsure14 >> x & 1) && !in(x, ROW_13 + 1)) {
+                GameField g = field;
+                g.row14[size_t(x)] = g.row14[size_t(x)] == EMPTY ? GARBAGE : EMPTY;
+                others.push_back(g);
+            }
+        }
+        const auto locksAt = [&](const GameField& g, const InputPath& way) {
+            PairControl p = from;
+            return lands(g, p, way, timing, speedPercent) && p.x == target.x && p.dir == target.dir;
+        };
+        const auto steady = [&](const InputPath& way) {
+            for (const GameField& g : others)
+                if (!locksAt(g, way)) return false;
+            return true;
+        };
+        if (steady(out)) return ++sureWays, true;
+        std::vector<InputPath> ways{out};
+        for (const GameField& g : others) {
+            InputPath way;
+            if (plan(g, from, target, timing, speedPercent, way) && locksAt(field, way)) ways.push_back(std::move(way));
+        }
+        const auto shortest = [&](auto&& good) {
+            int best = -1;
+            for (size_t i = 0; i < ways.size(); ++i)
+                if (good(ways[i]) && (best < 0 || ways[i].frames() < ways[size_t(best)].frames())) best = int(i);
+            return best;
+        };
+        if (const int best = shortest(steady); best >= 0) return out = ways[size_t(best)], ++steadyWays, true;
+        // (a tap first that may show it: as long as a tap is, let go as long)
+        for (const uint8_t tap : {BTN_LEFT, BTN_RIGHT, BTN_CW, BTN_CCW}) {
+            const bool turn = tap & (BTN_CW | BTN_CCW);
+            if ((from.held & tap) || (turn && waitQuickLock && from.quickLock)) continue;
+            InputPath way, rest;
+            PairControl p = from;
+            for (int k = 0; k < 2 * tapHold && !p.locked; ++k) {
+                way.buttons.push_back(k < tapHold ? tap : 0);
+                stepPair(p, field, way.buttons.back(), timing, speedPercent);
+            }
+            if (p.locked || !plan(field, p, target, timing, speedPercent, rest)) continue;
+            way.buttons.insert(way.buttons.end(), rest.buttons.begin(), rest.buttons.end());
+            way.softDropRows = rest.softDropRows;
+            if (locksAt(field, way)) ways.push_back(std::move(way));
+        }
+        // (how a way shows the cells: 2 every field it goes astray on early enough to reach the target, 1 before it
+        //  locks, 0 not every one of them)
+        const auto shows = [&](const InputPath& way) {
+            int least = 2;
+            for (const GameField& g : others)
+                if (!locksAt(g, way)) least = std::min(least, shownApart(field, g, from, way, target, timing, speedPercent));
+            return least;
+        };
+        int best = 0, kind = shows(ways[0]);
+        for (size_t i = 1; i < ways.size(); ++i)
+            if (const int k = shows(ways[i]); k > kind || (k == kind && ways[i].frames() < ways[size_t(best)].frames())) best = int(i), kind = k;
+        out = ways[size_t(best)];
+        return ++(kind == 2 ? probingWays : kind == 1 ? seenWays : blindWays), true;
+    }
 
     // `from` is the pair before the first frame of the path (PairControl::held =
     // the buttons of the frame before). For a pair that is about to appear:
@@ -112,6 +197,38 @@ private:
 
     // A step that keepLow forbids: a quick turn, or the axis lifted into the 13th row.
     bool tooHigh(const ControlEvents& e, const PairControl& p) const { return low && (e.quickTurned || p.y >= ROW_13); }
+
+    // The buttons of `way` played with the pair `p` on `g`, then the down button: true when it locks.
+    static bool lands(const GameField& g, PairControl& p, const InputPath& way, const Timing& timing, int speedPercent) {
+        for (size_t i = 0; i < way.buttons.size() && !p.locked; ++i) stepPair(p, g, way.buttons[i], timing, speedPercent);
+        for (int k = 0; k < MAX_FRAMES && !p.locked; ++k) stepPair(p, g, BTN_DOWN, timing, speedPercent);
+        return p.locked;
+    }
+    // Where a screen of twelve rows shows the pieces of the pair (none of a piece in the 13th or 14th row).
+    static bool shownAlike(const PairControl& a, const PairControl& b) {
+        const bool axis = a.y < ROW_13, child = a.childY() < ROW_13;
+        if (axis != (b.y < ROW_13) || child != (b.childY() < ROW_13)) return false;
+        if ((axis || child) && (a.upper != b.upper || a.locked != b.locked)) return false;
+        return (!axis || (a.x == b.x && a.y == b.y)) && (!child || (a.childX() == b.childX() && a.childY() == b.childY()));
+    }
+    // planSure: `way` played on `field` and on `g`, where it locks the pair elsewhere: 2 when the pair is shown otherwise
+    // on `g` than on `field` in a frame from which, seenAfter frames later (the way played on there), a way reaches the
+    // target; 1 when it is shown otherwise before it locks; 0 not.
+    int shownApart(const GameField& field, const GameField& g, const PairControl& from, const InputPath& way, Placement target, const Timing& timing,
+                    int speedPercent) {
+        PairControl a = from, b = from;
+        const auto button = [&](size_t i) { return i < way.buttons.size() ? way.buttons[i] : uint8_t(BTN_DOWN); };
+        size_t i = 0;
+        for (; i < size_t(MAX_FRAMES) && !b.locked; ++i) {
+            if (!a.locked) stepPair(a, field, button(i), timing, speedPercent);
+            stepPair(b, g, button(i), timing, speedPercent);
+            if (!shownAlike(a, b)) break;
+        }
+        if (b.locked) return 0;
+        for (int k = 0; k < seenAfter && !b.locked; ++k) stepPair(b, g, button(++i), timing, speedPercent);
+        InputPath rest;
+        return !b.locked && plan(g, b, target, timing, speedPercent, rest) ? 2 : 1;
+    }
 
     struct Node {
         PairControl pair;
