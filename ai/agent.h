@@ -438,6 +438,14 @@ private:
         if (next.locked) return false;
         InputPath way;
         if (!planner.plan(p.field, next, placement(target), o.timing, o.rules.speedPercent, way) || way.frames() + 1 > left) return false;
+        // (spareFrame: nor so far down that a frame its sender is not called in takes the placement out of reach - held
+        //  down to the last frame from which a way still led there, the next one, left out, sent the pair elsewhere)
+        if (spareFrame && tapHold > 1) {
+            InputPath sure;
+            if (!planner.planSure(p.field, next, placement(target), o.timing, o.rules.speedPercent, sure) ||
+                planner.lostBySkip(p.field, next, placement(target), o.timing, o.rules.speedPercent, sure))
+                return false;
+        }
         return keepsWays(o, now, next, target);
     }
     // holdSecond, no choice to bring the pair to yet (late, or a choice made again): may the pair go straight down in this

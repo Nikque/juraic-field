@@ -2576,6 +2576,87 @@ static void testSpareFrame() {
     std::cout << "ways with a frame to spare: " << counts << "\n";
 }
 
+// The AI of the mode goes straight down while its second choice is on its way (holdSecond), in every frame in which
+// that loses nothing: held so to the last frame from which a way still led to its first choice, a frame of the clock
+// the driver was not called in then took that way away (in a record of the real game, two pairs of 590 went down
+// without a move, their second choice not come: one to the fifth column with its child below lay in the third). It
+// goes down no further than a frame left out leaves a way from (PlacementAgent::spareFrame): over the fields of those
+// two pairs and 60 fields drawn, each frame of the pair left out in turn (the agent steered after it, as the driver
+// steers it), it is brought where it chose every time (before: 32 times of 1860 elsewhere), and it still goes
+// straight down (563 frames, 572 before).
+static void testWaitWithFrameToSpare() {
+    struct Waiting : ai::PlacementAgent {
+        int fixed = 0;
+        int choose(const ai::Observation&, Pair, unsigned) override { return fixed; }
+        bool again(const ai::Observation&) override { return true; } // (its second choice does not come: againLate)
+    };
+    const Rules rules;
+    const Timing timing = realGameTiming();
+    // (the pair to `target` on `start`, frame `skip` of it in play left out: where it locked, and the frames it went
+    //  straight down for its second choice)
+    const auto run = [&](const GameField& start, Placement target, int skip, long& held) {
+        Round r;
+        r.start(rules, 7, 2, timing);
+        r.player[0].field = start;
+        Waiting a;
+        Driver::prepare(&a);
+        a.ahead = 12, a.againLate = 1000, a.fixed = placementId(target);
+        a.startRound(0, 5);
+        PlayerEvents e[2];
+        int control = -1, placed = -1;
+        uint8_t last = 0;
+        for (int f = 0; f < 3000 && r.state == RoundState::Playing && placed < 0; ++f) {
+            if (r.player[0].phase == Phase::Control) ++control;
+            uint8_t b = a.frame(ai::observe(r, 0));
+            const bool left = control == skip;
+            if (left) b = last;
+            const uint8_t both[2] = {b, 0};
+            r.step(both, e);
+            if (e[0].locked) placed = placementId(r.player[0].pair.placement());
+            if (left && r.player[0].phase == Phase::Control) a.steer(ai::observe(r, 0));
+            last = b;
+        }
+        held += a.againHeld;
+        return placed;
+    };
+    const auto fieldOf = [](const std::vector<std::string>& rows) {
+        GameField g;
+        for (size_t k = 0; k < rows.size(); ++k)
+            for (int x = 0; x < W; ++x)
+                if (rows[k][size_t(x)] != '.') g.f.set(x, int(rows.size() - 1 - k), Cell(rows[k][size_t(x)] - '0'));
+        return g;
+    };
+    std::vector<std::pair<GameField, Placement>> pairs = {
+        {fieldOf({"3.....", "64....", "515...", "431...", "445...", "355...", "441...", "414...", "3345..", "3141.5", "513433", "513666"}), Placement{4, DOWN}},
+        {fieldOf({"2.....", "1.....", "124...", "322...", "314...", "2443..", "1133..", "144422", "223633", "233422"}), Placement{4, RIGHT}}};
+    Rng rng(20261024, 3);
+    for (int i = 0; i < 60; ++i) {
+        GameField g;
+        for (int x = 0; x < W; ++x) addGarbage(g, x, x == SPAWN_X ? 3 + int(rng.below(5)) : 2 + int(rng.below(10)));
+        const unsigned legal = legalPlacements(g);
+        int id;
+        do id = int(rng.below(PLACEMENTS));
+        while (!(legal >> id & 1));
+        pairs.push_back({g, placement(id)});
+    }
+    long held = 0, tried = 0, elsewhere = 0;
+    std::string where;
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        const auto& [g, target] = pairs[i];
+        long ignored = 0;
+        if (run(g, target, -1, ignored) != placementId(target)) continue;
+        run(g, target, -1, held);
+        for (int k = 0; k < 30; ++k, ++tried)
+            if (run(g, target, k, ignored) != placementId(target)) {
+                ++elsewhere;
+                if (where.size() < 200) where += " pair " + std::to_string(i) + " frame " + std::to_string(k);
+            }
+    }
+    check(tried >= 1800 && elsewhere == 0 && held >= 450, "a frame left out while the second choice is on its way: " + std::to_string(elsewhere) + " of " + std::to_string(tried) +
+                                                            " elsewhere," + where + "; went straight down " + std::to_string(held) + " frames");
+    std::cout << "the second choice waited for with a frame to spare: " << tried << " frames left out, none elsewhere, straight down " << held << " frames\n";
+}
+
 // No turn and move begin in the same frame: which the game does first in a frame (the engine turns first) was never
 // measured, and a way that needs that order is no way on the real game. (A pair to go up over a column twelve high
 // onto another, turned and moved in one frame in the 13th row, stayed in the column before on the real game: the move
@@ -3751,6 +3832,7 @@ int main(int argc, char** argv) {
         testTapsNotTakenBack();
         testTapsWhole();
         testSpareFrame();
+        testWaitWithFrameToSpare();
         testTurnApartFromMove();
         testLateHoldsNothingAway();
         testPicture(argc > 1 ? argv[1] : ".");
