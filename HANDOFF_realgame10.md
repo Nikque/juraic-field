@@ -136,3 +136,20 @@ E は、置いた組の玉が消えた玉の上から落ちる絵と、次の組
 
 - `planSure`・`explain`: 残す（10-22 の利用者の決め）。記録 27 個で `the picture tells` 0 回・`explain` 0 回。
 - 見えない組がお邪魔で蹴られる外れ・13 段目の覚えの外れ: 案は報告に書いた。決めるのは利用者。
+
+## 8. ローカルの確かめの結果（2026-10-22）
+
+対象は `6656638` と `7dd6f33`（`7dd6f33` から後のコミットは資料だけ）。記録は 27 個（`build\Release\realgame`・`build-rgdebug\Release\realgame`・`build-rg2p-debug\Release\realgame`）。
+
+| 確かめ | `6656638` | `7dd6f33` |
+|---|---|---|
+| Windows（`final_rg50.ps1` の写し） | `rg52`: Release の警告 0、`realgame_tests` 通過、パッド 77、X3 のチェックサム 4 つが `checksums_x3only_d20.txt` と同じ、`ai_tests`・`verify_build`（43 行）通過、ctest 37 本（`realgame_virtual_pad` は 1 回目に落ち、流し直して通った）: `ALL OK (rg52)` | `rg53`: Release の警告 0、`realgame_tests` 通過（`testWaitWithFrameToSpare` を含む）、パッド 77、X3 のチェックサム 4 つが `checksums_x3only_d20.txt` と同じ、`ai_tests`・`verify_build`（43 行）通過、ctest 37 本すべて 1 回目で通過: `ALL OK (rg53)` |
+| デバッグの組み立て | `build-rg2p-debug`、警告 0（exe 10-22 21:45:38） | `build-rg2p-debug-7dd`（ゲーム本体だけ、exe 10-22 22:32:41）と `build-rg2p-debug`（`rg53` の中、exe 10-22 22:59:13）、どちらも警告 0 |
+| WSL の写し 7 つ（base・A・B2・AB・salt17・salt27・salt37）と本体 | `zo`: すべて FAILED 0、本体 exit 0 | `zp`: すべて FAILED 0、本体 exit 0 |
+| 16 通りの表 | `zo`: 451 組中 446、外れ 5 はお邪魔 6 の回戦（光 30・種 120、光 50・種 120、光 80・種 121、光 120・種 120 で 2）、放置 0、下の押し残し 0 | `zp`: `zo` と 1 行も同じ |
+| Tracker の道具 4 つ（`rgspawns`・`rgspawns1p`・`rgnum`・`rgwords`）と `rgidle`、27 記録を `13ccc71` と比べる | 出力が 1 行も違わない（`rgidle` の E・F も同じ） | Tracker・Follower は `6656638` と同じ（変わったのは `ai/agent.h` と試験） |
+| Driver の流し直し（`rgdrive15` に `Driver::prepare` を足した写し、27 記録）の F | 合わせて 4（`20261016-195818` 3、`20261017-022810` 1）。`prepare` を通さない前の形では 20 | 27 記録すべて `6656638` と同じ（F 4） |
+| 同じ流し直しの押しの一致 | `20261022-123849` 91.3 → 93.7 %（`prepare` を足した形）。前の記録は 0.1〜1.8 ポイント下がる（記録を取った版の押しは 1 フレーム） | `6656638` と同じ |
+| 古い流し直しのツール（`rgdrive.cpp`、`prepare` なし）の F | 20 → 20 | — |
+
+確かめていないこと: 拍の合図の聞こえ方と音量（利用者が確かめる）、`7dd6f33` のデバッグ版での記録。
