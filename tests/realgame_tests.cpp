@@ -2737,9 +2737,9 @@ static void testUpsideDownPair() {
     const PairSeen one = readPair(side, under, {2, 2}, &before, true);
     check(one.seen && one.childHidden && !one.axisHidden && one.at.dir == UP && one.at.y == 11, "a pair of one colour, its child above the screen, is not read as before");
     check(!readPair(side, under, {3, 1}, &before, true).seen, "a piece of no colour of the pair is read as the pair upside down");
-    PairSeen far = before;
-    far.at.x = 1;
-    check(!readPair(side, under, {1, 2}, &far, true).seen, "a piece two columns from where the pair was seen is read as the pair upside down");
+    PairSeen away = before;
+    away.at.x = 1;
+    check(!readPair(side, under, {1, 2}, &away, true).seen, "a piece two columns from where the pair was seen is read as the pair upside down");
     std::cout << "a pair upside down, its axis above the screen, is read as it is while followed in hand\n";
 }
 
