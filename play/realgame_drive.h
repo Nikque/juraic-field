@@ -708,7 +708,10 @@ private:
         // (a turn sent and not yet taken by the game can lift a pair read lying: not lying until it has been)
         bool turnOnItsWay = false;
         for (int k = 0; k <= lag && !turnOnItsWay; ++k) turnOnItsWay = (padAt(f.tracker.frame - k) & (juraic::BTN_CW | juraic::BTN_CCW)) != 0;
-        if (m.lying && m.index == pairsSeen - 1 && !turnOnItsWay && f.tracker.frame >= lockedAt + LOCK_DOWN) return true;
+        // (under the words of an all clear the words read as pieces under a pair in the air: not taken as lying there -
+        //  let go so, a pair the engine had locked a row higher fell by itself for 10 frames, three rounds drawn so)
+        const bool words = f.tracker.side[me].words.any;
+        if (m.lying && m.index == pairsSeen - 1 && !turnOnItsWay && !words && f.tracker.frame >= lockedAt + LOCK_DOWN) return true;
         // (a clear picture shows the pair in the air: the next pair comes only after it lies, whatever the engine foresees
         //  - the game stopped for 390 frames, the engine went on and foresaw the next pair, and the pair fell by itself
         //  for 320 frames on the real game once it went on)

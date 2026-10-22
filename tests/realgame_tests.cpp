@@ -3609,6 +3609,20 @@ static void testWordsBehindPairs() {
     std::cout << "words behind the pieces of 2P: " << counts << "\n";
 }
 
+// Under the words of an all clear a pair in the air can read as lying: the words read as pieces under it. The engine,
+// its field a row higher, has locked the pair; let go then, the game's pair fell by itself for 10 frames (three rounds
+// drawn with the noise otherwise). Under the words the pair is held down until the engine foresees the next pair.
+static void testLyingUnderWords() {
+    DriveCounts n;
+    driveRound(143, n, {.lag = 2, .shaky = true, .noiseStream = 27, .wordsFrom = 300});
+    driveRound(143, n, {.lag = 2, .shaky = true, .noiseStream = 37, .wordsFrom = 300});
+    driveRound(128, n, {.lag = 2, .shaky = true, .noiseStream = 7, .wordsFrom = 300});
+    const std::string counts = std::to_string(n.leftAlone) + " pairs left alone, " + std::to_string(n.downAtSpawn) + " took the down button as they appeared; " +
+                               std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose";
+    check(n.locks >= 100 && n.leftAlone == 0 && n.downAtSpawn == 0 && n.hits * 10 >= n.locks * 9, "a pair read lying under the words: " + counts);
+    std::cout << "a pair read lying under the words: " << counts << "\n";
+}
+
 // ---- 7. the menus of the real game --------------------------------------------------------------------------------
 
 static void testMenus() {
@@ -3817,6 +3831,7 @@ int main(int argc, char** argv) {
         testNoPairWithoutTheWindow();
         testSeenAsWindowSettles();
         testWordsBehindPairs();
+        testLyingUnderWords();
         testDownLostAtLock();
         testPausedRound();
         testKicksShownLate();
