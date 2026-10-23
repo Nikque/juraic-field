@@ -6,8 +6,10 @@
 // notice; 7 the default; with VIEWDIFF how the other side read differs, VFIX and VFIXPH parts of it as they are);
 // 2: 2P through the screen and a pad (driveRound
 // of tests/realgame_tests.cpp, Driver::prepare); 3: as 2, the driver not called in one frame of 7; 4: as 3, a shaky pad.
-// The last line: "mode M seed S state T ..." - state 2: 2P won, 1: 1P won. Before it (modes 2-4) "misses N of L left A"
-// (pairs elsewhere than the AI chose, pairs put, pairs left alone), and "timing pairs P wait W rest R hist ...": frames
+// The last line: "mode M seed S state T ..." - state 2: 2P won, 1: 1P won. Before it (modes 2-4) "misses N of L left A
+// down D miscounted C untargeted U" (pairs elsewhere than the AI chose, pairs put, pairs left alone, pairs that took the
+// pair before's down button as they appeared, new pairs counted otherwise than the round gave them, pairs put with no
+// placement chosen), and "timing pairs P wait W rest R hist ...": frames
 // from the pair appearing to the first frame that takes a button, and from there to the lock, summed over 2P's pairs.
 // Environment: LAG (the pad's lag, 5), HID, QTL (the quick turn's lock of the round), ORACLE (bits of what 2P is shown
 // replaced by the round itself: 1 the other side, 2 own notice, 4 own score, 8 the frame, 16 the pairs, 32/64 own field,
@@ -23,7 +25,6 @@
 // again for each choice from the round and the pair, so that a pair chosen twice does not change the choices after it),
 // KNOWN2 (2P's own window never shows the third pair before its pair appears), SHOWSTART. In mode 7: NOTICEDIFF (2P's
 // own notice read against the round's; NOTICESHOW, NOTICELONG). NOEARLY (modes 2-4): Driver::early false.
-// tools/realgame_split_shown.patch shows the AI the other side's splits and the garbage falling on it (Follower).
 #include <sstream>
 #define main realgame_tests_main
 #include "tests/realgame_tests.cpp"
@@ -73,7 +74,8 @@ static ai::Params forTwo(ai::Params p, const char* name = "P2PARAMS") {
     }
     return p;
 }
-static const Round* G_round = nullptr;
+static const Round* G_round = nullptr;     // the round being played (null once it is over)
+static GameField G_final, G_final2;       // the fields of 1P and 2P as the last round ended (FINALFIELD)
 static int G_locks[2] = {0, 0}, G_control[2] = {0, 0};
 static int G_state = 0, G_maxChain[2] = {0, 0}, G_frames = 0;
 static int64_t G_score[2] = {0, 0};
@@ -374,7 +376,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
             pauseLeft = how.pauseFor, ++n.pauses, pausedPair = true, pausedTarget = target;
     }
     n.corrected += d.corrected;
-    G_state = int(r.state);
+    G_state = int(r.state), G_final = r.player[0].field, G_final2 = r.player[1].field, G_round = nullptr;
     for (int s = 0; s < 2; ++s) G_score[s] = r.player[s].scoring.score;
     n.quickLost += quickMissed && r.state != RoundState::Playing && r.state != RoundState::Won1;
     if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get())) {
@@ -385,9 +387,9 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     n.explained += d.explained;
     if (std::getenv("AGENTSTATS"))
         if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get()))
-            std::printf("AGENT revised %lld late %lld rerouted %lld steered %lld again %lld/%lld/%lld corrected %d\n", (long long)placing->revisedChoices, (long long)placing->lateFrames,
-                        (long long)placing->rerouted, (long long)placing->steered, (long long)placing->againAsked, (long long)placing->againBegun, (long long)placing->againSwitched,
-                        d.corrected);
+            std::printf("AGENT revised %lld late %lld rerouted %lld steered %lld again %lld/%lld/%lld/%lld corrected %d\n", (long long)placing->revisedChoices,
+                        (long long)placing->lateFrames, (long long)placing->rerouted, (long long)placing->steered, (long long)placing->againAsked, (long long)placing->againBegun,
+                        (long long)placing->againSwitched, (long long)placing->againNoPath, d.corrected);
     if (words) n.wordsCorrected += d.corrected - correctedBefore;
     n.lagRounds += 1, n.lagRight += d.measuredLag() == how.lag;
     n.lagTaken += d.lag == how.lag, n.turnsFound += d.turnsSwapped;
@@ -408,7 +410,6 @@ struct Oracle : ai::X3Agent {
         std::printf("between %ld phase other %ld wait other %ld field other %ld chain other %ld\n", between, phaseOff, waitOff, fieldOff, chainOff);
         for (int a = 0; a < 8; ++a) for (int b = 0; b < 8; ++b) if (phaseTab[a][b] > 20) std::printf("  shown %d true %d: %ld\n", a, b, phaseTab[a][b]);
     }
-    void unused() { std::printf("late frames %lld revised %lld rerouted %lld again asked %lld begun %lld switched %lld steered %lld\n", (long long)lateFrames, (long long)revisedChoices, (long long)rerouted, (long long)againAsked, (long long)againBegun, (long long)againSwitched, (long long)steered); }
     using ai::X3Agent::X3Agent;
     uint64_t roundSeed = 0;
     void startRound(int seat, uint64_t seed) override {
@@ -674,13 +675,13 @@ int main(int argc, char** argv) {
             for (int s = 0; s < 2; ++s) G_maxChain[s] = std::max(G_maxChain[s], int(r.player[s].chain.chains)), G_locks[s] += e[s].locked, G_control[s] += r.player[s].phase == Phase::Control;
         if (std::getenv("PLACES")) for (int s = 0; s < 2; ++s) if (e[s].locked) std::printf("P%d %d %d f%d\n", s + 1, r.player[s].nextPair, placementId(r.player[s].pair.placement()), int(r.frame));
         }
-        G_state = int(r.state), G_frames = f;
+        G_state = int(r.state), G_frames = f, G_final = r.player[0].field, G_final2 = r.player[1].field, G_round = nullptr;
         for (int s = 0; s < 2; ++s) G_score[s] = r.player[s].scoring.score;
         if (std::getenv("AGENTSTATS"))
             if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(b.get()))
-                std::printf("AGENT revised %lld late %lld rerouted %lld steered %lld again %lld/%lld/%lld corrected 0\n", (long long)placing->revisedChoices, (long long)placing->lateFrames,
-                            (long long)placing->rerouted, (long long)placing->steered, (long long)placing->againAsked, (long long)placing->againBegun,
-                            (long long)placing->againSwitched);
+                std::printf("AGENT revised %lld late %lld rerouted %lld steered %lld again %lld/%lld/%lld/%lld corrected 0\n", (long long)placing->revisedChoices,
+                            (long long)placing->lateFrames, (long long)placing->rerouted, (long long)placing->steered, (long long)placing->againAsked,
+                            (long long)placing->againBegun, (long long)placing->againSwitched, (long long)placing->againNoPath);
     } else {
         std::unique_ptr<ai::Agent> a;
         if (const char* e = std::getenv("ORACLE")) { auto o = std::make_unique<Oracle>(forTwo(narrow)); o->bits = std::atoi(e); a = std::move(o); } else a = ai::makeAgent("x3", forTwo(narrow));
@@ -690,15 +691,17 @@ int main(int argc, char** argv) {
         const int hid = std::getenv("HID") ? std::atoi(std::getenv("HID")) : 2;
         driveMatch(seed, n, {.lag = lag, .shaky = mode >= 4, .frames = frames, .startLag = lag + 1, .given = std::move(a), .hidden = hid, .movedHidden = hid ? 1 : 0, .quietLanding = true,
                              .skipOneIn = mode >= 3 ? 7 : 0});
-        std::printf("misses %ld of %ld left %ld ", n.locks - n.hits, n.locks, n.leftAlone);
+        std::printf("misses %ld of %ld left %ld down %ld miscounted %ld untargeted %ld ", n.locks - n.hits, n.locks, n.leftAlone, n.downAtSpawn, n.miscounted, n.untargeted);
     }
-    if (std::getenv("FINALFIELD") && G_round) {
-        // (FINALFIELD: the fields as the round ended, 1P then 2P, the 14th row first)
+    if (std::getenv("FINALFIELD")) {
+        // (FINALFIELD: the fields as the round ended, 1P then 2P, the 14th row first - kept as it ended: the round itself is
+        //  gone by now)
         for (int y = 13; y >= 0; --y) {
             for (int s = 0; s < 2; ++s) {
                 std::printf("   ");
+                const GameField& g = s == 0 ? G_final : G_final2;
                 for (int x = 0; x < W; ++x) {
-                    const Cell c = y == 13 ? G_round->player[s].field.row14[size_t(x)] : G_round->player[s].field.f.get(x, y);
+                    const Cell c = y == 13 ? g.row14[size_t(x)] : g.f.get(x, y);
                     std::printf("%c", ".123456G"[std::min<int>(7, c)]);
                 }
             }

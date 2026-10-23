@@ -42,6 +42,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 
@@ -1394,33 +1395,38 @@ struct DriveCounts {
 // The buttons a pair of 2P takes as it appears (driveRound): from the frame it appears in, those sent before the
 // driver began it - for the pair before - until a frame takes buttons sent once it had begun it, after it appeared or
 // before for that pair (begun early: the driver's last pair as it appears, by its number). A down button among them is
-// the pair before's carried on to it (downAtSpawn).
+// the pair before's carried on to it (downAtSpawn). Told frame by frame: a shaky pad's frame may take buttons sent
+// before those the frame before it took.
 struct PairStart {
     int64_t begunAt = -1; // the frame of the clock the driver began its last pair in,
     int begunFor = -1;    // ... that pair's number (Driver::begunPair),
     int64_t firstAt = -1; // ... and the frame it first began that pair in (begun early and taken again from the screen)
     int64_t appearedAt = -1, firstBegunAt = -1; // the current pair's appearance and first start (a later restart keeps it)
-    bool leftOver = false;                      // the pair that appeared last still takes buttons sent before it was begun
+    int appearedFor = -1;                       // ... its number
+    bool leftOver = false;                      // the frame takes buttons sent before the pair that appeared last was begun
+    bool counted = false;                       // ... the pair's down button counted (once for a pair)
     void begin(int64_t clock, int pair) {
         if (pair != begunFor) firstAt = clock;
         begunAt = clock, begunFor = pair;
     }
     // The pair numbered `pair` appears in the frame `clock`: true when the driver had begun it before (Driver::early).
     bool appear(int64_t clock, int pair) {
-        leftOver = true, appearedAt = clock, firstBegunAt = -1;
+        leftOver = true, counted = false, appearedAt = clock, appearedFor = pair, firstBegunAt = -1;
         const bool early = begunFor == pair && firstAt < clock;
         if (early) firstBegunAt = firstAt;
         return early;
     }
-    // A frame of the round takes the buttons sent in the frame `from` of the clock.
+    // A frame of the round takes the buttons sent in the frame `from` of the clock. (A start after the pair appeared counts
+    // when it is of that pair: one of the next number is the driver's count gone wrong.)
     void take(int64_t from) {
-        if (leftOver && firstBegunAt < 0 && begunAt >= appearedAt) firstBegunAt = begunAt;
-        if (leftOver && firstBegunAt >= 0 && from >= firstBegunAt) leftOver = false;
+        if (appearedFor < 0) return;
+        if (firstBegunAt < 0 && begunFor == appearedFor && begunAt >= appearedAt) firstBegunAt = begunAt;
+        leftOver = firstBegunAt < 0 || from < firstBegunAt;
     }
     // ... `buttons`: true when they are the pair before's down button (once for a pair).
     bool downCarried(uint8_t buttons) {
-        if (!leftOver || !(buttons & BTN_DOWN)) return false;
-        leftOver = false;
+        if (!leftOver || counted || !(buttons & BTN_DOWN)) return false;
+        counted = true;
         return true;
     }
 };
@@ -1466,7 +1472,11 @@ struct PairStart {
 // lost, as on a machine under load). pauseFor: pauseAfter frames after one pair of 2P in pauseEvery appeared, the round
 // stops for that many frames, a light over columns 2 to 4 of 2P from the 10th row to the 12th (on the real game the
 // round stopped so for 390 frames and for a minute, something bright that is no piece over the middle of the field, and
-// the driver's engine, on in the meantime, had the pair put long before the game went on). quickTurnLock: the round takes
+// the driver's engine, on in the meantime, had the pair put long before the game went on). pauseBefore: the round stops
+// instead two frames before one pair of 2P in pauseEvery appears (the pairs numbered pauseEvery, twice that, ...), and
+// as it goes on, the field of 2P is lit for pauseLit frames (nothing of it read). batchAtSpawn: the driver is not called
+// in the frame whose picture first shows a new pair of 2P, and is called after the next picture is read (as the thread
+// of the play on Windows, woken late, reads the pictures that came and then drives once). quickTurnLock: the round takes
 // no turn for that many frames after a quick turn (Timing::quickTurnLock; -1: as the engine's). unsureWays: as
 // Driver::unsureWays. hiddenGarbage: as each pair of 2P locks, a piece of garbage in the 13th row of each column of 2P
 // twelve high (the screen does not show it), and Follower not sure of it, taking it for empty (a guess of
@@ -1492,6 +1502,9 @@ struct DriveScenario {
     int litFirst = 0;
     bool loseAtGround = false;
     int pauseFor = 0, pauseEvery = 4, pauseAfter = 20;
+    bool pauseBefore = false;
+    int pauseLit = 0;
+    bool batchAtSpawn = false;
     int quickTurnLock = -1;
     bool unsureWays = true; // Driver::unsureWays
     bool hiddenGarbage = false;
@@ -1574,7 +1587,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             sent[size_t(clock - first)] = d.tick(follow, clock);
             if (d.played != played) played = d.played, target = -1, ps.begin(clock, d.begunPair());
             if (d.target() >= 0) target = d.target();
-            --pauseLeft;
+            if (--pauseLeft == 0 && how.pauseLit) litFor = how.pauseLit;
             continue;
         }
         if (!words && how.wordsFrom >= 0 && f >= how.wordsFrom) {
@@ -1665,7 +1678,8 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         }
         if (how.later && f == how.laterAt) d.replaceAgent(std::move(how.later)); // (another AI chosen on the screen of the mode)
         // (a frame the driver is not called in: the pad holds what it held)
-        if (how.skipOneIn && f > 0 && skipper.below(uint64_t(how.skipOneIn)) == 0) sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
+        if ((how.skipOneIn && f > 0 && skipper.below(uint64_t(how.skipOneIn)) == 0) || (how.batchAtSpawn && f > 0 && follow.tracker.spawned[1]))
+            sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
         else {
             const int correctedNow = d.corrected;
             sent[size_t(clock - first)] = d.tick(follow, clock);
@@ -1777,8 +1791,10 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         if (e[1].locked && pausedPair)
             n.pausedLocks += pausedTarget >= 0, n.pausedHits += pausedTarget >= 0 && placementId(r.player[1].pair.placement()) == pausedTarget, pausedPair = false;
         if (e[1].spawned) inPlay = 0;
-        if (how.pauseFor && r.player[1].phase == Phase::Control && ++inPlay == how.pauseAfter && spawns % how.pauseEvery == 1)
+        if (how.pauseFor && !how.pauseBefore && r.player[1].phase == Phase::Control && ++inPlay == how.pauseAfter && spawns % how.pauseEvery == 1)
             pauseLeft = how.pauseFor, ++n.pauses, pausedPair = true, pausedTarget = target;
+        if (how.pauseFor && how.pauseBefore && r.player[1].phase == Phase::Next && r.player[1].wait == 2 && (spawns + 1) % how.pauseEvery == 0)
+            pauseLeft = how.pauseFor, ++n.pauses;
     }
     n.corrected += d.corrected;
     n.quickLost += quickMissed && r.state != RoundState::Playing && r.state != RoundState::Won1;
@@ -3730,6 +3746,19 @@ static void testPairStartCounted() {
     check(!carried({{90, 4}, {104, 5}, {106, 5}}, 105), "... taken again from the screen in the frame it appeared, the down button sent for it before is its own");
     check(carried({{90, 4}, {104, 5}}, 103), "a down button sent before a pair begun early was begun is the pair before's");
     check(carried({{90, 4}, {104, 6}}, 104), "a down button sent for a pair begun early that is not the one that appears is the pair before's");
+    // (a shaky pad: a frame takes the buttons of a frame sent before those the frame before it took - the down button of
+    //  the pair before is counted all the same. Counted once a frame had taken buttons sent for the pair, it was not)
+    PairStart shaken;
+    shaken.begin(90, 4), shaken.begin(104, 5), shaken.appear(107, 5);
+    shaken.take(104);
+    check(!shaken.downCarried(0), "the pair begun early takes its own buttons");
+    shaken.take(103);
+    check(shaken.downCarried(BTN_DOWN), "a down button sent before the pair was begun, taken after one sent for it, is the pair before's");
+    // (begun after it appeared, a pair of another number than the one that appeared: what was sent before is not that pair's)
+    PairStart other;
+    other.begin(90, 4), other.appear(106, 5), other.begin(107, 6);
+    other.take(107);
+    check(other.downCarried(BTN_DOWN), "a down button sent for another pair than the one that appeared, begun after it appeared, is not its own");
     std::cout << "the pair before's down button carried on: counted from the frame the pair that appears was begun\n";
 }
 
@@ -3794,6 +3823,114 @@ static void testPausedRound() {
     check(n.pauses >= 20 && n.leftAlone == 0 && n.downAtSpawn == 0, "the round stopped and went on: " + counts);
     check(n.pausedLocks + 2 >= n.pauses && n.pausedHits * 10 >= n.pausedLocks * 9, "the round stopped and went on: " + counts);
     std::cout << "the round stopped and went on: " << counts << "\n";
+}
+
+// The second choice in the air (PlacementAgent::askInAir) with the first choice worked out on a thread (Thinking::Free, as
+// the mode plays, and Thread): the first choice, fetched from its thread as the pair appears, is kept, and the second one
+// is begun when the screen shows a pair the first did not know (not kept, no second choice was begun in the air on a
+// thread). An agent that takes the first placement offered and always chooses again.
+static void testSecondChoiceInAirOnThreads() {
+    struct FirstOffered : ai::PlacementAgent {
+        ~FirstOffered() override { finish(); }
+        int choose(const ai::Observation&, Pair, unsigned legal) override {
+            int id = 0;
+            while (!(legal >> id & 1)) ++id;
+            return id;
+        }
+        bool again(const ai::Observation&) override { return true; }
+    };
+    for (const ai::Thinking mode : {ai::Thinking::AtOnce, ai::Thinking::Free, ai::Thinking::Thread}) {
+        FirstOffered a;
+        a.ahead = 6, a.thinking = mode, a.askInAir = true;
+        a.startRound(0, 1);
+        ai::Observation o;
+        o.player[0].phase = Phase::Next, o.player[0].wait = 6;
+        o.tsumo.pairs = {{1, 2}, {3, 4}};
+        a.frame(o);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // (the first choice made on its thread)
+        o.player[0].wait = 1;
+        a.frame(o);
+        o.player[0].phase = Phase::Control, o.player[0].nextPair = 1, o.player[0].pair = spawnPair(o.timing);
+        o.tsumo.pairs.push_back({2, 3});
+        a.frame(o);
+        check(a.againAsked == 1 && a.againBegun == 1,
+              "the second choice in the air, thinking " + std::to_string(int(mode)) + ": asked " + std::to_string(a.againAsked) + ", begun " + std::to_string(a.againBegun));
+    }
+    std::cout << "the second choice in the air begun on threads too\n";
+}
+
+// The picture that first shows a new pair of 2P is read together with the next one before the driver is called (as the
+// thread of the play on Windows does when it is woken late): the driver takes the pair as seen all the same - a pair
+// begun early or unseen is taken from the screen when it appeared at another frame than the engine foresaw (missed so,
+// it stayed taken as not shown). With garbage before the pairs lit as they appear, and with the round stopped for 3 frames
+// two frames before every other pair appears (the pairs come later than foreseen).
+static void testPicturesTakenTogether() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    long takenApart = 0;
+    for (const bool together : {false, true}) {
+        DriveCounts n;
+        std::vector<std::pair<int64_t, std::string>> notes;
+        for (const uint64_t seed : {120, 121, 122, 123}) {
+            for (const bool stops : {false, true}) {
+                std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+                Driver::prepare(a.get());
+                driveRound(seed, n, {.lag = 5, .notes = &notes, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true,
+                                     .litAsAppears = stops ? 0 : 30, .garbageAsLit = stops ? 0 : 6, .pauseFor = stops ? 3 : 0, .pauseEvery = 2, .pauseBefore = stops,
+                                     .batchAtSpawn = together});
+            }
+        }
+        long taken = 0; // pairs begun from the screen (seen, or begun before and taken again from it)
+        for (const auto& [at, line] : notes) taken += line.find(" begun: seen in frame") != std::string::npos;
+        const std::string counts = std::string(together ? "read together" : "read one by one") + ": " + std::to_string(n.leftAlone) + " pairs left alone, " +
+                                   std::to_string(n.downAtSpawn) + " took the down button as they appeared, " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
+                                   " where the AI chose, " + std::to_string(taken) + " pairs begun as seen";
+        check(n.leftAlone == 0 && n.downAtSpawn == 0 && n.hits * 100 >= n.locks * 95, "pictures read together as a pair appears: " + counts);
+        // (the rounds go otherwise read together: the pairs taken from the screen as many, within 5%)
+        if (together) check(taken * 100 >= takenApart * 95, "pictures read together as a pair appears: " + counts + " (" + std::to_string(takenApart) + " read one by one)");
+        else takenApart = taken;
+        std::cout << "pictures read together as a pair appears: " << counts << "\n";
+    }
+}
+
+// The placement a pair is brought to (Driver::target) is told also after the call in which the engine put it, the AI having
+// chosen it again in that call (the second choice in the air): rounds in which a pair of 2P went where the AI had chosen
+// last, counted against the placement before that one (2 of the 9 pairs elsewhere than the AI chose in 200 rounds drawn so).
+static void testAimKeptAtLock() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {210, 240}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
+    }
+    const std::string counts = std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose, " + std::to_string(n.untargeted) + " with none chosen";
+    check(n.hits == n.locks && n.untargeted == 0, "the placement told as the engine puts the pair: " + counts);
+    std::cout << "the placement told as the engine puts the pair: " << counts << "\n";
+}
+
+// The round stops two frames before a pair of 2P appears, and the field of 2P is lit for 80 frames as it goes on: the
+// driver, which began the pair before it appeared (early, or unseen) and whose engine put it in the meantime, plays it all
+// the same (begun again: let go as the engine foresaw the next pair, every such pair fell by itself under the light).
+// With the pairs begun early and without, the AI of the mode (Driver::prepare).
+static void testPausedBeforeAppearing() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    for (const bool early : {true, false}) {
+        DriveCounts n;
+        for (const uint64_t seed : {120, 121, 122, 123}) {
+            std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+            Driver::prepare(a.get());
+            driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .pauseFor = 80, .pauseEvery = 6,
+                                 .pauseBefore = true, .pauseLit = 80, .early = early});
+        }
+        const std::string counts = std::string(early ? "early" : "not early") + ": " + std::to_string(n.pauses) + " stops, " + std::to_string(n.leftAlone) +
+                                   " pairs left alone, " + std::to_string(n.downAtSpawn) + " took the down button as they appeared, " + std::to_string(n.miscounted) +
+                                   " counted wrong; " + std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose";
+        check(n.pauses >= 16 && n.leftAlone == 0 && n.downAtSpawn == 0 && n.miscounted == 0, "the round stopped before a pair appeared: " + counts);
+        std::cout << "the round stopped before a pair appeared: " << counts << "\n";
+    }
 }
 
 // The words of an all clear stand over the field of 2P for many frames (on the real game more than 900), behind its
@@ -4042,6 +4179,10 @@ int main(int argc, char** argv) {
         testLyingUnderWords();
         testDownLostAtLock();
         testPausedRound();
+        testPausedBeforeAppearing();
+        testSecondChoiceInAirOnThreads();
+        testPicturesTakenTogether();
+        testAimKeptAtLock();
         testPairStartCounted();
         testEarlyBegin();
         testKicksShownLate();

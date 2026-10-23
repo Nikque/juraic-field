@@ -501,7 +501,8 @@ private:
     // The buttons that bring `pair` to the placement chosen (waits for it).
     // fallen: the pair has been in the air without a choice (Free).
     void route(const Observation& o, const PairControl& pair, bool fallen = false) {
-        int id = job.valid() ? job.get() : chosen;
+        if (job.valid()) chosen = job.get(), job = std::future<int>(); // (kept: a second choice in the air stands on it)
+        int id = chosen;
         thought = false;
         const Player& p = o.self();
         const unsigned legal = legalPlacements(p.field);
