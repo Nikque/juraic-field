@@ -217,10 +217,11 @@ private:
     template <class At, class Put> static void coverPixels(float l, float t, float r, float b, Box o, ColorF c, At&& at, Put&& put) {
         const int x0 = std::max(o.x0, int(std::floor(l - 1))), x1 = std::min(o.x1, int(std::ceil(r + 1)));
         const int y0 = std::max(o.y0, int(std::floor(t - 1))), y1 = std::min(o.y1, int(std::ceil(b + 1)));
+        const uint32_t whole = pack(c, 1); // (the pixels covered whole, most of a large shape: their colour once)
         for (int y = y0; y < y1; ++y)
             for (int x = x0; x < x1; ++x) {
                 const float k = at(float(x) + 0.5f, float(y) + 0.5f);
-                if (k > 0) put(x, y, pack(c, std::min(k, 1.f)));
+                if (k > 0) put(x, y, k >= 1 ? whole : pack(c, k));
             }
     }
     // The coverage of the pixel centred at (x, y) by the box (l, t)-(r, b) of pixels.
