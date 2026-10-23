@@ -673,5 +673,5 @@ lv35 相手では見え方は効かず、選ぶ時刻と手の遅さで 10 ほ�
 |---|---|
 | 写し 4 つ | 落ちた check 0 |
 | 16 通りの表 | 449 組中外れ 6、放置 0、下の押し残し 0、数え違い 0 |
-| Windows | 背景の直しを取り込んだ後の木で、組み立て（Release・デバッグ）警告 0、`realgame_tests`・ctest 37 個通過（`C:\puyoworkench\outg2pg55_summary.txt`） |
+| Windows | 背景の直しを取り込んだ後の木で、組み立て（Release・デバッグ）警告 0、`realgame_tests`・ctest 37 個通過（`C:\puyowork\bench\out\rg2p\rg55_summary.txt`） |
 | X3 のチェックサム | `ai/` は `9c5d1b5` から変えていない（16.6 節で同じと確かめた） |
