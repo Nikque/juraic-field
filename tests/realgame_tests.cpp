@@ -1389,6 +1389,9 @@ struct DriveCounts {
     // The ways of the AI to the placements it chose over cells of those rows not sure of (InputPlanner::planSure: sure,
     // steady, probing, seen, blind), and the pictures a cell not sure of explained (Driver::explained)
     long ways[5] = {}, explained = 0;
+    // The pairs of 2P put where the AI chose whose placement Follower found, and of them those it found elsewhere (the
+    // screen showing the twelve rows alike: a piece of the pair in the 13th or 14th row)
+    long foundPairs = 0, foundAstray = 0;
 };
 
 // The buttons a pair of 2P takes as it appears (driveRound): from the frame it appears in, those sent before the
@@ -1564,6 +1567,8 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     int pauseLeft = 0, inPlay = 0;  // pauseFor: frames the round stays stopped; frames the pair of 2P has been in play
     bool pausedPair = false;        // ... the pair in play was in play as the round stopped,
     int pausedTarget = -1;          // ... and the placement the AI had chosen for it then
+    std::vector<int> putAsChosen;   // by the number of each pair of 2P locked: its placement when the AI chose it, else -1
+    int foundBefore = -1;           // Follower's last pair of 2P found
     for (int f = 0; f < how.frames && r.state == RoundState::Playing; ++f, ++clock) {
         if (pauseLeft > 0) {
             // (the round stopped: drawn as it stands, the light over it; the driver's clock goes on)
@@ -1654,6 +1659,11 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         // (the pair seen as it is about to appear, or in play already when seen late)
         if (follow.tracker.spawned[1])
             ++n.spawnsSeen, n.miscounted += follow.tracker.side[1].pairs != r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
+        if (const int k = follow.model[1].followed; k != foundBefore) {
+            foundBefore = k;
+            if (k >= 0 && k < int(putAsChosen.size()) && putAsChosen[size_t(k)] >= 0)
+                n.foundPairs += 1, n.foundAstray += placementId(follow.model[1].placed) != putAsChosen[size_t(k)];
+        }
         if (glitchDrawn) {
             const SideTrack& s1 = follow.tracker.side[1];
             n.glitchesRead += s1.pair.seen && s1.clear && s1.pair.at.x == glitchAt.x && s1.pair.at.y == glitchAt.y && s1.pair.at.dir == glitchAt.dir;
@@ -1738,6 +1748,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             n.locks += 1, n.hits += hit;
             n.garbageMisses += !hit && garbageAt > lockedAt, n.unseenGarbageMisses += !hit && garbageAt > lockedAt && clearAt <= garbageAt;
         }
+        if (e[1].locked) putAsChosen.push_back(target >= 0 && placementId(r.player[1].pair.placement()) == target ? target : -1);
         if (e[1].locked && target < 0) ++n.untargeted;
         if (e[1].locked && target >= 0 && kickPair) n.kickLocks += 1, n.kickHits += placementId(r.player[1].pair.placement()) == target;
         if (how.liftShown && e[1].control.rotated && !ps.leftOver && !e[1].spawned && r.player[1].phase == Phase::Control &&
@@ -2887,6 +2898,97 @@ static void testModeUsesThirteenthRow() {
     check(!kept && n.locks >= 150 && n.highPairs > 0 && n.leftAlone == 0 && n.hiddenWrong * 100 <= n.hiddenCells * 30 && (n.hiddenWrong - n.hiddenWrongUnsure) * 20 <= n.hiddenCells,
           "the AI of the mode, the 13th row used: " + counts);
     std::cout << "the AI of the mode, the 13th row used: " << counts << "\n";
+}
+
+// On a screen of twelve rows, the placements of the caller's own pairs it tells (Follower::tell) are taken where the
+// screen cannot tell: (1) a pair lying across the first two columns, its child in the 13th row of the first (twelve
+// high), shows the twelve rows as it would standing on the second, its child in the 13th row there - the first
+// placement that shows so, taken when nothing is told; (2) a pair put upright on the fifth column, twelve high, shows
+// nothing: put there as the next pair appears.
+static void testToldPlacements() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 4}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    // 2P's field: the first column twelve high, the second eleven, the fourth eleven (a floor kick there lifts a pair onto
+    // the fifth), the fifth twelve (two colours in turn: nothing clears).
+    Reading tall = empty;
+    for (int y = 0; y < 12; ++y) tall.side[1].point[0][2 * y] = tall.side[1].point[0][2 * y + 1] = Cell(1 + y % 2);
+    for (int y = 0; y < 11; ++y) tall.side[1].point[1][2 * y] = tall.side[1].point[1][2 * y + 1] = Cell(3 + y % 2);
+    for (int y = 0; y < 11; ++y) tall.side[1].point[3][2 * y] = tall.side[1].point[3][2 * y + 1] = Cell(3 + y % 2);
+    for (int y = 0; y < 12; ++y) tall.side[1].point[4][2 * y] = tall.side[1].point[4][2 * y + 1] = Cell(1 + (y + 1) % 2);
+    for (const bool telling : {false, true}) {
+        Follower f;
+        int64_t at = 50000;
+        for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+        for (int k = 0; k < 5; ++k) f.step(tall, at++);
+        // (1) The first pair (5 4) appears, and lies with its axis in the 12th row of the second column, its child in
+        // the 13th of the first (column 2, child left).
+        Reading first = window(tall, {1, 2}, {3, 3});
+        first.side[1].point[SPAWN_X][23] = 5;
+        for (int k = 0; k < 3; ++k) f.step(first, at++);
+        check(f.tracker.side[1].pairs == 1, "the first pair is not seen");
+        if (telling) f.tell(1, 0, placement(placementId({1, LEFT})));
+        Reading landed = window(tall, {1, 2}, {3, 3});
+        landed.side[1].point[1][22] = landed.side[1].point[1][23] = 5;
+        for (int k = 0; k < 6; ++k) f.step(landed, at++);
+        // (2) The next pair (1 2) appears, and goes up the fifth column out of sight (column 5, child up).
+        Reading next = window(landed, {3, 3}, {4, 4});
+        next.side[1].point[SPAWN_X][23] = 1;
+        f.step(next, at++);
+        check(f.tracker.spawned[1] && f.tracker.side[1].pairs == 2 && f.model[1].followed == 0, "the second pair is not seen, or the first not found");
+        const GameField& g = f.model[1].core.field;
+        if (telling) check(g.f.get(0, 12) == 4 && g.f.get(1, 12) == EMPTY, "the pair lying as told is not found so");
+        else check(g.f.get(1, 12) == 4, "with nothing told, the pair is not found as the first placement that shows the twelve rows so");
+        for (int k = 0; k < 2; ++k) f.step(next, at++);
+        if (telling) f.tell(1, 1, placement(placementId({4, UP})));
+        for (int k = 0; k < 40; ++k) f.step(landed, at++);
+        for (int k = 0; k < 6; ++k) f.step(window(landed, {4, 4}, {2, 2}), at++);
+        Reading third = window(landed, {4, 4}, {2, 2});
+        third.side[1].point[SPAWN_X][23] = 3;
+        f.step(third, at++);
+        check(f.tracker.spawned[1] && f.tracker.side[1].pairs == 3, "the third pair is not seen");
+        const GameField& h = f.model[1].core.field;
+        if (telling)
+            check(f.model[1].followed == 1 && h.f.get(4, 12) == 1 && h.row14[4] == 2,
+                  "the pair put out of sight as told is not in the field followed (pair " + std::to_string(f.model[1].followed) + " found, the fifth column's 13th row " +
+                      std::to_string(int(h.f.get(4, 12))) + " and 14th " + std::to_string(int(h.row14[4])) + ")");
+        else check(f.model[1].followed < 1 && h.f.get(4, 12) == EMPTY && h.row14[4] == EMPTY, "with nothing told, a pair put out of sight is in the field followed");
+    }
+    std::cout << "the own placements told are taken where the screen cannot tell them\n";
+}
+
+// A pair of 2P put where the AI chose, a piece of it in the 13th or 14th row, is found where it was put: the screen
+// shows its twelve rows as other placements would (put upright on a column twelve high, on the sixth column or the
+// fourth; lying with its child in the 13th row of the column beside, or upright with the child in the 13th row of its
+// own), and the driver's engine, which put it, tells which. (Found as the first placement that showed so, the pieces it
+// left in the 13th and 14th rows of another column were taken for the field's, and pairs planned on them went down a
+// column short: 7 of the 9 pairs elsewhere than the AI chose in 200 rounds drawn as the real game; in these 6 rounds 9
+// of 239 pairs found elsewhere, and 7 elsewhere than the AI chose.) Left: a pair lying across two columns, its axis in
+// the 13th row over the sixth column, its child splitting down the fifth - on a screen that shows a part of the 13th row
+// the axis is seen there before the child lands, and only the pair upright, wholly out of sight, shows the twelve rows
+// so then: 1 of 242.
+static void testOwnPlacementsFound() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {104, 110, 122, 153, 262, 263}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
+    }
+    const std::string counts = std::to_string(n.foundAstray) + " of " + std::to_string(n.foundPairs) + " pairs put where the AI chose found elsewhere; " +
+                               std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose, " + std::to_string(n.leftAlone) + " left alone; the 13th and 14th rows " +
+                               std::to_string(n.hiddenWrong) + " pieces of " + std::to_string(n.hiddenCells) + " otherwise";
+    check(n.foundPairs >= 200 && n.foundAstray * 100 <= n.foundPairs && n.leftAlone == 0, "the own pairs found where they were put: " + counts);
+    std::cout << "the own pairs found where they were put: " << counts << "\n";
 }
 
 // A way planned again while a quick turn's lock lasts (a second choice, a pair put right): with the engine's lock of the
@@ -4048,6 +4150,8 @@ int main(int argc, char** argv) {
         testLiftsShownLate();
         testKeepsLow();
         testModeUsesThirteenthRow();
+        testToldPlacements();
+        testOwnPlacementsFound();
         testWaysInQuickTurnLock();
         testSureWays();
         testUpsideDownPair();

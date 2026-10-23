@@ -166,8 +166,16 @@ public:
     }
 
     // In each frame of the clock `now`, after the readings of the screen up to it are in `f`: the buttons to hold on
-    // the pad from now on (the game takes them in its frame now + lag).
-    uint8_t tick(const Follower& f, int64_t now) {
+    // the pad from now on (the game takes them in its frame now + lag). `f` is told where the engine locked the pairs
+    // (Follower::tell).
+    uint8_t tick(Follower& f, int64_t now) {
+        const uint8_t out = drive(f, now);
+        if (lockedPair >= 0) f.tell(me, lockedPair, lockedPlacement);
+        return out;
+    }
+
+private:
+    uint8_t drive(const Follower& f, int64_t now) {
         const Tracker& t = f.tracker;
         if (nextAgent && !active) {
             if (agent) std::thread([before = std::move(agent)]() mutable { before.reset(); }).detach();
@@ -202,10 +210,10 @@ public:
         return press(now, held);
     }
 
-private:
     // (Tracker counts the pairs of a round from 0 only as a new round begins.)
     void beginRound(const Tracker& t) {
         following = untilLocked = false;
+        lockedPair = -1;
         liftedFor = shownAt = doubtAt = -1;
         windowReadAt = windowPauseAt = -1;
         own = juraic::Player{};
@@ -367,6 +375,8 @@ private:
     // read just then, the pair let go of it fell on slowly by itself (seen on the real game: 100 frames for one pair).
     bool untilLocked = false;
     int64_t lockedAt = -1; // the frame of the clock the engine locked the pair in (lies)
+    int lockedPair = -1;                 // the number (from 0) of the pair the engine locked last in the round (-1: none),
+    juraic::Placement lockedPlacement{}; // ... and where (told to Follower: tick)
     int64_t airSeenAt = -1; // overdue: the last clear picture that showed the pair put in the air,
     int airHeight = 0;      // ... the half cells of its axis then
     int liftedFor = -1; // the pair held down again as a clear picture showed pieces of a colour in the air after it was put
@@ -736,8 +746,15 @@ private:
         past.push_back({next, own, took});
         if (past.size() > 240) past.pop_front();
         ++next;
-        if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) stop(), following = true, untilLocked = true, lockedAt = f.tracker.frame;
+        if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) lockEngine(f.tracker.frame);
         return wanted == took;
+    }
+
+    // The engine has locked the pair in play, in the frame `at` of the clock: nothing is pressed for it but the down
+    // button (holdDown), and where it locked it is kept for Follower (tick).
+    void lockEngine(int64_t at) {
+        stop(), following = true, untilLocked = true, lockedAt = at;
+        lockedPair = pairsSeen - 1, lockedPlacement = own.pair.placement();
     }
 
     // Between the own pairs the AI is shown each frame all the same, the own side waiting for its pair; nothing it
@@ -1153,7 +1170,7 @@ private:
         note(t.frame, "2P pair " + std::to_string(pairsSeen) + ": the picture tells the " + (row14 ? "14th" : "13th") + " row of column " + std::to_string(x + 1) + " is " +
                           (cell == juraic::EMPTY ? "empty" : "not empty") + " (the picture shows " + controlText(seen) + ")");
         if (own.phase != juraic::Phase::Control) {
-            stop(), following = true, untilLocked = true, lockedAt = t.frame;
+            lockEngine(t.frame);
             return true;
         }
         steer(f);
@@ -1223,7 +1240,7 @@ private:
         }
         if (own.phase != juraic::Phase::Control) {
             // (put right, the pair has come to rest in the engine: held down as after any pair the engine has put)
-            stop(), following = true, untilLocked = true, lockedAt = t.frame;
+            lockEngine(t.frame);
             return;
         }
         steer(f);
