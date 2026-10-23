@@ -1,22 +1,31 @@
 // realgame_strength <mode> <seed>: rounds drawn of X3 against X3 (beam 30, depth 8, queues 3), 2P as the mode plays it,
 // 12000 frames at most. Built from the root of the tree:
 //   g++ -std=c++20 -O2 -msse4.1 -mpopcnt -pthread -I. tools/realgame_strength.cpp -o realgame_strength
-// mode 0: 2P plays the round itself; 6: the same with Driver::prepare; 2: 2P through the screen and a pad (driveRound
+// mode 0: 2P plays the round itself; 6: the same with Driver::prepare; 7: as 6, 2P shown parts of what Follower reads of
+// the screen in every frame (VIEW bits: 1 the other side, 2 own score and notice, 4 the pairs, 8 own score, 16 own
+// notice; 7 the default; with VIEWDIFF how the other side read differs, VFIX and VFIXPH parts of it as they are);
+// 2: 2P through the screen and a pad (driveRound
 // of tests/realgame_tests.cpp, Driver::prepare); 3: as 2, the driver not called in one frame of 7; 4: as 3, a shaky pad.
 // The last line: "mode M seed S state T ..." - state 2: 2P won, 1: 1P won. Before it (modes 2-4) "misses N of L left A"
 // (pairs elsewhere than the AI chose, pairs put, pairs left alone), and "timing pairs P wait W rest R hist ...": frames
 // from the pair appearing to the first frame that takes a button, and from there to the lock, summed over 2P's pairs.
 // Environment: LAG (the pad's lag, 5), HID, QTL (the quick turn's lock of the round), ORACLE (bits of what 2P is shown
 // replaced by the round itself: 1 the other side, 2 own notice, 4 own score, 8 the frame, 16 the pairs, 32/64 own field,
-// 256 own side between pairs, 1024 own side, ...), PLACES (each pair put), TP (each 2P pair's frames), TPB=<frame> (2P's
-// buttons up to that frame), SHOWDIFF, HOLDSTART=N (modes 0, 5, 6: 2P's first pair appears N frames late), AISEED (modes
-// 2-4: the AI of 2P draws its random numbers from seed + 1, as in modes 0, 5 and 6, not from 1 in every round),
-// P2PARAMS=name=value,... (settings of 2P's AI). In modes 0, 5 and 6, and in modes 2-4 with ORACLE (0 for nothing
-// replaced): CHOICES (each choice of 2P with what it saw, and 2P's field as each pair appears), RESEED (2P's random
-// numbers drawn again for each choice from the round and the pair, so that a pair chosen twice does not change the
-// choices after it), KNOWN2 (2P's own window never shows the third pair before its pair appears), SHOWSTART. EARLY and
-// PADPAST act only with tools/realgame_early_begin.patch applied; tools/realgame_air_again.patch (applied after it) asks
-// the second choice in the air too (PlacementAgent::askInAir, set by Driver::prepare).
+// 256 own side between pairs, 1024 own side, 32768 own 13th and 14th rows, ...), PLACES (each pair put), TP (each 2P
+// pair's frames), TPB=<frame> (2P's buttons up to that frame), SHOWDIFF, HOLDSTART=N (modes 0, 5, 6: 2P's first pair
+// appears N frames late), AISEED (modes 2-4: the AI of 2P draws its random numbers from seed + 1, as in modes 0, 5 and
+// 6, not from 1 in every round), SUREOFF (modes 2-4: Driver::unsureWays false), P2PARAMS=name=value,... (settings of
+// 2P's AI; P1PARAMS of 1P's), P1AI=<name> (1P's AI, x3 by default: X3 against X3 on one tsumo often plays the same moves
+// on both sides, the later side losing - a real opponent does not; lv35 never did), FINALFIELD (the fields as the round
+// ended), AGENTSTATS (2P's choices made again and the like). In modes 0, 5 and 6, and in modes 2-4 with ORACLE (0 for
+// nothing replaced): CHOICES (each choice of 2P with what it saw, and 2P's field as each pair appears; TOPROWS with the
+// 12th to 14th rows, and in modes 2-4 those of Follower and of the driver's engine), RESEED (2P's random numbers drawn
+// again for each choice from the round and the pair, so that a pair chosen twice does not change the choices after it),
+// KNOWN2 (2P's own window never shows the third pair before its pair appears), SHOWSTART. In mode 7: NOTICEDIFF (2P's
+// own notice read against the round's; NOTICESHOW, NOTICELONG). EARLY and PADPAST act only with
+// tools/realgame_early_begin.patch applied; tools/realgame_air_again.patch (applied after it) asks the second choice in
+// the air too (PlacementAgent::askInAir, set by Driver::prepare); tools/realgame_split_shown.patch shows the AI the other
+// side's splits and the garbage falling on it (Follower).
 #include <sstream>
 #define main realgame_tests_main
 #include "tests/realgame_tests.cpp"
@@ -41,18 +50,28 @@ static uint64_t fieldHash(const GameField& g) {
         for (int x = 0; x < W; ++x) h = (h ^ uint64_t(g.f.get(x, y))) * 1099511628211ull;
     return h % 1000000;
 }
-// (CHOICES: 2P's field as each of its pairs appears)
-static void notePair(const Player& p, const PlayerEvents& e) {
-    if (e.spawned && std::getenv("CHOICES")) std::printf("SP %d own %06llu\n", p.nextPair - 1, (unsigned long long)fieldHash(p.field));
+// The 12th, 13th and 14th rows of `g` ("row12/row13/row14").
+static std::string topRows(const GameField& g) {
+    std::string s;
+    for (const int y : {11, 12, 13}) {
+        for (int x = 0; x < W; ++x) s += ".123456G"[std::min<int>(7, y == 13 ? g.row14[size_t(x)] : g.f.get(x, y))];
+        if (y != 13) s += '/';
+    }
+    return s;
 }
-// P2PARAMS=name=value,...: settings of 2P's AI
-static ai::Params forTwo(ai::Params p) {
-    if (const char* s = std::getenv("P2PARAMS")) {
+// (CHOICES: 2P's field as each of its pairs appears; TOPROWS: and its top rows)
+static void notePair(const Player& p, const PlayerEvents& e) {
+    if (e.spawned && std::getenv("CHOICES"))
+        std::printf("SP %d own %06llu%s%s\n", p.nextPair - 1, (unsigned long long)fieldHash(p.field), std::getenv("TOPROWS") ? " top " : "", std::getenv("TOPROWS") ? topRows(p.field).c_str() : "");
+}
+// P2PARAMS=name=value,...: settings of 2P's AI (P1PARAMS: of 1P's)
+static ai::Params forTwo(ai::Params p, const char* name = "P2PARAMS") {
+    if (const char* s = std::getenv(name)) {
         std::string t(s);
         std::replace(t.begin(), t.end(), ',', '\n');
         std::istringstream in(t);
         std::string error;
-        if (!ai::loadParams(in, p, error)) std::fprintf(stderr, "P2PARAMS: %s\n", error.c_str()), std::exit(2);
+        if (!ai::loadParams(in, p, error)) std::fprintf(stderr, "%s: %s\n", name, error.c_str()), std::exit(2);
     }
     return p;
 }
@@ -73,7 +92,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     Rng noise(seed, how.noiseStream), shake(seed, 9), skipper(seed, 11), glitcher(seed, 13), twicer(seed, 15);
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
-    const std::unique_ptr<ai::Agent> other = ai::makeAgent("x3", narrow);
+    const std::unique_ptr<ai::Agent> other = ai::makeAgent(std::getenv("P1AI") ? std::getenv("P1AI") : "x3", forTwo(narrow, "P1PARAMS"));
     other->startRound(0, seed);
     Follower follow;
     Driver d;
@@ -83,7 +102,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     //  again as it begins, and the second one draws from seed + 1)
     if (std::getenv("AISEED")) d.seed = seed;
     d.takeLag = !how.keepLag;
-    d.unsureWays = how.unsureWays;
+    d.unsureWays = how.unsureWays && !std::getenv("SUREOFF"); // (SUREOFF: Driver::unsureWays false)
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
@@ -279,6 +298,9 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         r.step(buttons, e);
         timePair(r.player[1], pressed1, e[1], f);
         notePair(r.player[1], e[1]);
+        if (e[1].spawned && std::getenv("TOPROWS"))
+            std::printf("FM %d followed %d known %d model %s engine %s unsure %02x\n", r.player[1].nextPair - 1, follow.model[1].followed, int(follow.model[1].known),
+                        topRows(follow.model[1].core.field).c_str(), topRows(d.begunField()).c_str(), unsigned(d.unsureColumns()));
         for (int s = 0; s < 2; ++s) G_maxChain[s] = std::max(G_maxChain[s], int(r.player[s].chain.chains)), G_locks[s] += e[s].locked, G_control[s] += r.player[s].phase == Phase::Control;
         if (std::getenv("PLACES")) for (int s = 0; s < 2; ++s) if (e[s].locked) std::printf("P%d %d %d f%d\n", s + 1, r.player[s].nextPair, placementId(r.player[s].pair.placement()), int(r.frame));
         G_frames = f;
@@ -363,6 +385,11 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         n.ways[0] += w.sureWays, n.ways[1] += w.steadyWays, n.ways[2] += w.probingWays, n.ways[3] += w.seenWays, n.ways[4] += w.blindWays;
     }
     n.explained += d.explained;
+    if (std::getenv("AGENTSTATS"))
+        if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get()))
+            std::printf("AGENT revised %lld late %lld rerouted %lld steered %lld again %lld/%lld/%lld corrected %d\n", (long long)placing->revisedChoices, (long long)placing->lateFrames,
+                        (long long)placing->rerouted, (long long)placing->steered, (long long)placing->againAsked, (long long)placing->againBegun, (long long)placing->againSwitched,
+                        d.corrected);
     if (words) n.wordsCorrected += d.corrected - correctedBefore;
     n.lagRounds += 1, n.lagRight += d.measuredLag() == how.lag;
     n.lagTaken += d.lag == how.lag, n.turnsFound += d.turnsSwapped;
@@ -408,6 +435,7 @@ struct Oracle : ai::X3Agent {
             std::printf("CH %d moves %d own %06llu opp %06llu oppPhase %d oppChain %d inMine %d inTheirs %d known %d tie %llu pick %d\n", index, int(o.self().moves),
                         (unsigned long long)hash(o.self().field), (unsigned long long)hash(o.player[1 - o.me].field), int(o.player[1 - o.me].phase), int(o.player[1 - o.me].chain.chains),
                         int(o.self().incoming.total()), int(o.player[1 - o.me].incoming.total()), known, (unsigned long long)(probe.next() % 1000), pick);
+            if (std::getenv("TOPROWS")) std::printf("CT %d top %s\n", index, topRows(o.self().field).c_str());
             const Player &m = o.self(), &t = o.opponent();
             std::printf("CX %d frame %lld phase %d wait %d score %lld left %lld pend %d conf %d oScore %lld oLeft %lld oPend %d oConf %d oWait %d oNext %d oWave %d\n", index,
                         (long long)o.frame, int(m.phase), int(m.wait), (long long)m.scoring.score, (long long)m.scoring.pool, m.incoming.pending, m.incoming.confirmed,
@@ -506,6 +534,15 @@ struct Oracle : ai::X3Agent {
         }
         if (bits & 8192) t.player[1].nextPair = truth.player[1].nextPair, t.player[1].moves = truth.player[1].moves;
         if (bits & 16384) t.player[1].wave = truth.player[1].wave, t.player[1].placed = truth.player[1].placed, t.player[1].buttons = truth.player[1].buttons;
+        if (bits & 32768) {
+            // own 13th and 14th rows as they are (while the round's field stands still - its pair in play or about to
+            // appear - over the same twelve rows)
+            GameField& g = t.player[1].field;
+            const GameField& q = truth.player[1].field;
+            const Phase ph = truth.player[1].phase;
+            if ((ph == Phase::Control || ph == Phase::Next) && Follower::shown(g).f == Follower::shown(q).f)
+                for (int x = 0; x < W; ++x) g.f.set(x, 12, q.f.get(x, 12)), g.row14[size_t(x)] = q.row14[size_t(x)];
+        }
         if (bits & 1024) t.player[1] = truth.player[1], t.frame = truth.frame;
         if (bits & 64) t.player[1].field = truth.player[1].field, t.player[1].scoring = truth.player[1].scoring, t.player[1].incoming = truth.player[1].incoming, t.player[1].chain = truth.player[1].chain;
         return ai::X3Agent::frame(t);
@@ -528,18 +565,109 @@ int main(int argc, char** argv) {
         r.start(rules, seed, 2, timing);
         // (HOLDSTART=N: the first pair of 2P appears N frames after that of 1P, and all of 2P's round with it)
         if (const char* h = std::getenv("HOLDSTART")) r.player[1].wait += std::atoi(h);
-        auto a = ai::makeAgent("x3", narrow);
+        auto a = ai::makeAgent(std::getenv("P1AI") ? std::getenv("P1AI") : "x3", forTwo(narrow, "P1PARAMS"));
         ai::Params seeing = forTwo(narrow);
         if (const char* e = std::getenv("SEELATE")) seeing.seeLate = std::atoi(e);
         std::unique_ptr<ai::Agent> b = std::make_unique<Oracle>(seeing);
-        if (mode == 6) Driver::prepare(b.get());
+        if (mode == 6 || mode == 7) Driver::prepare(b.get());
+        if (std::getenv("FINALFIELD")) G_round = &r;
         a->startRound(0, seed), b->startRound(1, seed + 1);
         PlayerEvents e[2];
         int f = 0;
         const int delay = mode == 5 ? (std::getenv("LAG") ? std::atoi(std::getenv("LAG")) : 5) : 0;
         std::deque<uint8_t> late(size_t(delay), 0);
+        // mode 7: the screen drawn and read in every frame; the AI is shown what Follower makes of it (VIEW bits, 7: all):
+        // 1 the other side, 2 its own score and notice, 4 the pairs
+        const Layout lay = sampleLayout();
+        std::unique_ptr<Canvas> canvas;
+        Follower follow;
+        Rng noise(seed, 7);
+        int64_t clock = 1000;
+        const int view = std::getenv("VIEW") ? std::atoi(std::getenv("VIEW")) : 7;
+        if (mode == 7) {
+            canvas = std::make_unique<Canvas>(1280, 720, lay);
+            for (int k = 0; k < 45; ++k, ++clock) draw(*canvas, lay, r, true, noise), follow.step(read(canvas->picture(), lay), clock);
+        }
         for (; f < frames && r.state == RoundState::Playing; ++f) {
-            uint8_t mine = b->frame(ai::observe(r, 1));
+            ai::Observation seen = ai::observe(r, 1);
+            if (mode == 7) {
+                draw(*canvas, lay, r, false, noise, true);
+                follow.step(read(canvas->picture(), lay), clock);
+                ai::Observation screen;
+                follow.observeAt(1, rules, r.player[1], clock++, screen);
+                if (std::getenv("NOTICEDIFF")) {
+                    // (NOTICEDIFF: 2P's own notice read from the screen against the round's)
+                    static long n = 0, total = 0, split = 0, under = 0, over = 0, shown = 0;
+                    const Incoming &a = screen.player[1].incoming, &b = seen.player[1].incoming;
+                    ++n;
+                    static long run = 0, longOff = 0, longExamples = 0;
+                    if (a.total() != b.total()) ++total, under += a.total() < b.total(), over += a.total() > b.total();
+                    else if (a.pending != b.pending) ++split;
+                    run = a.total() != b.total() ? run + 1 : 0;
+                    longOff += run >= 4;
+                    if (run == 4 && std::getenv("NOTICELONG") && longExamples++ < 30)
+                        std::printf("NL f %d shown %d+%d true %d+%d read %d phase1P %d phase2P %d\n", f, a.pending, a.confirmed, b.pending, b.confirmed,
+                                    follow.tracker.side[1].notice, int(r.player[0].phase),
+                                    int(r.player[1].phase));
+                    static bool longRegistered = false;
+                    if (!longRegistered) longRegistered = true, std::atexit([] { std::printf("NOTICE long %ld\n", longOff); });
+                    if (a.total() != b.total() && shown < 40 && std::getenv("NOTICESHOW"))
+                        ++shown, std::printf("ND f %d shown %d+%d true %d+%d phase1P %d chain1P %d phase2P %d\n", f, a.pending, a.confirmed, b.pending, b.confirmed, int(r.player[0].phase),
+                                             int(r.player[0].chain.chains), int(r.player[1].phase));
+                    static bool registered = false;
+                    if (!registered) registered = true, std::atexit([] { std::printf("NOTICE frames %ld totalOff %ld under %ld over %ld splitOff %ld\n", n, total, under, over, split); });
+                }
+                if (std::getenv("VIEWDIFF")) {
+                    // (VIEWDIFF: how the other side read from the screen differs from it, frame by frame)
+                    static long n = 0, phase = 0, wait = 0, field = 0, chain = 0, score = 0, pool = 0, incoming = 0, next = 0, tab[8][8] = {};
+                    const Player &a = screen.player[0], &b = seen.player[0];
+                    ++n;
+                    if (a.phase != b.phase) ++phase, ++tab[int(b.phase)][int(a.phase)];
+                    else if (a.phase != Phase::Control && a.wait != b.wait) ++wait;
+                    static long fieldBy[8] = {};
+                    const bool fieldOff = !(Follower::shown(a.field).f == Follower::shown(b.field).f);
+                    field += fieldOff, fieldBy[int(b.phase)] += fieldOff;
+                    static bool byRegistered = false;
+                    if (!byRegistered) byRegistered = true, std::atexit([] { for (int x = 0; x < 8; ++x) if (fieldBy[x]) std::printf("VDF true %d %ld\n", x, fieldBy[x]); });
+                    if (fieldOff && std::getenv("VIEWDIFFSHOW") && fieldBy[int(b.phase)] % 400 == 1) {
+                        std::printf("FIELD frame %d true phase %d wait %d | shown phase %d wait %d\n", f, int(b.phase), int(b.wait), int(a.phase), int(a.wait));
+                        for (int y = 11; y >= 0; --y) {
+                            std::printf("   ");
+                            for (int x = 0; x < W; ++x) std::printf("%c", ".123456G"[std::min<int>(7, b.field.f.get(x, y))]);
+                            std::printf("  ");
+                            for (int x = 0; x < W; ++x) std::printf("%c", ".123456G"[std::min<int>(7, a.field.f.get(x, y))]);
+                            std::printf("\n");
+                        }
+                    }
+                    chain += a.chain.chains != b.chain.chains, score += a.scoring.score != b.scoring.score, pool += a.scoring.pool != b.scoring.pool;
+                    incoming += a.incoming.pending != b.incoming.pending || a.incoming.confirmed != b.incoming.confirmed, next += a.nextPair != b.nextPair;
+                    static bool registered = false;
+                    if (!registered) registered = true, std::atexit([] {
+                        std::printf("VD frames %ld phase %ld wait %ld field %ld chain %ld score %ld pool %ld incoming %ld next %ld\n", n, phase, wait, field, chain, score, pool, incoming, next);
+                        for (int x = 0; x < 8; ++x) for (int y = 0; y < 8; ++y) if (tab[x][y]) std::printf("VDT true %d shown %d %ld\n", x, y, tab[x][y]);
+                    });
+                }
+                if (view & 1) {
+                    // (VFIX bits: parts of the other side as they are after all - 1 score, 2 notice, 4 phase and wait, 8 field,
+                    //  16 chain and wave)
+                    const Player truth = seen.player[0];
+                    seen.player[0] = screen.player[0];
+                    const int fix = std::getenv("VFIX") ? std::atoi(std::getenv("VFIX")) : 0;
+                    Player& p = seen.player[0];
+                    if (fix & 1) p.scoring = truth.scoring;
+                    if (fix & 2) p.incoming = truth.incoming;
+                    if (fix & 4) p.phase = truth.phase, p.wait = truth.wait, p.pair = truth.pair, p.colors = truth.colors, p.nextPair = truth.nextPair, p.moves = truth.moves;
+                    if (fix & 8) p.field = truth.field;
+                    if (fix & 16) p.chain = truth.chain, p.wave = truth.wave, p.placed = truth.placed;
+                    // (VFIXPH bits: the other side all as it is while it is in these phases, bit 1 << Phase)
+                    if (const char* ph = std::getenv("VFIXPH"))
+                        if (std::atoi(ph) >> int(truth.phase) & 1) p = truth;
+                }
+                if (view & (2 | 8)) seen.player[1].scoring = screen.player[1].scoring;
+                if (view & (2 | 16)) seen.player[1].incoming = screen.player[1].incoming;
+                if (view & 4) seen.ownTsumo = screen.ownTsumo, seen.tsumo = screen.tsumo, seen.tsumo1 = screen.tsumo1;
+            }
+            uint8_t mine = b->frame(seen);
             if (delay) late.push_back(mine), mine = late.front(), late.pop_front();
             const uint8_t bs[2] = {a->frame(ai::observe(r, 0)), mine};
             r.step(bs, e);
@@ -550,6 +678,11 @@ int main(int argc, char** argv) {
         }
         G_state = int(r.state), G_frames = f;
         for (int s = 0; s < 2; ++s) G_score[s] = r.player[s].scoring.score;
+        if (std::getenv("AGENTSTATS"))
+            if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(b.get()))
+                std::printf("AGENT revised %lld late %lld rerouted %lld steered %lld again %lld/%lld/%lld corrected 0\n", (long long)placing->revisedChoices, (long long)placing->lateFrames,
+                            (long long)placing->rerouted, (long long)placing->steered, (long long)placing->againAsked, (long long)placing->againBegun,
+                            (long long)placing->againSwitched);
     } else {
         std::unique_ptr<ai::Agent> a;
         if (const char* e = std::getenv("ORACLE")) { auto o = std::make_unique<Oracle>(forTwo(narrow)); o->bits = std::atoi(e); a = std::move(o); } else a = ai::makeAgent("x3", forTwo(narrow));
@@ -560,6 +693,19 @@ int main(int argc, char** argv) {
         driveMatch(seed, n, {.lag = lag, .shaky = mode >= 4, .frames = frames, .startLag = lag + 1, .given = std::move(a), .hidden = hid, .movedHidden = hid ? 1 : 0, .quietLanding = true,
                              .skipOneIn = mode >= 3 ? 7 : 0});
         std::printf("misses %ld of %ld left %ld ", n.locks - n.hits, n.locks, n.leftAlone);
+    }
+    if (std::getenv("FINALFIELD") && G_round) {
+        // (FINALFIELD: the fields as the round ended, 1P then 2P, the 14th row first)
+        for (int y = 13; y >= 0; --y) {
+            for (int s = 0; s < 2; ++s) {
+                std::printf("   ");
+                for (int x = 0; x < W; ++x) {
+                    const Cell c = y == 13 ? G_round->player[s].field.row14[size_t(x)] : G_round->player[s].field.f.get(x, y);
+                    std::printf("%c", ".123456G"[std::min<int>(7, c)]);
+                }
+            }
+            std::printf("\n");
+        }
     }
     std::printf("timing pairs %ld wait %ld rest %ld hist", T_pairs, T_wait, T_rest); for (int i = 0; i < 12; ++i) std::printf(" %ld", T_hist[i]); std::printf("\n");
     std::printf("locks1P %d locks2P %d ctl1P %d ctl2P %d ", G_locks[0], G_locks[1], G_control[0], G_control[1]);
