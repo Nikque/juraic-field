@@ -1,6 +1,12 @@
+diff --git a/play/realgame_drive.h b/play/realgame_drive.h
+index 23634ab..db14968 100644
 --- a/play/realgame_drive.h
 +++ b/play/realgame_drive.h
-@@ -171,6 +171,7 @@
+@@ -168,9 +168,11 @@ public:
+         takePair(f);
+         keepShot(f);
+         watchWindow(t);
++        if (!t.side[me].clear) unclearAt = now;
          if (!active) {
              wait(f, now);
              if (blindDue(f, now)) beginBlind(f, now);
@@ -8,7 +14,7 @@
          }
          if (!active && overdue(f)) resume(f, now);
          if (!active) return holdDown(f, now);
-@@ -195,7 +196,7 @@
+@@ -195,7 +197,7 @@ private:
          windowReadAt = windowPauseAt = -1;
          own = juraic::Player{};
          past.clear();
@@ -17,7 +23,7 @@
          found.clear();
          agent->startRound(me, seed++);
          stop();
-@@ -208,8 +209,14 @@
+@@ -208,8 +210,14 @@ private:
          // (a pair begun unseen is numbered one past those Tracker has counted, and stays so when the window moving on -
          //  not its count - tells it has been put)
          const int counted = side.pairs + side.unseen; // (with the pairs the window tells were put unseen)
@@ -34,15 +40,16 @@
              begin(f, side);
          } else if (blindFor >= 0 && side.pairs == blindFor && t.spawned[me]) {
              // (the screen shows the pair begun unseen: taken from it if it came at another time than foreseen, or the
-@@ -316,6 +323,7 @@
+@@ -316,6 +324,8 @@ private:
      int round = -1, pairsSeen = 0;
      int begunRound = -1; // the round of the last pair begun (the engine's field is of it)
      int blindFor = -1;      // the pair begun unseen, until the screen shows it (-1: none)
 +    int earlyFor = -1; int64_t earlyAt = -1; bool earlyShifted = false;
++    int64_t unclearAt = -1000000; // the last frame of the clock the own side was read unclear (earlyDue)
      int64_t blindAt = -1;   // ... the frame the engine had it appear
      int64_t shiftBegun = -1; // the window's last move on (SideTrack::shiftedAt) as the pair in play was begun
      int64_t checked = -1;
-@@ -621,6 +629,34 @@
+@@ -621,6 +631,37 @@ private:
          start(f, now + lag, "2P pair " + std::to_string(pairsSeen) + " begun unseen: the screen not showing it, the engine had it appear in frame " +
                                  std::to_string(appears) + ", lag " + std::to_string(lag));
      }
@@ -53,6 +60,9 @@
 +        const SideTrack& side = t.side[me];
 +        if (pairsSeen == 0 || blindFor >= 0 || earlyFor >= 0 || !following || own.phase != juraic::Phase::Next || own.wait > 2) return false;
 +        if (f.notice[me] != 0 || side.loose != 0 || side.pairs != pairsSeen || side.unseen != 0) return false;
++        // (not after an unclear picture - a light hid garbage on its way, the engine foresaw the pair as it fell -, nor
++        //  while the other side moves: its chain may send garbage the notice does not show yet)
++        if (now - unclearAt < 30 || !t.still(1 - me)) return false;
 +        if (!side.clear || !(Follower::shown(own.field) == Follower::shown(side.resting))) return false;
 +        const int64_t engineSpawn = next + own.wait - 1;
 +        return now + lag >= engineSpawn + aim;
@@ -77,7 +87,7 @@
      // The pair in play begun (begin, beginBlind) with the engine as it is set, noted so (`line`): the frames of the game
      // before `at` have passed - the agent decides them, the game took what was held.
      void start(const Follower& f, int64_t at, const std::string& line) {
-@@ -650,13 +686,15 @@
+@@ -650,13 +691,15 @@ private:
          // (a tap the agent lets go before its end - its way planned again, a picture put right - is held to its end: one
          //  that went out for a frame as a pair was put right was lost by a frame of the game under load now and then)
          if (send) held = tapToEnd(next - lag, wanted);
