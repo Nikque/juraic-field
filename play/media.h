@@ -118,11 +118,13 @@ public:
     }
 };
 #else
-// A picture behind the game: its pixels, read when it is first drawn.
+// A picture behind the game: its pixels, read when it is first drawn, and the pixels it was last drawn as (scaled to
+// the place and darkened: drawn again as they are while neither changes).
 class Backdrop {
     std::vector<uint32_t> pixels; // 0xAARRGGBB, the colours multiplied by the opacity
     int width = 0, height = 0;
     std::filesystem::path shown, failed; // the file the pixels were read from; a file that could not be read (not tried again)
+    Raster::Stamp drawn;
 
     bool load(const std::filesystem::path& file) {
         int n = 0;
@@ -142,6 +144,7 @@ public:
     void release() {
         pixels.clear(), width = height = 0;
         shown.clear(), failed.clear();
+        drawn.forget();
     }
     // Draws the picture of `file` over `area`, darkened by `dim` percent.
     // False: there is no such picture (nothing is drawn).
@@ -159,8 +162,8 @@ public:
         if (w0 <= 0 || h0 <= 0 || width_ <= 0 || height_ <= 0) return false;
         // (the part of the picture that has the shape of the area, from its middle)
         const float scale = std::max(width_ / w0, height_ / h0), w = width_ / scale, h = height_ / scale;
-        gfx.raster.image(pixels.data(), width, height, rectF((w0 - w) / 2, (h0 - h) / 2, (w0 + w) / 2, (h0 + h) / 2), area);
-        if (dim > 0) gfx.fill(area, colorF(0, 0, 0, float(dim) / 100.f));
+        gfx.raster.picture(pixels.data(), width, height, rectF((w0 - w) / 2, (h0 - h) / 2, (w0 + w) / 2, (h0 + h) / 2), area,
+                           colorF(0, 0, 0, dim > 0 ? float(dim) / 100.f : 0.f), drawn);
         return true;
     }
 };
