@@ -91,6 +91,10 @@ public:
     // no second choice 160.) false: the pair sets out for the first choice at once (the default:
     // Params::thinkHold 0).
     bool holdSecond = false;
+    // The second choice is asked for after the pair has appeared too, when the screen shows a pair the first choice did not
+    // know only then (a choice made ahead of the frame its pair appears in, for buttons that reach the game late): it is
+    // made as for the pair before it appears, and taken in the air.
+    bool askInAir = false;
     // The taps of the buttons it gives (InputPlanner::tapHold): pressed this many frames, let go as many before the
     // next. 1: a frame each (the fastest; the default).
     int tapHold = 1;
@@ -223,6 +227,13 @@ public:
         } else if (late) {
             if (lateScript ? --lateLeft <= 0 : made()) late = false, route(o, p.pair, true);
         } else if (p.phase == Phase::Control) {
+            if (askInAir && !asked && !second && target >= 0 && p.nextPair - 1 == choiceIndex && o.mine().count() > shownAtThink) {
+                asked = true, ++againAsked;
+                Observation before = o;
+                Player& q = before.player[before.me];
+                q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+                if (made() && again(before)) thinkAgain(sight(before));
+            }
             if (second && (++secondFrames, secondHere(true))) {
                 // The second choice has come while the pair is in the air: there, if a path still leads there.
                 if (secondId >= 0 && secondId != target) {

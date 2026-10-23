@@ -22,10 +22,8 @@
 // 12th to 14th rows, and in modes 2-4 those of Follower and of the driver's engine), RESEED (2P's random numbers drawn
 // again for each choice from the round and the pair, so that a pair chosen twice does not change the choices after it),
 // KNOWN2 (2P's own window never shows the third pair before its pair appears), SHOWSTART. In mode 7: NOTICEDIFF (2P's
-// own notice read against the round's; NOTICESHOW, NOTICELONG). EARLY and PADPAST act only with
-// tools/realgame_early_begin.patch applied; tools/realgame_air_again.patch (applied after it) asks the second choice in
-// the air too (PlacementAgent::askInAir, set by Driver::prepare); tools/realgame_split_shown.patch shows the AI the other
-// side's splits and the garbage falling on it (Follower).
+// own notice read against the round's; NOTICESHOW, NOTICELONG). NOEARLY (modes 2-4): Driver::early false.
+// tools/realgame_split_shown.patch shows the AI the other side's splits and the garbage falling on it (Follower).
 #include <sstream>
 #define main realgame_tests_main
 #include "tests/realgame_tests.cpp"
@@ -103,6 +101,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     if (std::getenv("AISEED")) d.seed = seed;
     d.takeLag = !how.keepLag;
     d.unsureWays = how.unsureWays && !std::getenv("SUREOFF"); // (SUREOFF: Driver::unsureWays false)
+    d.early = how.early && !std::getenv("NOEARLY");            // (NOEARLY: Driver::early false)
     int64_t clock = 1000;
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
@@ -115,9 +114,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     int target = -1, played = 0; // (the engine of the Driver plays `lag` frames ahead of the round: the target of the pair it played last)
     int oldFor = 0, hideFor = 0, spawns = 0; // (spawns: pairs of 2P that have appeared in the round)
     int lastTurn = -100;                     // the frame of the round the pair of 2P last turned in
-    int64_t begunAt = -1;                    // the frame of the clock the driver began its last pair in
-    int64_t appearedAt = -1, firstBegunAt = -1; // the current pair's appearance and first start (a later restart keeps it)
-    bool leftOver = false;                   // the pair of 2P that appeared last still takes buttons sent before it was begun
+    PairStart ps; // the buttons the pair of 2P that appeared last takes as it appears
     uint8_t oldDir = 0;
     int alone = 0; // frames in a row the pair of 2P in the air took no button
     int litFor = 0; // litAsAppears: frames the light over 2P stays
@@ -159,7 +156,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
             canvas.fill(s.left + s.cellWidth, s.bottom - 12 * s.cellHeight, s.left + 4 * s.cellWidth, s.bottom - 9 * s.cellHeight, LIGHT);
             follow.step(read(canvas.picture(), l), clock);
             sent[size_t(clock - first)] = d.tick(follow, clock);
-            if (d.played != played) played = d.played, target = -1, begunAt = clock;
+            if (d.played != played) played = d.played, target = -1, ps.begin(clock, d.begunPair());
             if (d.target() >= 0) target = d.target();
             --pauseLeft;
             continue;
@@ -261,7 +258,7 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
         }
         if (d.played != played) {
-            played = d.played, target = -1, begunAt = clock;
+            played = d.played, target = -1, ps.begin(clock, d.begunPair());
             const GameField &begun = d.begunField(), &game = r.player[1].field;
             for (int x = 0; x < W; ++x) {
                 if (Follower::shown(begun).f.occupied().column(x) != Follower::shown(game).f.occupied().column(x)) continue;
@@ -286,9 +283,11 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         buttons[1] = from >= first ? sent[size_t(from - first)] : 0;
         if (how.swapped) buttons[1] = uint8_t((buttons[1] & ~(BTN_CW | BTN_CCW)) | (buttons[1] & BTN_CW ? BTN_CCW : 0) | (buttons[1] & BTN_CCW ? BTN_CW : 0));
         PlayerEvents e[2];
-        const uint8_t dirBefore = r.player[1].pair.dir;
-        const int8_t columnBefore = r.player[1].pair.x;
-        const PairControl pairBefore = r.player[1].pair;
+        // (the pair of 2P before this frame - as it appears, when it appears in this frame: a turn taken in its first
+        //  frame and shown late is drawn the way it appeared, not the way of the pair put before it)
+        const PairControl pairBefore = r.player[1].phase == Phase::Control ? r.player[1].pair : PairControl{};
+        const uint8_t dirBefore = pairBefore.dir;
+        const int8_t columnBefore = pairBefore.x;
         const bool groundedBefore = r.player[1].phase == Phase::Control && r.player[1].pair.grounded;
         alone = r.player[1].phase == Phase::Control && buttons[1] == 0 ? alone + 1 : 0;
         n.firstIdle += spawns == 1 && r.player[1].phase == Phase::Control && buttons[1] == 0;
@@ -314,18 +313,17 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         }
         if (how.movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, how.movedHidden);
         // (from the frame a pair appears in, until the frames take buttons the driver sent once it had begun that pair)
-        if (e[1].spawned) ++spawns, leftOver = true, n.appeared.push_back(clock), appearedAt = clock, firstBegunAt = -1, n.wordsSpawns += words;
-        if (leftOver && firstBegunAt < 0 && begunAt >= appearedAt) firstBegunAt = begunAt;
-        if (leftOver && firstBegunAt >= 0 && from >= firstBegunAt) leftOver = false;
+        if (e[1].spawned) ++spawns, n.early += ps.appear(clock, r.player[1].nextPair), n.appeared.push_back(clock), n.wordsSpawns += words;
+        ps.take(from);
         if (e[1].spawned) beginning = true, unbegun = 0, spawnIndex = r.player[1].nextPair - 1;
-        if (beginning && firstBegunAt >= 0 && from >= firstBegunAt) beginning = false;
-        if (beginning && !e[1].spawned && r.player[1].phase == Phase::Control) n.mostUnbegun = std::max(n.mostUnbegun, ++unbegun);
+        if (beginning && ps.firstBegunAt >= 0 && from >= ps.firstBegunAt) beginning = false;
+        if (beginning && !e[1].spawned && r.player[1].phase == Phase::Control) n.mostUnbegun = std::max(n.mostUnbegun, ++unbegun), ++n.unbegunFrames;
         if (e[1].garbageFell) garbageAt = clock;
         if (how.loseAtGround && r.player[1].phase == Phase::Control && r.player[1].pair.grounded && !groundedBefore) loseNext = true;
         // (a turn taken from buttons the driver sent for the pair in play, not from those sent before it was begun)
-        if (how.kickShown && e[1].control.rotated && dirBefore == UP && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore)
+        if (how.kickShown && e[1].control.rotated && dirBefore == UP && !ps.leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore)
             ++n.kicks, n.kickMoves += std::abs(r.player[1].pair.x - columnBefore) > 1, kickFrom = columnBefore, kickTo = r.player[1].pair.x, kickDir = dirBefore, kickFor = how.kickShown, kickAt = clock, kickPair = true;
-        if (leftOver && (buttons[1] & BTN_DOWN)) ++n.downAtSpawn, leftOver = false;
+        if (ps.downCarried(buttons[1])) ++n.downAtSpawn;
         if (how.hidden && e[1].control.rotated && r.player[1].phase == Phase::Control) hideFor = how.hidden;
         // (a pair the AI found no placement for - the field full - is not counted)
         if (e[1].locked && target >= 0) {
@@ -335,26 +333,26 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         }
         if (e[1].locked && target < 0) ++n.untargeted;
         if (e[1].locked && target >= 0 && kickPair) n.kickLocks += 1, n.kickHits += placementId(r.player[1].pair.placement()) == target;
-        if (how.liftShown && e[1].control.rotated && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control &&
+        if (how.liftShown && e[1].control.rotated && !ps.leftOver && !e[1].spawned && r.player[1].phase == Phase::Control &&
             (r.player[1].pair.y != pairBefore.y || r.player[1].pair.upper != pairBefore.upper))
             ++n.lifts, liftFrom = pairBefore, liftFor = how.liftShown, liftAt = clock, liftPair = true;
         if (e[1].locked && target >= 0 && liftPair) n.liftLocks += 1, n.liftHits += placementId(r.player[1].pair.placement()) == target;
-        if (!leftOver && !e[1].spawned && (e[1].control.quickTurned || (e[1].control.rotated && r.player[1].pair.y >= 12))) highPair = true;
+        if (!ps.leftOver && !e[1].spawned && (e[1].control.quickTurned || (e[1].control.rotated && r.player[1].pair.y >= 12))) highPair = true;
         recent.push_back(pairBefore);
         if (recent.size() > 3) recent.pop_front();
         if (e[1].spawned) recent.clear();
         turnedAt = e[1].control.rotated ? f : turnedAt;
-        if (how.glitchAfterTurn && e[1].control.moved && f - turnedAt <= 2 && !leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && recent.size() == 3 &&
+        if (how.glitchAfterTurn && e[1].control.moved && f - turnedAt <= 2 && !ps.leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && recent.size() == 3 &&
             glitcher.below(2) == 0)
             glitchAt = recent.front(), glitchNext = true;
         if (e[1].locked && highPair) {
             const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get());
             n.highUnallowed += !placing || std::find(placing->climbing.begin(), placing->climbing.end(), spawnIndex) == placing->climbing.end();
         }
-        if (!leftOver && !e[1].spawned && e[1].control.quickTurned) quickPair = true;
+        if (!ps.leftOver && !e[1].spawned && e[1].control.quickTurned) quickPair = true;
         if (e[1].spawned) sinceQuick = -1;
         else if (sinceQuick >= 0 && ++sinceQuick <= realGameTiming().quickTurnLock && e[1].control.rotated) ++n.quickEarly, earlyPair = true;
-        if (!leftOver && !e[1].spawned && e[1].control.quickTurned) sinceQuick = 0;
+        if (!ps.leftOver && !e[1].spawned && e[1].control.quickTurned) sinceQuick = 0;
         if (e[1].locked) n.quickEarlyPairs += earlyPair, earlyPair = false, sinceQuick = -1;
         if (e[1].locked && quickPair && target >= 0) n.quickLocks += 1, n.quickHits += placementId(r.player[1].pair.placement()) == target;
         if (e[1].locked) quickMissed = quickPair && target >= 0 && placementId(r.player[1].pair.placement()) != target;
