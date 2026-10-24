@@ -21,7 +21,7 @@ New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
 foreach ($name in @("JuraicFieldGenerator.exe", "random_19_chain.exe")) {
     Copy-Item -LiteralPath (Join-Path $binaryDirectory $name) -Destination $packageDirectory
 }
-foreach ($name in @("config.ini", "run.cmd", "GUI_README.md", "URL_FORMATS.md", "CHANGELOG.md", "README.md", "README.en.md", "LICENSE")) {
+foreach ($name in @("config.ini", "run.cmd", "GUI_README.md", "URL_FORMATS.md", "CHANGELOG.md", "README.md", "README.en.md", "GENERATOR.md", "GENERATOR.en.md", "LICENSE")) {
     Copy-Item -LiteralPath (Join-Path $sourceDirectory $name) -Destination $packageDirectory
 }
 foreach ($name in @("editor-demo.jfboard", "sample-19chain.jfchain", "sample-47chain.jfchain")) {
