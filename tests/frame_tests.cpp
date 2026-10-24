@@ -6,8 +6,12 @@
 //  3. a whole game played frame by frame gives the same fields, scores, garbage
 //     and times as the move-level playTurn (which the Python simulator checks);
 //  4. the placements the AI is offered (legalPlacements) against what the
-//     controller can really reach, by a search over all inputs.
+//     controller can really reach, by a search over all inputs;
+//  5. the beat before a round of a match (play/start_beat.h), counted as the game's
+//     countdown counts it (play/main.cpp): its high beat comes StartBeat::LEAD frames
+//     before the frame the first pair appears in, the low ones StartBeat::GAP apart.
 #include "../game/match.h"
+#include "../play/start_beat.h"
 #include <cstring>
 #include <deque>
 #include <iostream>
@@ -596,8 +600,41 @@ static void testMeasuredInput() {
     std::cout << "measured input: auto-repeat, pre-input, quick drop and the lever of four ways behave as measured\n";
 }
 
+// ---- 5. the beat before a round -----------------------------------------------------
+// The countdown of a match (Versus): 90 frames in which the round is not played, then the round's frames. The frames
+// before the first pair appears are counted as play/main.cpp counts them.
+static void testStartBeat() {
+    Round r;
+    r.start(Rules{}, 7, 2);
+    play::StartBeat beat;
+    std::vector<std::pair<int, play::Beat>> beats; // (the frame of the match, the beat)
+    int frame = 0, spawnAt = -1;
+    for (int timer = 90; timer > 0; ++frame) {
+        --timer;
+        const play::Beat b = beat.at(timer + r.timing.firstSpawn + 1);
+        if (b != play::Beat::None) beats.emplace_back(frame, b);
+    }
+    const uint8_t none[2] = {0, 0};
+    for (; spawnAt < 0; ++frame) {
+        const play::Beat b = beat.at(r.timing.firstSpawn - int(r.frame));
+        if (b != play::Beat::None) beats.emplace_back(frame, b);
+        PlayerEvents e[2];
+        r.step(none, e);
+        if (e[0].spawned) spawnAt = frame;
+    }
+    check(beats.size() == 3, std::to_string(beats.size()) + " beats before a round");
+    const int lead = play::StartBeat::LEAD, gap = play::StartBeat::GAP;
+    check(beats[2].first == spawnAt - lead && beats[2].second == play::Beat::High, "the high beat is not " + std::to_string(lead) + " frames before the first pair appears");
+    check(beats[1].first == spawnAt - lead - gap && beats[0].first == spawnAt - lead - 2 * gap && beats[0].second == play::Beat::Low && beats[1].second == play::Beat::Low,
+          "the low beats are not a beat apart before the high one");
+    check(beat.at(r.timing.firstSpawn - int(r.frame)) == play::Beat::None, "a beat after the first pair appeared");
+    std::cout << "the beat before a round: high " << lead << " frames before the first pair appears (frame " << spawnAt << " of the match), low "
+              << gap << " and " << 2 * gap << " frames before it\n";
+}
+
 int main(int argc, char** argv) {
     try {
+        testStartBeat();
         testFall();
         testMeasuredInput();
         testPlacementTimes();

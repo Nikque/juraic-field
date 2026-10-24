@@ -551,6 +551,7 @@ struct PairSeen {
     juraic::PairControl at; // the cell of the axis piece, upper, dir (the rest as in a pair that has just appeared)
     juraic::Pair colors{};  // the child EMPTY while it is above the screen
     bool childHidden = false;
+    bool axisHidden = false; // the pair upside down, its axis above the screen (readPair, upsideDown)
 };
 
 // The cells the two pieces of a pair cover, the axis first (y * 2 + upper: in half cells).
@@ -570,8 +571,12 @@ struct PairPoints {
 // or one with the place above it beyond the screen (the other piece there). `expected`: its colours when they are known
 // (axis EMPTY: not known). `previous`: where it was seen last, for a pair whose two pieces have one colour (its axis is
 // taken to be where the axis was). Not seen: other pieces than the pair's, or pieces between two places (a pair
-// turning).
-inline PairSeen readPair(const SideRead& s, const juraic::GameField& under, juraic::Pair expected = {}, const PairSeen* previous = nullptr) {
+// turning). upsideDown: one piece of the child's colour, not the axis's, in the twelve rows and with the place above it
+// beyond the screen, a column at most from where `previous` saw the pair, is the pair upside down, its axis above (turned
+// quickly in the 12th row, the axis lifted into the 13th: not read so, the pair in hand was lost on rounds drawn as the
+// real game, and not seen again as it came down; taken anywhere, a piece at rest in the 13th row of the first column, its
+// lower half on the screen, was read as the pair as it appeared in the third).
+inline PairSeen readPair(const SideRead& s, const juraic::GameField& under, juraic::Pair expected = {}, const PairSeen* previous = nullptr, bool upsideDown = false) {
     struct Piece {
         int x, bottom; // bottom: the lowest point it covers
         juraic::Cell cell;
@@ -621,6 +626,16 @@ inline PairSeen readPair(const SideRead& s, const juraic::GameField& under, jura
         return axis.cell == expected.axis && (child.cell == juraic::EMPTY || !expected.child || child.cell == expected.child);
     };
     bool axisFirst = fits(first, second), axisSecond = !hiddenChild && fits(second, first);
+    if (!axisFirst && !axisSecond && hiddenChild && upsideDown && expected.axis && first.cell == expected.child && first.bottom / 2 < 12 && previous && previous->seen &&
+        std::abs(first.x - previous->at.x) <= 1) {
+        PairSeen r;
+        r.seen = true;
+        r.at.x = int8_t(first.x), r.at.y = int8_t(first.bottom / 2 + 1), r.at.upper = first.bottom % 2 == 1;
+        r.at.dir = juraic::DOWN;
+        r.colors = {expected.axis, first.cell};
+        r.axisHidden = true;
+        return r;
+    }
     if (!axisFirst && !axisSecond) return {};
     if (axisFirst && axisSecond && previous && previous->seen) {
         // (one colour: the axis where it was, or nearest to it)
@@ -766,9 +781,19 @@ struct SideTrack {
     Words words;
 };
 
+// The real game as its records show it where they differ from the frame tables of game/timing.h: no turn is taken for 4
+// to 7 frames after a quick turn (of the pairs that turned quickly and were turned again 4 frames after, none was turned
+// - with Timing::quickTurnLock 3 the engine turned them, and 4 of 25 such pairs went where the engine locked them, 12 of 25
+// with 4 to 7 -, and two turned 8 frames after were). The longest of them is taken.
+inline juraic::Timing realGameTiming() {
+    juraic::Timing t;
+    t.quickTurnLock = 7;
+    return t;
+}
+
 class Tracker {
 public:
-    juraic::Timing timing = juraic::DEFAULT_TIMING;
+    juraic::Timing timing = realGameTiming();
     int stillFrames = 2;
     // Both fields empty, with no pair, for this many frames: a new round (the screen before a round shows them so). A
     // reading otherwise for fewer than roundBreak frames in a row does not end the empty time (a light read as a piece).
@@ -917,7 +942,7 @@ private:
         if (t.inHand) {
             // (gone: the field under it changed - a chain, or a field read wrong -, or something came to rest and
             //  the pair is not seen - it split, or it turns on the ground)
-            t.pair = contains(resting, t.under) ? readPair(field, t.under, t.colors, &t.lastSeen) : PairSeen{};
+            t.pair = contains(resting, t.under) ? readPair(field, t.under, t.colors, &t.lastSeen, true) : PairSeen{};
             if (t.pair.seen) {
                 t.lastSeen = t.pair;
                 t.missedFor = 0;

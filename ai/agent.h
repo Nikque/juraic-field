@@ -91,6 +91,10 @@ public:
     // no second choice 160.) false: the pair sets out for the first choice at once (the default:
     // Params::thinkHold 0).
     bool holdSecond = false;
+    // The second choice is asked for after the pair has appeared too, when the screen shows a pair the first choice did not
+    // know only then (a choice made ahead of the frame its pair appears in, for buttons that reach the game late): it is
+    // made as for the pair before it appears, and taken in the air.
+    bool askInAir = false;
     // The taps of the buttons it gives (InputPlanner::tapHold): pressed this many frames, let go as many before the
     // next. 1: a frame each (the fastest; the default).
     int tapHold = 1;
@@ -103,6 +107,17 @@ public:
     // The ways keep the pairs below the 13th row and turn none quickly (InputPlanner::keepLow), and with pathCheck only
     // placements reached so are chosen - when every one of those fills the 12th row of the third column, any reached.
     bool keepLow = false;
+    // No turn is pressed while a quick turn's lock lasts (InputPlanner::waitQuickLock).
+    bool waitQuickLock = false;
+    // No way to the placement chosen is lost by a frame its sender is not called in, when one with the down button held
+    // later is not (InputPlanner::spareFrame).
+    bool spareFrame = false;
+    // The cells of the 13th and 14th rows of the own field that may be the other way, and the frames after the pair is
+    // shown elsewhere than its way has it by which a way from where it is then begins (InputPlanner::planSure: the ways
+    // to the placement chosen).
+    uint8_t unsure13 = 0, unsure14 = 0;
+    int seenAfter = 0;
+    const InputPlanner& ways() const { return planner; } // (for tools: InputPlanner::sureWays and the others)
     int64_t climbs = 0;    // pairs for which every placement reached below the 13th row filled it (for tools)
     std::vector<int> climbing; // ... and the pairs whose ways were let go up into the 13th row so, by their number (for tools)
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
@@ -125,6 +140,13 @@ public:
         if (o.self().phase != Phase::Control || late || target < 0) return;
         step = 0;
         reach(o, o.self().pair, target, ~0u);
+    }
+    // The pair in play taken up again where it is, after it had been taken as put (play/realgame_drive.h: the game stopped
+    // and went on): a choice begun for the next pair is dropped, and the way to the placement chosen is planned again.
+    void resume(const Observation& o) {
+        finish();
+        revising = false;
+        steer(o);
     }
     // The placement the pair in play is brought to (-1: none yet).
     int targetPlacement() const { return target; }
@@ -205,11 +227,18 @@ public:
         } else if (late) {
             if (lateScript ? --lateLeft <= 0 : made()) late = false, route(o, p.pair, true);
         } else if (p.phase == Phase::Control) {
+            if (askInAir && !asked && !second && target >= 0 && p.nextPair - 1 == choiceIndex && o.mine().count() > shownAtThink) {
+                asked = true, ++againAsked;
+                Observation before = o;
+                Player& q = before.player[before.me];
+                q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+                if (made() && again(before)) thinkAgain(sight(before));
+            }
             if (second && (++secondFrames, secondHere(true))) {
                 // The second choice has come while the pair is in the air: there, if a path still leads there.
                 if (secondId >= 0 && secondId != target) {
                     InputPath other;
-                    if (planner.plan(p.field, p.pair, placement(secondId), o.timing, o.rules.speedPercent, other)) path = other, step = 0, target = secondId, ++againSwitched;
+                    if (planner.planSure(p.field, p.pair, placement(secondId), o.timing, o.rules.speedPercent, other)) path = other, step = 0, target = secondId, ++againSwitched;
                     else ++againNoPath;
                 }
                 endSecond(secondFrames);
@@ -217,7 +246,7 @@ public:
             if (step >= path.frames() && target >= 0) {
                 // The path is over and the pair is still in the air (not seen): from where it is now.
                 step = 0;
-                if (!planner.plan(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) path.buttons.clear();
+                if (!planner.planSure(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) path.buttons.clear();
             }
         }
         if (late) {
@@ -302,6 +331,8 @@ private:
     void tune() {
         planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
         planner.keepLow = keepLow && lowWays;
+        planner.waitQuickLock = waitQuickLock, planner.spareFrame = spareFrame;
+        planner.unsure13 = unsure13, planner.unsure14 = unsure14, planner.seenAfter = seenAfter;
     }
     // The placements choose() is offered for the pair `colors` (counted: a first choice, for climbs).
     unsigned offered(const Observation& o, Pair colors, bool counted) {
@@ -418,6 +449,14 @@ private:
         if (next.locked) return false;
         InputPath way;
         if (!planner.plan(p.field, next, placement(target), o.timing, o.rules.speedPercent, way) || way.frames() + 1 > left) return false;
+        // (spareFrame: nor so far down that a frame its sender is not called in takes the placement out of reach - held
+        //  down to the last frame from which a way still led there, the next one, left out, sent the pair elsewhere)
+        if (spareFrame && tapHold > 1) {
+            InputPath sure;
+            if (!planner.planSure(p.field, next, placement(target), o.timing, o.rules.speedPercent, sure) ||
+                planner.lostBySkip(p.field, next, placement(target), o.timing, o.rules.speedPercent, sure))
+                return false;
+        }
         return keepsWays(o, now, next, target);
     }
     // holdSecond, no choice to bring the pair to yet (late, or a choice made again): may the pair go straight down in this
@@ -462,7 +501,8 @@ private:
     // The buttons that bring `pair` to the placement chosen (waits for it).
     // fallen: the pair has been in the air without a choice (Free).
     void route(const Observation& o, const PairControl& pair, bool fallen = false) {
-        int id = job.valid() ? job.get() : chosen;
+        if (job.valid()) chosen = job.get(), job = std::future<int>(); // (kept: a second choice in the air stands on it)
+        int id = chosen;
         thought = false;
         const Player& p = o.self();
         const unsigned legal = legalPlacements(p.field);
@@ -470,7 +510,7 @@ private:
             // (a placement that is legal and has no path from where a pair appears: the next legal one is taken)
             const int wanted = id;
             for (int tries = 0; id >= 0 && tries < PLACEMENTS; ++tries, id = (id + 1) % PLACEMENTS)
-                if ((legal >> id & 1) && planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
+                if ((legal >> id & 1) && planner.planSure(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
                     target = id;
                     break;
                 }
@@ -485,7 +525,7 @@ private:
     void reach(const Observation& o, const PairControl& pair, int id, unsigned legal) {
         const Player& p = o.self();
         for (;;) {
-            if ((legal >> id & 1) && planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
+            if ((legal >> id & 1) && planner.planSure(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
                 target = id;
                 return;
             }
