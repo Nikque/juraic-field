@@ -1499,6 +1499,7 @@ struct DriveScenario {
     bool unsureWays = true; // Driver::unsureWays
     bool hiddenGarbage = false;
     bool early = true; // Driver::early
+    int misreadAfterSpawn = 0; // one pair of 2P in that many drawn a column aside, in the 13th row, in the picture after the driver began it
 };
 // Such a round from `seed`, counted into n.
 static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
@@ -1588,8 +1589,13 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             words = std::max({h[1], h[2], h[3], h[4]}) <= 8;
             correctedBefore = d.corrected;
         }
-        if (oldFor > 0 || hideFor > 0 || kickFor > 0 || liftFor > 0 || glitchNext) {
+        const bool misread = how.misreadAfterSpawn && clock == ps.begunAt + 1 && ps.begunFor % how.misreadAfterSpawn == 0 && r.player[1].phase == Phase::Control;
+        if (oldFor > 0 || hideFor > 0 || kickFor > 0 || liftFor > 0 || glitchNext || misread) {
             Round shown = r;
+            if (misread) {
+                PairControl& q = shown.player[1].pair;
+                q.x = int8_t(q.x < W - 1 ? q.x + 1 : q.x - 1), q.y = 12, q.upper = false;
+            }
             if (oldFor > 0) shown.player[1].pair.dir = oldDir, --oldFor;
             // (a pair turned so in the 12th row is read clear, its child in the hidden 13th row as it turns)
             const bool kickTop = (kickFor > 0 || liftFor > 0) && shown.player[1].phase == Phase::Control && shown.player[1].pair.y >= 11;
@@ -2962,7 +2968,122 @@ static void testToldPlacements() {
                       std::to_string(int(h.f.get(4, 12))) + " and 14th " + std::to_string(int(h.row14[4])) + ")");
         else check(f.model[1].followed < 1 && h.f.get(4, 12) == EMPTY && h.row14[4] == EMPTY, "with nothing told, a pair put out of sight is in the field followed");
     }
+    // (3) A piece in the 13th row of the first column that the field followed has and the game does not (garbage guessed
+    // there): the pair told lying with its axis there, its child in the 12th row of the second column, is found so - the
+    // 13th row of the first column taken as empty before it -, not as the pair standing on the second column, which shows
+    // the twelve rows alike.
+    {
+        Follower f;
+        int64_t at = 60000;
+        for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+        for (int k = 0; k < 5; ++k) f.step(tall, at++);
+        Reading first = window(tall, {1, 2}, {3, 3});
+        first.side[1].point[SPAWN_X][23] = 5;
+        for (int k = 0; k < 3; ++k) f.step(first, at++);
+        check(f.tracker.side[1].pairs == 1 && f.model[1].known, "the first pair is not seen");
+        f.model[1].core.field.f.set(0, 12, GARBAGE);
+        f.tell(1, 0, placement(placementId({0, RIGHT})));
+        Reading landed = window(tall, {1, 2}, {3, 3});
+        landed.side[1].point[1][22] = landed.side[1].point[1][23] = 4;
+        for (int k = 0; k < 6; ++k) f.step(landed, at++);
+        Reading next = window(landed, {3, 3}, {4, 4});
+        next.side[1].point[SPAWN_X][23] = 1;
+        f.step(next, at++);
+        const GameField& g = f.model[1].core.field;
+        check(f.model[1].followed == 0 && placementId(f.model[1].placed) == placementId({0, RIGHT}) && g.f.get(0, 12) == 5 && g.f.get(1, 12) == EMPTY,
+              "the pair told, over a piece in the 13th row the game does not have, is not found so (found placement " + std::to_string(placementId(f.model[1].placed)) + ")");
+    }
+    // (4) The second and third columns eleven high: the pair told lying across them, read first with only its child at
+    // rest in the third column - as the pair standing on the third column shows it, its axis in the 13th row -, then
+    // whole with garbage come on the sixth column (the pair locked as it lay) is found as told, not with a piece in the
+    // 13th row of the third column. (In rounds drawn with garbage, pairs read so went on to be planned over that piece.)
+    {
+        Reading low = empty;
+        for (int x = 1; x <= 2; ++x)
+            for (int y = 0; y < 11; ++y) low.side[1].point[x][2 * y] = low.side[1].point[x][2 * y + 1] = Cell(1 + (x + y) % 2);
+        Follower f;
+        int64_t at = 70000;
+        for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+        for (int k = 0; k < 5; ++k) f.step(low, at++);
+        Reading first = window(low, {1, 2}, {3, 3});
+        first.side[1].point[SPAWN_X][23] = 5;
+        for (int k = 0; k < 3; ++k) f.step(first, at++);
+        check(f.tracker.side[1].pairs == 1 && f.model[1].known, "the first pair is not seen");
+        f.tell(1, 0, placement(placementId({1, RIGHT})));
+        Reading child = window(low, {1, 2}, {3, 3});
+        child.side[1].point[2][22] = child.side[1].point[2][23] = 4;
+        for (int k = 0; k < 2; ++k) f.step(child, at++);
+        Reading whole = child;
+        whole.side[1].point[1][22] = whole.side[1].point[1][23] = 5;
+        whole.side[1].point[5][0] = whole.side[1].point[5][1] = GARBAGE;
+        f.step(whole, at++);
+        const GameField& g = f.model[1].core.field;
+        check(f.model[1].followed == 0 && placementId(f.model[1].placed) == placementId({1, RIGHT}) && g.f.get(2, 12) == EMPTY,
+              "the pair told, read first with only its child, is not found so (found placement " + std::to_string(placementId(f.model[1].placed)) + ")");
+    }
+    // (5) The caller told where the pair before was locked: the next pair, read lying before it is told, is not taken
+    // lying yet - then it is, where told.
+    {
+        Follower f;
+        int64_t at = 80000;
+        for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+        for (int k = 0; k < 5; ++k) f.step(tall, at++);
+        Reading first = window(tall, {1, 2}, {3, 3});
+        first.side[1].point[SPAWN_X][23] = 5;
+        for (int k = 0; k < 3; ++k) f.step(first, at++);
+        f.tell(1, 0, placement(placementId({1, LEFT})));
+        Reading landed = window(tall, {1, 2}, {3, 3});
+        landed.side[1].point[1][22] = landed.side[1].point[1][23] = 5;
+        for (int k = 0; k < 6; ++k) f.step(landed, at++);
+        Reading next = window(landed, {3, 3}, {4, 4});
+        next.side[1].point[SPAWN_X][23] = 1;
+        for (int k = 0; k < 3; ++k) f.step(next, at++);
+        check(f.tracker.side[1].pairs == 2 && f.model[1].followed == 0, "the second pair is not seen");
+        // (it lies on the fourth column, eleven high: its axis in the 12th row, its child in the 13th)
+        Reading lying = window(landed, {3, 3}, {4, 4});
+        lying.side[1].point[3][22] = lying.side[1].point[3][23] = 1;
+        for (int k = 0; k < 3; ++k) f.step(lying, at++);
+        check(!f.model[1].lying, "the pair not told yet is taken lying from the screen alone");
+        f.tell(1, 1, placement(placementId({3, UP})));
+        f.step(lying, at++);
+        check(f.model[1].lying && f.model[1].index == 1 && placementId(f.model[1].at) == placementId({3, UP}), "the pair told is not taken lying where told");
+    }
+    // (6) The driver begins a pair with the 13th row of the engine where its twelve rows are the followed field's - but
+    // not garbage there, which the engine has only from a guess of Follower's.
+    {
+        GameField followed, engine;
+        for (int y = 0; y < 12; ++y) followed.f.set(0, y, Cell(1 + y % 2)), followed.f.set(1, y, Cell(1 + (y + 1) % 2));
+        engine = followed;
+        engine.f.set(0, 12, GARBAGE), engine.f.set(1, 12, 3);
+        const GameField g = Driver::hiddenFromEngine(followed, engine);
+        check(g.f.get(0, 12) == EMPTY && g.f.get(1, 12) == 3, "the engine's garbage in the 13th row is taken back into the field a pair is begun with");
+    }
     std::cout << "the own placements told are taken where the screen cannot tell them\n";
+}
+
+// A pair of 2P begun as the screen showed it, read a column aside in the 13th row in the next picture (one pair in two),
+// is not put right for that one picture: no more pairs go elsewhere than the AI chose than in the same rounds read
+// right. (Put right for it - the picture the pair was begun from not counted as one that showed it where the engine had
+// it -, pairs read upside down in the 13th row a column aside went down there: 3 of the pairs elsewhere than the AI
+// chose left in 1440 rounds drawn as the real game. Not for a picture lower: Driver::begunAt.)
+static void testMisreadAfterSpawn() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts clean, misread;
+    for (const int every : {0, 2})
+        for (const uint64_t seed : {120, 121, 122, 123}) {
+            std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+            Driver::prepare(a.get());
+            driveRound(seed, every ? misread : clean,
+                       {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .early = false, .misreadAfterSpawn = every});
+        }
+    const auto counts = [](const DriveCounts& c) {
+        return std::to_string(c.hits) + " of " + std::to_string(c.locks) + " where the AI chose, " + std::to_string(c.corrected) + " pictures put right, " +
+               std::to_string(c.leftAlone) + " left alone";
+    };
+    check(misread.locks >= 100 && misread.locks - misread.hits <= clean.locks - clean.hits + 1 && misread.leftAlone == 0,
+          "a pair read a column aside after it was begun: " + counts(misread) + " (read right: " + counts(clean) + ")");
+    std::cout << "a pair read a column aside after it was begun: " << counts(misread) << " (read right: " << counts(clean) << ")\n";
 }
 
 // A pair of 2P put where the AI chose, a piece of it in the 13th or 14th row, is found where it was put: the screen
@@ -4152,6 +4273,7 @@ int main(int argc, char** argv) {
         testModeUsesThirteenthRow();
         testToldPlacements();
         testOwnPlacementsFound();
+        testMisreadAfterSpawn();
         testWaysInQuickTurnLock();
         testSureWays();
         testUpsideDownPair();

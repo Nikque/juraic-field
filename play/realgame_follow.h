@@ -284,15 +284,39 @@ private:
             const juraic::GameField seen = shown(t.resting);
             // (the placement the caller told for this pair - tell -, when it shows the twelve rows as they are read)
             const int toldId = told[s].pair == t.pairs - 1 ? juraic::placementId(told[s].at) : -1;
-            const auto showsSeen = [&](const juraic::GameField& base, int id, juraic::Pair colors) {
-                if (id < 0 || !(id == toldId ? fitsOn(base, juraic::placement(id)) : juraic::legalPlacements(base) >> id & 1)) return false;
-                juraic::GameField g = base;
-                juraic::place(g, juraic::placement(id), colors);
-                return shown(g).f == seen.f;
+            // (`on`: the field the placement is put on - for the placement told, where the pair does not fit on `base`,
+            //  `base` with nothing in the 13th and 14th rows of its axis's column, then of its child's too: the game
+            //  locked it there, so those cells were empty, a piece taken there for a pair found elsewhere or garbage
+            //  guessed. Rejected so, the placement told was taken for another, in rounds drawn with garbage)
+            // (`part`: the twelve rows so show all of it but one piece - the pair read before it is all at rest, a piece
+            //  of it still falling)
+            const auto showsSeen = [&](const juraic::GameField& base, int id, juraic::Pair colors, juraic::GameField& on, bool part = false) {
+                if (id < 0) return false;
+                const juraic::Placement p = juraic::placement(id);
+                on = base;
+                bool fits = id == toldId ? fitsOn(on, p) : (juraic::legalPlacements(base) >> id & 1) != 0;
+                for (int k = 0; k < 2 && !fits && id == toldId; ++k) {
+                    const int x = k ? p.childX() : p.x;
+                    on.f.set(x, 12, juraic::EMPTY), on.row14[size_t(x)] = juraic::EMPTY;
+                    fits = fitsOn(on, p);
+                }
+                if (!fits) return false;
+                juraic::GameField g = on;
+                juraic::place(g, p, colors);
+                return part ? contains(shown(g), seen) && shown(g).f.count() == seen.f.count() + 1 : shown(g).f == seen.f;
             };
+            juraic::GameField on;
+            // (the caller telling where it locked each pair - it told the pair before -, a pair it has not told yet is not
+            //  taken lying from the screen alone: two pieces read at rest before its engine locked a pair were taken for
+            //  it, the pair then put out of sight elsewhere was never found, and the piece it left in the 14th row was
+            //  missing from the field followed, in rounds drawn with garbage)
+            if (toldId < 0 && told[s].pair >= 0 && told[s].pair == t.pairs - 2) {
+                notLying(m);
+                return;
+            }
             if (lain) {
                 // (found lying elsewhere before the caller told where it locked the pair: taken again so)
-                if (toldId >= 0 && toldId != juraic::placementId(m.at) && showsSeen(m.base, toldId, m.colors)) take(s, m.base, toldId, m.colors, was, at);
+                if (toldId >= 0 && toldId != juraic::placementId(m.at) && showsSeen(m.base, toldId, m.colors, on)) take(s, on, toldId, m.colors, was, at);
                 return;
             }
             // The pair lying with both pieces shown, read with one of them missing (a piece that moves drawn over it):
@@ -303,18 +327,29 @@ private:
             const juraic::GameField base = withHidden(t.under, m.core.field);
             int found = -1;
             juraic::Pair foundColors{};
+            juraic::GameField foundOn;
             for (juraic::Cell child = 0; child <= juraic::MAX_COLORS && !(found >= 0 && found == toldId); ++child) {
                 if (child && t.colors.child) break; // (a child not seen: each colour)
                 const juraic::Pair colors{t.colors.axis, t.colors.child ? t.colors.child : child};
                 if (!colors.child) continue;
-                if (showsSeen(base, toldId, colors)) {
-                    found = toldId, foundColors = colors;
+                if (showsSeen(base, toldId, colors, on)) {
+                    found = toldId, foundColors = colors, foundOn = on;
                     break;
                 }
                 for (int id = 0; id < juraic::PLACEMENTS && found < 0; ++id)
-                    if (showsSeen(base, id, colors)) found = id, foundColors = colors;
+                    if (showsSeen(base, id, colors, on)) found = id, foundColors = colors, foundOn = on;
             }
-            if (found >= 0) take(s, base, found, foundColors, was, at);
+            // (read with a piece of the pair still falling - lying across two columns, its child splitting down the
+            //  lower -, the placement told, of which the twelve rows show all but that piece, rather than another that
+            //  shows them as read: taken so, a pair lying across the second and third columns was found standing on the
+            //  third, its axis in the 13th row, and locked so as garbage came, in rounds drawn with garbage; seen whole
+            //  before it locks, a placement told otherwise than the game put the pair is found again as the screen shows)
+            for (juraic::Cell child = 0; child <= juraic::MAX_COLORS && toldId >= 0 && found != toldId; ++child) {
+                if (child && t.colors.child) break;
+                const juraic::Pair colors{t.colors.axis, t.colors.child ? t.colors.child : child};
+                if (colors.child && showsSeen(base, toldId, colors, on, true)) found = toldId, foundColors = colors, foundOn = on;
+            }
+            if (found >= 0) take(s, foundOn, found, foundColors, was, at);
             else notLying(m);
         } else if (m.lying) {
             // Locked: the pieces under it changed (its chain), or more came above them (garbage). Otherwise it is moving

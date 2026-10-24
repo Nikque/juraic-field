@@ -142,13 +142,16 @@ public:
     // as Follower made them out) with the 13th and 14th rows of `engine` (the field the engine left: it put the pairs,
     // where the screen cannot tell one piece in the 13th row of one column from one in another, nor see a pair put whole
     // into those rows) on every column whose twelve rows are the same in both.
+    // Not garbage in the 13th row: the engine knows of none, and garbage there is what Follower guessed when a pair was
+    // begun (Follower::withGarbage) - taken back so after Follower had found it was not there, a pair was planned over it
+    // and went down a column short, in rounds drawn with garbage.
     static juraic::GameField hiddenFromEngine(const juraic::GameField& followed, const juraic::GameField& engine) {
         juraic::GameField g = followed;
         for (int x = 0; x < juraic::W; ++x) {
             bool same = true;
             for (int y = 0; y < 12 && same; ++y) same = followed.f.get(x, y) == engine.f.get(x, y);
             if (!same) continue;
-            g.f.set(x, 12, engine.f.get(x, 12));
+            if (engine.f.get(x, 12) != juraic::GARBAGE) g.f.set(x, 12, engine.f.get(x, 12));
             g.row14[size_t(x)] = engine.row14[size_t(x)];
         }
         return g;
@@ -589,7 +592,14 @@ private:
         // (the frames from the picture to now have passed: at least the frames the picture is behind)
         start(f, t.frame + lag, "2P pair " + std::to_string(side.pairs) + " begun" + (side.late ? " (seen late)" : "") + ": seen in frame " +
                                     std::to_string(side.spawnedAt) + ", the engine from frame " + std::to_string(next) + ", lag " + std::to_string(lag));
+        begunAt = active ? t.frame : -1;
     }
+    // The frame of the picture the pair in play was begun from, as the screen showed it (-1: not begun so). That picture
+    // shows it where the engine has it: one picture after it that shows the pair in the 13th row puts nothing right until
+    // a second one shows it alike (correct). (Put right for one picture, pairs read upside down in the 13th row a column
+    // aside went down there, 3 of the pairs elsewhere than the AI chose in 1440 rounds drawn as the real game. Not for a
+    // picture lower: under garbage the engine has the pair a row off at times, and waited for, a pair was left alone.)
+    int64_t begunAt = -1;
 
     // The frame the next pair appeared in (as the screen would show it first), when the window of the next pairs has
     // moved on since the last pair appeared (it moves on only after that pair is put): as the engine foresees it, waiting
@@ -714,7 +724,7 @@ private:
     void start(const Follower& f, int64_t at, const std::string& line) {
         startOwn = own, startNext = next, shiftBegun = f.tracker.side[me].shiftedAt;
         past.clear();
-        checked = shownAt = doubtAt = -1;
+        checked = shownAt = doubtAt = begunAt = -1;
         active = true, following = false, untilLocked = false;
         ++played;
         noted = -2;
@@ -1208,7 +1218,7 @@ private:
                 shownAt = t.frame, doubtAt = -1;
                 return;
             }
-        if (shownAt >= 0 && t.frame - shownAt <= DOUBT_FRAMES) {
+        if ((shownAt >= 0 && t.frame - shownAt <= DOUBT_FRAMES) || (begunAt >= 0 && t.frame - begunAt <= DOUBT_FRAMES && seen.y >= 12)) {
             const bool twice = doubtAt >= 0 && t.frame - doubtAt <= DOUBT_FRAMES && alike(doubt, seen, c, int(t.frame - doubtAt));
             doubtAt = t.frame, doubt = seen;
             if (!twice) return;
