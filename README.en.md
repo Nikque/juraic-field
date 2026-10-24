@@ -170,7 +170,7 @@ five, and as numbers ("★ won / needed") beyond that.
 - 実機の 2P を Juraic が操作 in the menu looks for the real game's window, takes the place of 2P, chooses its
   character and kind of controls, and plays 2P once a match begins. The kind and the level of the AI can be changed
   on that screen (each time it opens they start from those of the 2P side in the settings).
-- The virtual pad needs the driver ViGEmBus, which is not included: install it yourself.
+- The virtual pad needs the driver ViGEmBus, which is not included: install it yourself ("Installing the virtual pad driver (ViGEmBus)" below).
 - **Juraic in this mode is weaker than Juraic in the matches of this program.** It knows the fields and the pairs
   only by reading the real game's screen, which it sometimes reads wrong or cannot read for a while; the presses of
   the pad reach the real game late, and the way they are pressed and the timing differ from this program's matches.
@@ -180,6 +180,22 @@ five, and as numbers ("★ won / needed") beyond that.
   it can take more than 2 GB at a time), the key S that saves a picture of the real game, the table read from
   `realgame_layout.txt` and the counters on the screen - are built only with `JURAIC_REALGAME_DEBUG=ON` in CMake;
   the released packages have none of them.
+
+### Installing the virtual pad driver (ViGEmBus)
+
+You need it only for "Juraic playing 2P of the real game". ViGEmBus is not included in Juraic Field (its author is Nefarius Software Solutions).
+
+1. Open the official release page: <https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0>
+2. Under "Assets" at the bottom of the page, download `ViGEmBus_1.22.0_x64_x86_arm64.exe`.
+3. Open the downloaded file and follow the installer. Answer "Yes" when Windows asks for administrator permission, and restart the PC if asked.
+4. Start Juraic Field again and choose 実機の 2P を Juraic が操作 again.
+
+- ViGEmBus development ended in November 2023; v1.22.0 is the last version. Do not use copies from anywhere other than the official page.
+- **To check it is installed**: Device Manager shows "Nefarius Virtual Gamepad Emulation Bus" under "System devices".
+- **To remove it**: Settings → Apps → Installed apps → "ViGEm Bus Driver" → Uninstall. Other software may also use ViGEmBus, so check before removing it.
+- If the game says the ViGEmBus driver is not installed, start Juraic Field again after installing (after the restart, if one was asked for).
+- Juraic Field does not read this virtual pad as one of its own controllers.
+- Opening `仮想パッドのドライバーの入れ方.cmd` in the Windows zip shows the same instructions (and checks whether the driver is installed).
 
 ## Matches over a network
 
