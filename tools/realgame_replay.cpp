@@ -85,7 +85,7 @@ void replay(const std::filesystem::path& folder) {
     int64_t frame = 0;
     int width = 0, height = 0;
     PadRecord p;
-    long readings = 0, ticks = 0, spawns = 0, holes = 0, notFollowed = 0, timed = 0, drives = 0, tells = 0, toldOtherwise = 0;
+    long readings = 0, ticks = 0, spawns = 0, holes = 0, unknownOwn = 0, knownOn = 0, notFollowed = 0, timed = 0, drives = 0, tells = 0, toldOtherwise = 0;
     long why[5] = {};
     double came = 0, read = 0, set = 0;
     int64_t lastShown = 0;
@@ -101,9 +101,14 @@ void replay(const std::filesystem::path& folder) {
                 // (a pair from the one that appears on that no window showed, with one known after it: as the observation
                 //  was before observeWith kept the known pairs together, a pair of the first colour shown as known)
                 const Tracker& t = follow.tracker;
-                bool hole = false;
-                for (int i = t.side[1].pairs - 1; i < int(t.pairsLearnt()) && !hole; ++i) hole = !t.knows(1, i);
-                ++spawns, holes += hole;
+                bool hole = false, gap = false;
+                for (int i = t.side[1].pairs - 1; i < int(t.pairsLearnt()) && !hole; ++i) {
+                    if (!t.knows(1, i)) gap = true;
+                    else hole = gap;
+                }
+                int known = t.side[1].pairs - 1;
+                while (t.knows(1, known)) ++known;
+                ++spawns, holes += hole, unknownOwn += !t.knows(1, t.side[1].pairs - 1), knownOn += known - (t.side[1].pairs - 1);
             }
         } else if (kind == RECORD_PAD && p.by == 1) {
             const uint8_t sent = p.buttons;
@@ -121,8 +126,8 @@ void replay(const std::filesystem::path& folder) {
             toldOtherwise += it != ours.end() && it->second != in.tell.placement;
         }
     }
-    std::printf("%s: readings %ld rounds %d pairs of 2P seen %ld (with a pair to come no window showed, before one known: %ld) | Follower found %d placements, checked %d (otherwise %d), held %d | doubts %d | driver ticks %ld put right %d explained %d lag %d (measured %d) turns %s",
-                folder.filename().string().c_str(), readings, follow.tracker.rounds, spawns, holes, follow.placements, follow.checks, follow.misses, follow.held, follow.tracker.doubts, ticks, d.corrected,
+    std::printf("%s: readings %ld rounds %d pairs of 2P seen %ld (with a pair to come no window showed, before one known: %ld; the pair itself not known: %ld; known from it on: %.2f) | Follower found %d placements, checked %d (otherwise %d), held %d | doubts %d | driver ticks %ld put right %d explained %d lag %d (measured %d) turns %s",
+                folder.filename().string().c_str(), readings, follow.tracker.rounds, spawns, holes, unknownOwn, spawns ? double(knownOn) / double(spawns) : 0.0, follow.placements, follow.checks, follow.misses, follow.held, follow.tracker.doubts, ticks, d.corrected,
                 d.explained, d.lag, d.measuredLag(), d.turnsSwapped ? "swapped" : "as sent");
     if (timed)
         std::printf(" | pictures timed %ld: came %.2f read %.2f frames after shown, not followed %ld | pad driven %ld (pictures %ld, none in the frame %ld, none for long %ld, menu %ld), set %.2f frames after the picture shown | told %ld, otherwise %ld",

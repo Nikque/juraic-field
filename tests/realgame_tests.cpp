@@ -1209,6 +1209,43 @@ static void testViewsOfBothSides() {
     std::cout << "the AI sees the pairs of both sides as each side's window showed them\n";
 }
 
+// A side that counted its pairs wrong learns them at other places than the other side (both draw from one tsumo): the
+// other side's window is read where the two windows agree (Tracker::align), and not while they do not.
+static void testSidesCountedApart() {
+    const Pair a[] = {{1, 2}, {3, 1}, {2, 2}, {4, 3}, {1, 4}, {2, 3}, {3, 3}, {4, 1}, {2, 4}, {1, 1}, {3, 2}, {4, 4}, {1, 3}, {2, 1}};
+    const auto is = [](const Tracker& t, int s, int i, Pair p) { return t.knows(s, i) && t.pairOf(s, i).axis == p.axis && t.pairOf(s, i).child == p.child; };
+    {
+        // (2P counted a pair too many from pair 5 on: what it learnt after that is one place on)
+        Tracker t;
+        for (int i = 0; i < 12; ++i) t.pairsOf[0].push_back(a[i]), t.knownOf[0].push_back(1);
+        for (int i = 0; i < 6; ++i) t.pairsOf[1].push_back(a[i]), t.knownOf[1].push_back(1);
+        for (int i = 5; i < 13; ++i) t.pairsOf[1].push_back(a[i]), t.knownOf[1].push_back(1);
+        t.align();
+        check(is(t, 0, 12, a[12]), "1P is shown a pair 2P's window showed at another place than 2P counts it");
+        check(!t.knows(0, 13), "1P is shown a pair after those 2P's window showed");
+        check(is(t, 1, 13, a[12]) && is(t, 1, 3, a[3]), "2P's own pairs are not its own");
+        check(t.pairsLearnt() >= 13, "the pairs learnt end before a pair 1P knows of");
+        // (5 pairs agreeing at the other place - as the window of a side lit long read 4 in a round drawn and read -: the
+        //  shift stays)
+        Tracker u;
+        for (int i = 0; i < 8; ++i) u.pairsOf[0].push_back(a[i]), u.knownOf[0].push_back(1);
+        for (int i = 0; i < 4; ++i) u.pairsOf[1].push_back(a[i]), u.knownOf[1].push_back(1);
+        for (int i = 3; i < 8; ++i) u.pairsOf[1].push_back(a[i]), u.knownOf[1].push_back(1);
+        u.align();
+        check(u.shift == 0, "the shift moves on 5 pairs agreeing at another place");
+    }
+    {
+        // (2P read one pair wrong - under a light, say: the pairs after it are where they were, and a side that is not
+        //  shown them counts a pair hidden as it appeared no more, Tracker::lookForPair)
+        Tracker t;
+        for (int i = 0; i < 8; ++i) t.pairsOf[0].push_back(a[i]), t.knownOf[0].push_back(1);
+        for (int i = 0; i < 12; ++i) t.pairsOf[1].push_back(i == 7 ? Pair{4, 4} : a[i]), t.knownOf[1].push_back(1);
+        t.align();
+        check(t.shift == 0 && is(t, 0, 8, a[8]) && is(t, 0, 11, a[11]), "1P is not shown the pairs of 2P's window after one pair 2P read wrong");
+    }
+    std::cout << "a side that counted its pairs apart from the other is shown the other side's window where the two agree\n";
+}
+
 static void testPredictionResetAtRound() {
     struct Watching : ai::PlacementAgent {
         GameField lastField;
@@ -4784,6 +4821,7 @@ int main(int argc, char** argv) {
         testShownPairsOnly();
         testChoiceAfterCorrection();
         testViewsOfBothSides();
+        testSidesCountedApart();
         testPredictionResetAtRound();
         testChainAfterMissedLanding();
         testPairsAfterLight();

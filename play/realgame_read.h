@@ -836,6 +836,13 @@ public:
     // come). knownOf: 1 learnt from a window that stood still; 2 from one that may have been moving (put right after).
     std::vector<juraic::Pair> pairsOf[2];
     std::vector<uint8_t> knownOf[2];
+    // The pairs of 2P are numbered `shift` places on from the same pairs of 1P, as the two windows showed them (align);
+    // aligns: the times it changed.
+    int shift = 0;
+    int aligns = 0;
+    int maxShift = 3, alignRun = 6;
+    // The place the other side counts pair `index` of side s at.
+    int otherIndex(int s, int index) const { return s == 0 ? index + shift : index - shift; }
     Reading last;             // the last reading
     int64_t frame = -1;       // ... and its frame
     int64_t roundStart = -1;  // the frame that is frame 0 of the round (-1: not known yet)
@@ -849,9 +856,11 @@ public:
         const juraic::Timing t = timing;
         const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames, twice = pairGap, broken = roundBreak, hiddenFor = outOfSight;
         const int windowS = windowStill, windowB = windowBefore, windowW = windowWait, windowL = windowLong, wordsF = wordsFrames, wordsP = wordsPoints;
+        const int shiftMost = maxShift, run = alignRun;
         *this = Tracker{};
         timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness, pairGap = twice, roundBreak = broken, outOfSight = hiddenFor;
         windowStill = windowS, windowBefore = windowB, windowWait = windowW, windowLong = windowL, wordsFrames = wordsF, wordsPoints = wordsP;
+        maxShift = shiftMost, alignRun = run;
     }
 
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
@@ -859,17 +868,53 @@ public:
     bool still(int s) const { return side[s].clear && frame - side[s].changedAt >= stillFrames && side[s].loose == 0; }
     // The frame of the round that the frame `at` of the clock is (0 before it, or while its beginning is not known).
     int64_t roundFrame(int64_t at) const { return roundStart >= 0 && at >= roundStart ? at - roundStart : 0; }
-    // Pair `index` for side s: as its own window showed it, or else as the other side's did.
-    bool knows(int s, int index) const { return learnt(s, index) || learnt(1 - s, index); }
-    juraic::Pair pairOf(int s, int index) const { return learnt(s, index) ? pairsOf[s][size_t(index)] : pairsOf[1 - s][size_t(index)]; }
+    // Pair `index` for side s: as its own window showed it, or else as the other side's did, at the place the other side
+    // counts it (shift).
+    bool knows(int s, int index) const { return learnt(s, index) || learnt(1 - s, otherIndex(s, index)); }
+    juraic::Pair pairOf(int s, int index) const { return learnt(s, index) ? pairsOf[s][size_t(index)] : pairsOf[1 - s][size_t(otherIndex(s, index))]; }
     // The pairs either side has learnt of (some of them, perhaps, not known).
-    size_t pairsLearnt() const { return std::max(pairsOf[0].size(), pairsOf[1].size()); }
+    size_t pairsLearnt() const {
+        const int n0 = int(pairsOf[0].size()), n1 = int(pairsOf[1].size());
+        return size_t(std::max({n0, n1, n1 - shift, n0 + shift}));
+    }
     // The pairs known, of both sides together (it grows as pairs are learnt).
     size_t knownCount() const {
         size_t n = 0;
         for (const auto& k : knownOf)
             for (const uint8_t x : k) n += x != 0;
         return n;
+    }
+    // Where the two windows' pairs agree: for each shift (maxShift at most either way), the pairs both windows showed
+    // standing still (knownOf 1) at the places it puts side by side, from the last of them back - the shift kept while
+    // its last two agree (or all, fewer), else another taken whose last alignRun agree, the most of them (one alone).
+    // (In the records a side that counted a pair more or less learnt the pairs after it one place on to the end of the
+    // round, and the other side was shown them so. A pair one window read wrong - under a light - moves nothing: a side
+    // not shown the pairs the other's window read counts a pair hidden as it appeared no more, lookForPair, and the
+    // pairs after it were one place off then. The window of a side lit long read 4 pairs in a row one place on for a
+    // while in a round drawn and read, and with the shift moved so its count went wrong: alignRun 6.)
+    void align() {
+        const auto run = [&](int d, int& seen) {
+            int n = 0;
+            seen = 0;
+            for (int i = int(pairsOf[0].size()) - 1; i >= 0; --i) {
+                const int j = i + d;
+                if (j < 0 || j >= int(pairsOf[1].size()) || knownOf[0][size_t(i)] != 1 || knownOf[1][size_t(j)] != 1) continue;
+                ++seen;
+                if (!same(pairsOf[0][size_t(i)], pairsOf[1][size_t(j)])) break;
+                if (++n >= alignRun) break;
+            }
+            return n;
+        };
+        int seen = 0;
+        if (run(shift, seen) >= std::min(2, seen)) return;
+        int best = 0, ties = 0, to = shift;
+        for (int d = -maxShift; d <= maxShift; ++d) {
+            if (d == shift) continue;
+            const int n = run(d, seen);
+            if (n > best) best = n, to = d, ties = 1;
+            else if (n == best) ++ties;
+        }
+        if (best >= alignRun && ties == 1) shift = to, ++aligns;
     }
 
     // One picture, of the frame `at` (frames counted by the clock: a frame that was not taken is a number left out).
@@ -1048,6 +1093,7 @@ private:
                 if (t.strayAt >= 0 && at - t.strayAt <= 2 && t.strayAxis == any.colors.axis) {
                     if (firstOfRound) {
                         for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
+                        shift = 0;
                     } else {
                         const juraic::Cell child = !any.childHidden ? any.colors.child : knows(s, comes) ? pairOf(s, comes).child : any.colors.axis;
                         learn(s, comes, {any.colors.axis, child});
@@ -1072,8 +1118,10 @@ private:
             } else if (side[0].nextStill >= windowLong && !(same(pairOf(0, 0), a) && knows(0, 1) && same(pairOf(0, 1), b))) {
                 if (knows(0, 1) && same(pairOf(0, 1), a) && side[0].nextStill < roundGap)
                     for (int k = 0; k < 2; ++k) learn(k, 2, b);
-                else
+                else {
                     for (int k = 0; k < 2; ++k) pairsOf[k].assign({a, b}), knownOf[k].assign(2, 1);
+                    shift = 0;
+                }
             }
         }
     }
@@ -1153,7 +1201,9 @@ private:
         uint8_t& k = known[size_t(index)];
         if (k == 1 && sure && !same(pairs[size_t(index)], p)) ++doubts;
         if (k == 1 && !sure) return;
+        const bool changed = k != 1 || !same(pairs[size_t(index)], p);
         pairs[size_t(index)] = p, k = sure ? 1 : 2;
+        if (sure && changed) align();
     }
     bool windowSettled(const SideTrack& t, int64_t at) const {
         return t.nextStill >= windowStill && (t.nextMovedAt >= t.spawnedAt - windowBefore || at - t.spawnedAt >= windowWait);
@@ -1162,6 +1212,7 @@ private:
         ++rounds;
         for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false, t.learnFor = -1, t.strayAt = -1, t.shiftedAt = -1, t.unseen = 0, t.words = Words{};
         for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
+        shift = 0;
         roundStart = -1;
         fromStart = true;
     }

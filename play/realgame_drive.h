@@ -32,6 +32,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -560,8 +561,9 @@ private:
     // The pairs the screen has shown since the pair in play was begun, and that pair's colours once they are known (begun
     // before the screen showed it, of the first colour - learnPairs: the AI then waits for it, ai::PlacementAgent).
     void knowColours(const Tracker& t) {
-        if (t.pairsLearnt() == learntAt.first && t.knownCount() == learntAt.second) return;
-        learntAt = {t.pairsLearnt(), t.knownCount()};
+        const std::tuple<size_t, size_t, int> now{t.pairsLearnt(), t.knownCount(), t.aligns};
+        if (now == learntAt) return;
+        learntAt = now;
         learnPairs(t);
         const int i = own.nextPair - 1;
         if (own.phase != juraic::Phase::Control || !t.knows(me, i)) return;
@@ -570,7 +572,7 @@ private:
         for (Past& q : past)
             if (q.state.phase == juraic::Phase::Control && q.state.nextPair - 1 == i) q.state.colors = c;
     }
-    std::pair<size_t, size_t> learntAt{0, 0}; // (knowColours: what the screen had shown as it last looked)
+    std::tuple<size_t, size_t, int> learntAt{0, 0, 0}; // (knowColours: what the screen had shown as it last looked)
 
     // The engine begins pair `pair` with the 13th and 14th rows the AI is shown (Follower::withHidden: those Follower
     // made out, and the engine's own in the 13th row where Follower has none there), not those the engine made by
