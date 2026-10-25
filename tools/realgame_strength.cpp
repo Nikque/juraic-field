@@ -25,6 +25,7 @@
 // again for each choice from the round and the pair, so that a pair chosen twice does not change the choices after it),
 // KNOWN2 (2P's own window never shows the third pair before its pair appears), SHOWSTART. In mode 7: NOTICEDIFF (2P's
 // own notice read against the round's; NOTICESHOW, NOTICELONG). NOEARLY (modes 2-4): Driver::early false.
+#include <bit>
 #include <sstream>
 #define main realgame_tests_main
 #include "tests/realgame_tests.cpp"
@@ -74,12 +75,61 @@ static ai::Params forTwo(ai::Params p, const char* name = "P2PARAMS") {
     }
     return p;
 }
+// TIMED=name=value,...: the pictures and the pad in time (TimedRun of tests/realgame_tests.cpp; "on" alone with its
+// defaults): phase shown shownSpread comes comesSpread read readSpread drive driveSpread input inputSpread dropOneIn
+// twiceOneIn backOneIn stallEvery stallFor slowOneIn slow fill filter takeSpread sendAfter.
+static TimedRun timedRun() {
+    TimedRun t;
+    const char* s = std::getenv("TIMED");
+    if (!s) return t;
+    t.on = true;
+    std::string all(s);
+    std::replace(all.begin(), all.end(), ',', ' ');
+    std::istringstream in(all);
+    for (std::string item; in >> item;) {
+        const size_t eq = item.find('=');
+        const std::string k = item.substr(0, eq);
+        const double v = eq == std::string::npos ? 1.0 : std::atof(item.c_str() + eq + 1);
+        double* d = k == "phase" ? &t.phase : k == "shown" ? &t.shown : k == "shownSpread" ? &t.shownSpread : k == "comes" ? &t.comes : k == "comesSpread" ? &t.comesSpread
+                  : k == "read" ? &t.read : k == "readSpread" ? &t.readSpread : k == "drive" ? &t.drive : k == "driveSpread" ? &t.driveSpread : k == "input" ? &t.input
+                  : k == "inputSpread" ? &t.inputSpread : k == "slow" ? &t.slow : k == "takeSpread" ? &t.takeSpread : k == "sendAfter" ? &t.sendAfter : nullptr;
+        int* i = k == "dropOneIn" ? &t.dropOneIn : k == "twiceOneIn" ? &t.twiceOneIn : k == "backOneIn" ? &t.backOneIn : k == "stallEvery" ? &t.stallEvery
+               : k == "stallFor" ? &t.stallFor : k == "slowOneIn" ? &t.slowOneIn : nullptr;
+        if (d) *d = v;
+        else if (i) *i = int(v);
+        else if (k == "fill") t.fill = v != 0;
+        else if (k == "filter") t.filter = v != 0;
+        else if (k != "on") std::fprintf(stderr, "TIMED: %s?\n", k.c_str()), std::exit(2);
+    }
+    return t;
+}
+// (Driver::replans where the driver has it)
+template <class D> static int replansOf(const D& d) {
+    if constexpr (requires { d.replans; }) return d.replans;
+    else return -1;
+}
+// The pairs of 2P (modes 2-4): the frames from a pair appearing to the first frame that took a button sent for it and to
+// its lock, the turns and moves it took (from buttons sent for it) and the fewest that bring it from where it appeared
+// to where it locked, the placement first chosen for it and the last, and why the last is another (the second choice,
+// no way left to the one before, or else), and the own pairs to come not known as a pair appeared (the window not read).
+struct PairLog {
+    long pairs = 0, firstSum = 0, lockSum = 0, presses = 0, fewest = 0, retargeted = 0, bySecond = 0, byNoWay = 0, byOther = 0, holes = 0;
+    long otherRunTicks = 0, otherRunAge = 0, ticks = 0; // ticks with the other side's chain followed, and the frames by which it was behind the own side
+};
+static PairLog G_pairs;
 static const Round* G_round = nullptr;     // the round being played (null once it is over)
 static GameField G_final, G_final2;       // the fields of 1P and 2P as the last round ended (FINALFIELD)
 static int G_locks[2] = {0, 0}, G_control[2] = {0, 0};
 static int G_state = 0, G_maxChain[2] = {0, 0}, G_frames = 0;
 static int64_t G_score[2] = {0, 0};
-static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
+// (PlacementAgent::unknownFrames where the agent has it)
+template <class A> static int64_t unknownOf(const A& a) {
+    if constexpr (requires { a.unknownFrames; }) return a.unknownFrames;
+    else return -1;
+}
+// A round so (tests/realgame_tests.cpp driveRound), and the driver's ways planned again and the frames 2P's pairs waited
+// for their colours.
+static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how, int* replans = nullptr, int64_t* unknownWaited = nullptr) {
     const Layout l = sampleLayout();
     const Rules rules;
     Round r;
@@ -105,8 +155,14 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     d.unsureWays = how.unsureWays && !std::getenv("SUREOFF"); // (SUREOFF: Driver::unsureWays false)
     d.early = how.early && !std::getenv("NOEARLY");            // (NOEARLY: Driver::early false)
     int64_t clock = 1000;
+    TimedPipe pipe(how.timed, seed, follow, d, 1045);
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
+        if (how.timed.on) {
+            pipe.picture(read(canvas.picture(), l), f - 45);
+            pipe.run(f - 44, [&](int64_t, int, uint8_t out) { check(out == 0, "buttons before the round"); });
+            continue;
+        }
         follow.step(read(canvas.picture(), l), clock);
         check(d.tick(follow, clock) == 0, "buttons before the round");
     }
@@ -150,12 +206,42 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     int pauseLeft = 0, inPlay = 0;  // pauseFor: frames the round stays stopped; frames the pair of 2P has been in play
     bool pausedPair = false;        // ... the pair in play was in play as the round stopped,
     int pausedTarget = -1;          // ... and the placement the AI had chosen for it then
+    // (the pairs of 2P: PairLog)
+    const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get());
+    int64_t pairFrom = -1, pairFirst = -1; // the frame of the round the pair in play appeared in, its first button sent for it
+    int pairPresses = 0, firstAim = -1;
+    int64_t againAt = 0, steeredAt = 0;    // the agent's counts as it appeared
+    GameField pairField;                   // the field it appeared over
+    uint8_t pressedBefore = 0;
+    // (a pair begun by the driver: its first placement chosen from now on)
+    const auto begun = [&] { firstAim = -1, againAt = placing ? placing->againSwitched : 0, steeredAt = placing ? placing->steered : 0; };
+    // (timed: after each drive of the pad, in the frame of the clock `now` it was driven in)
+    const auto driven = [&](int64_t now, int correctedNow, uint8_t) {
+        if (now - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
+        if (now - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
+        if (d.played != played) played = d.played, target = -1, ps.begin(now, d.begunPair()), begun();
+        if (d.target() >= 0) target = d.target();
+        if (d.target() >= 0 && firstAim < 0) firstAim = d.target();
+        ++G_pairs.ticks;
+        if (follow.model[0].running) ++G_pairs.otherRunTicks, G_pairs.otherRunAge += std::max<int64_t>(0, now + d.lag - follow.model[0].runAt);
+    };
+    uint8_t tapAs[2] = {0, 0};
+    int tapFor[2] = {0, 0};
+    int nextLitFor = 0; // NEXTLIT: frames the window of 2P stays lit
     for (int f = 0; f < how.frames && r.state == RoundState::Playing; ++f, ++clock) {
         if (pauseLeft > 0) {
             // (the round stopped: drawn as it stands, the light over it; the driver's clock goes on)
             draw(canvas, l, r, false, noise, how.quietLanding, words);
             const SideLayout& s = l.side[1];
             canvas.fill(s.left + s.cellWidth, s.bottom - 12 * s.cellHeight, s.left + 4 * s.cellWidth, s.bottom - 9 * s.cellHeight, LIGHT);
+            if (how.timed.on) {
+                pipe.picture(read(canvas.picture(), l), f);
+                pipe.run(f + 1, driven);
+                int64_t ignored = 0;
+                pipe.taken(f + 1, ignored);
+                --pauseLeft;
+                continue;
+            }
             follow.step(read(canvas.picture(), l), clock);
             sent[size_t(clock - first)] = d.tick(follow, clock);
             if (d.played != played) played = d.played, target = -1, ps.begin(clock, d.begunPair());
@@ -216,6 +302,16 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
             canvas.fill(s.left, s.bottom - 2 * s.cellHeight, s.left + s.cellWidth, s.bottom - s.cellHeight, LIGHT);
             if (litFor > 0 && --litFor == 0) litEndedAt = clock;
         }
+        // (NEXTLIT=n: one pair of 2P in three, the window of its next pairs lit from 10 frames before the pair appears for n
+        //  frames - the window not read as it moves on, the pair after the next two not learnt from it)
+        static const int nextLit = std::getenv("NEXTLIT") ? std::atoi(std::getenv("NEXTLIT")) : 0;
+        if (nextLit && r.player[1].phase == Phase::Next && r.player[1].wait == 10 && spawns % 3 == 1) nextLitFor = nextLit;
+        if (nextLitFor > 0) {
+            const SideLayout& s = l.side[1];
+            for (const auto& spots : s.next)
+                for (const Spot& at : spots) canvas.fill(at.x - s.cellWidth * 0.5f, at.y - s.cellWidth * 0.5f, at.x + s.cellWidth * 0.5f, at.y + s.cellWidth * 0.5f, LIGHT);
+            --nextLitFor;
+        }
         // (... and once it has gone, the pair unseen: a piece of its colour drawn once where pairs appear - 1 -, half a
         //  cell lower - 2 -, a cell lower - 3 - or in the column beside - 4 -, as a piece of a chain falling past, three
         //  frames or more after the light, the field read
@@ -235,7 +331,8 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
             const SideLayout& s = l.side[1];
             canvas.fill(s.left + s.cellWidth, s.bottom - 10.75f * s.cellHeight, s.left + 5 * s.cellWidth, s.bottom - 8.25f * s.cellHeight, Rgb{240, 210, 60});
         }
-        follow.step(read(canvas.picture(), l), clock);
+        if (how.timed.on) pipe.picture(read(canvas.picture(), l), f), pipe.run(f + 1, driven);
+        else follow.step(read(canvas.picture(), l), clock);
         if (follow.tracker.side[1].clear) clearAt = clock;
         // (the pair seen as it is about to appear, or in play already when seen late)
         if (follow.tracker.spawned[1])
@@ -251,15 +348,21 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         }
         if (how.later && f == how.laterAt) d.replaceAgent(std::move(how.later)); // (another AI chosen on the screen of the mode)
         // (a frame the driver is not called in: the pad holds what it held)
-        if (how.skipOneIn && f > 0 && skipper.below(uint64_t(how.skipOneIn)) == 0) sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
-        else {
+        if (how.timed.on) {
+        } else if (how.skipOneIn && f > 0 && skipper.below(uint64_t(how.skipOneIn)) == 0) {
+            sent[size_t(clock - first)] = sent[size_t(clock - first - 1)];
+        } else {
             const int correctedNow = d.corrected;
             sent[size_t(clock - first)] = d.tick(follow, clock);
             if (how.twiceOneIn && twicer.below(uint64_t(how.twiceOneIn)) == 0) sent[size_t(clock - first)] = d.tick(follow, clock);
             if (clock - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
+            ++G_pairs.ticks;
+            if (follow.model[0].running) ++G_pairs.otherRunTicks, G_pairs.otherRunAge += std::max<int64_t>(0, clock + d.lag - follow.model[0].runAt);
         }
-        if (d.played != played) {
+        if (!how.timed.on && d.played != played) begun();
+        if (d.target() >= 0 && firstAim < 0 && !how.timed.on) firstAim = d.target();
+        if (!how.timed.on && d.played != played) {
             played = d.played, target = -1, ps.begin(clock, d.begunPair());
             const GameField &begun = d.begunField(), &game = r.player[1].field;
             for (int x = 0; x < W; ++x) {
@@ -282,7 +385,16 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         uint8_t buttons[2];
         ai::observe(r, 0, o);
         buttons[0] = other->frame(o);
-        buttons[1] = from >= first ? sent[size_t(from - first)] : 0;
+        buttons[1] = how.timed.on ? pipe.taken(f + 1, from) : from >= first ? sent[size_t(from - first)] : 0;
+        if (how.timed.on && r.player[1].phase == Phase::Control) {
+            static constexpr uint8_t KINDS[2] = {BTN_CW | BTN_CCW, BTN_LEFT | BTN_RIGHT};
+            for (int k = 0; k < 2; ++k) {
+                const uint8_t now = buttons[1] & KINDS[k];
+                if (now != tapAs[k] && tapAs[k]) ++n.taps[k][std::min(3, tapFor[k] - 1)];
+                tapFor[k] = now && now == tapAs[k] ? tapFor[k] + 1 : 1;
+                tapAs[k] = now;
+            }
+        }
         if (how.swapped) buttons[1] = uint8_t((buttons[1] & ~(BTN_CW | BTN_CCW)) | (buttons[1] & BTN_CW ? BTN_CCW : 0) | (buttons[1] & BTN_CCW ? BTN_CW : 0));
         PlayerEvents e[2];
         // (the pair of 2P before this frame - as it appears, when it appears in this frame: a turn taken in its first
@@ -326,6 +438,42 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
         if (how.kickShown && e[1].control.rotated && dirBefore == UP && !ps.leftOver && !e[1].spawned && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore)
             ++n.kicks, n.kickMoves += std::abs(r.player[1].pair.x - columnBefore) > 1, kickFrom = columnBefore, kickTo = r.player[1].pair.x, kickDir = dirBefore, kickFor = how.kickShown, kickAt = clock, kickPair = true;
         if (ps.downCarried(buttons[1])) ++n.downAtSpawn;
+        // (PairLog)
+        if (e[1].spawned) {
+            pairFrom = f, pairFirst = -1, pairPresses = 0, pairField = r.player[1].field, pressedBefore = 0;
+            // (a pair to come no window showed, before one known: shown to the AI as known before observeWith kept the
+            //  known pairs together)
+            for (int i = r.player[1].nextPair - 1; i < int(follow.tracker.pairsLearnt()); ++i)
+                if (!follow.tracker.knows(1, i)) {
+                    ++G_pairs.holes;
+                    break;
+                }
+        }
+        if (pairFrom >= 0 && (r.player[1].phase == Phase::Control || e[1].locked)) {
+            const uint8_t mine = ps.leftOver ? 0 : uint8_t(buttons[1] & (BTN_LEFT | BTN_RIGHT | BTN_CW | BTN_CCW));
+            if (pairFirst < 0 && !ps.leftOver && buttons[1]) pairFirst = f;
+            pairPresses += std::popcount(unsigned(mine & ~pressedBefore));
+            pressedBefore = mine;
+        }
+        if (e[1].locked && pairFrom >= 0) {
+            ++G_pairs.pairs, G_pairs.firstSum += (pairFirst < 0 ? f : pairFirst) - pairFrom, G_pairs.lockSum += f - pairFrom, G_pairs.presses += pairPresses;
+            ai::InputPlanner fewest;
+            ai::InputPath way;
+            if (fewest.plan(pairField, spawnPair(r.timing), r.player[1].pair.placement(), r.timing, rules.speedPercent, way)) {
+                uint8_t was = 0;
+                for (const uint8_t b : way.buttons) {
+                    const uint8_t k = b & (BTN_LEFT | BTN_RIGHT | BTN_CW | BTN_CCW);
+                    G_pairs.fewest += std::popcount(unsigned(k & ~was)), was = k;
+                }
+            }
+            if (firstAim >= 0 && target >= 0 && firstAim != target) {
+                ++G_pairs.retargeted;
+                if (placing && placing->againSwitched != againAt) ++G_pairs.bySecond;
+                else if (placing && placing->steered != steeredAt) ++G_pairs.byNoWay;
+                else ++G_pairs.byOther;
+            }
+            pairFrom = -1;
+        }
         if (how.hidden && e[1].control.rotated && r.player[1].phase == Phase::Control) hideFor = how.hidden;
         // (a pair the AI found no placement for - the field full - is not counted)
         if (e[1].locked && target >= 0) {
@@ -394,6 +542,13 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how) {
     n.lagRounds += 1, n.lagRight += d.measuredLag() == how.lag;
     n.lagTaken += d.lag == how.lag, n.turnsFound += d.turnsSwapped;
     if (how.sentOut) *how.sentOut = sent;
+    if (how.timed.on) {
+        n.pictures += pipe.pictures, n.followed += pipe.followed, n.drives += pipe.drives, n.fills += pipe.fills, n.lost += pipe.lost;
+        n.twice += pipe.pace.twice, n.back += pipe.pace.back, n.nextFrame += pipe.pace.next, n.missing += pipe.pace.missing, n.stalls += pipe.pace.stalls;
+    }
+    if (replans) *replans = replansOf(d);
+    if (unknownWaited)
+        if (const auto* p = dynamic_cast<const ai::PlacementAgent*>(d.agent.get())) *unknownWaited = unknownOf(*p);
 }
 
 // The AI of 2P shown parts of the round as they are (ORACLE bits): 1 the opponent, 2 its own notice, 4 its own
@@ -686,12 +841,36 @@ int main(int argc, char** argv) {
         std::unique_ptr<ai::Agent> a;
         if (const char* e = std::getenv("ORACLE")) { auto o = std::make_unique<Oracle>(forTwo(narrow)); o->bits = std::atoi(e); a = std::move(o); } else a = ai::makeAgent("x3", forTwo(narrow));
         if (mode >= 2) Driver::prepare(a.get());
+        // THINK=n: the choices of 2P take n frames as on a machine that thinks in real time - the second choice comes n
+        // frames after its pair appeared (PlacementAgent::againLate), and the first one, begun `ahead` frames before the pair
+        // appears, n - ahead frames after (lateScript) - the round going on meanwhile
+        static std::vector<int> lateFor;
+        if (const char* th = std::getenv("THINK"))
+            if (auto* p = dynamic_cast<ai::PlacementAgent*>(a.get())) {
+                const int think = std::atoi(th);
+                p->againLate = think;
+                for (int moves = 0; moves < 2000; ++moves) lateFor.push_back(moves), lateFor.push_back(std::max(0, think - p->ahead));
+                p->lateScript = &lateFor;
+            }
+        int64_t unknownWaited = -1;
         DriveCounts n;
         const int lag = std::getenv("LAG") ? std::atoi(std::getenv("LAG")) : 5;
         const int hid = std::getenv("HID") ? std::atoi(std::getenv("HID")) : 2;
-        driveMatch(seed, n, {.lag = lag, .shaky = mode >= 4, .frames = frames, .startLag = lag + 1, .given = std::move(a), .hidden = hid, .movedHidden = hid ? 1 : 0, .quietLanding = true,
-                             .skipOneIn = mode >= 3 ? 7 : 0});
+        int replans = -1;
+        // (LIT=n: the screen of 2P lit in n frames of every 12; LITAS=n: one pair of 2P in three lit from 8 frames before it
+        //  appears, for n frames - DriveScenario::lit, litAsAppears)
+        const int lit = std::getenv("LIT") ? std::atoi(std::getenv("LIT")) : 0, litAs = std::getenv("LITAS") ? std::atoi(std::getenv("LITAS")) : 0;
+        driveMatch(seed, n, {.lag = lag, .shaky = mode >= 4, .frames = frames, .startLag = lag + 1, .given = std::move(a), .lit = lit, .hidden = hid, .movedHidden = hid ? 1 : 0,
+                             .quietLanding = true, .skipOneIn = mode >= 3 ? 7 : 0, .litAsAppears = litAs, .timed = timedRun()},
+                   &replans, &unknownWaited);
         std::printf("misses %ld of %ld left %ld down %ld miscounted %ld untargeted %ld ", n.locks - n.hits, n.locks, n.leftAlone, n.downAtSpawn, n.miscounted, n.untargeted);
+        const PairLog& q = G_pairs;
+        std::printf("\npairs %ld first %ld lock %ld presses %ld fewest %ld retargeted %ld second %ld noway %ld other %ld holes %ld unknownWaited %lld otherRun %ld age %ld ticks %ld replans %d corrected %ld\n",
+                    q.pairs, q.firstSum, q.lockSum, q.presses, q.fewest, q.retargeted, q.bySecond, q.byNoWay, q.byOther, q.holes, (long long)unknownWaited, q.otherRunTicks,
+                    q.otherRunAge, q.ticks, replans, n.corrected);
+        std::printf("timed pictures %ld followed %ld twice %ld back %ld next %ld missing %ld drives %ld fills %ld stalls %ld lost %ld taps turn %ld %ld %ld %ld move %ld %ld %ld %ld\n", n.pictures,
+                    n.followed, n.twice, n.back, n.nextFrame, n.missing, n.drives, n.fills, n.stalls, n.lost, n.taps[0][0], n.taps[0][1], n.taps[0][2], n.taps[0][3], n.taps[1][0], n.taps[1][1],
+                    n.taps[1][2], n.taps[1][3]);
     }
     if (std::getenv("FINALFIELD")) {
         // (FINALFIELD: the fields as the round ended, 1P then 2P, the 14th row first - kept as it ended: the round itself is

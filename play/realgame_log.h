@@ -3,7 +3,9 @@
 // what went wrong in it - a folder of its own for each time reading begins:
 //   readings.bin  every reading of the screen in its order (the frame, the size of the picture, what each side shows)
 //                 and, after the readings of a frame of this program, the buttons the pad held from then on: enough to
-//                 follow the reading again with Follower and Driver (RecordReader reads it back);
+//                 follow the reading again with Follower and Driver (RecordReader reads it back); with each reading
+//                 the times its picture was shown, came in and was read, with each drive of the pad the times it was
+//                 driven and set and why, and each placement the driver told Follower (tools/realgame_replay.cpp);
 //   events.txt    what happened, as lines of text (new pairs, placements found, checks that failed, readings that did not
 //                 fit, the placements the AI chose, the pair put right, the lags measured, presses of the pad);
 //   *.bmp         pictures of the screen: one every few seconds and one where something did not fit (at most so many).
@@ -22,19 +24,42 @@
 
 namespace play::realgame {
 
-// The kinds of record of readings.bin, each a byte followed by its fields.
+// The kinds of record of readings.bin, each a byte followed by its fields. Times are in 100 ns of the clock of the
+// pictures (QueryPerformanceCounter).
 enum RecordKind : uint8_t {
     RECORD_READING = 'R', // int64 frame, int32 width, int32 height, then the two SideRead as they are in memory
     RECORD_PAD = 'P',     // int64 frame of the clock, uint8 buttons of the game (game/control.h), uint16 buttons of the
                           // pad (XUSB), uint8 what drove it (0 nothing, 1 the AI, 2 a press asked for)
+    // (from the second kind of record on: JFRGLOG2)
+    RECORD_TIME = 'T',    // before each reading: int64 the time the picture was shown (as the capture gives it), the time
+                          // it came in, the time it was read; uint8 followed (0: of a frame not after the last one followed)
+    RECORD_SENT = 'S',    // after each pad record: int64 the time the pad was driven, the time the call that set the pad
+                          // returned (not the time the game took the buttons: that the pictures tell, the lag); uint8 why it
+                          // was driven (1 pictures came, 2 none came in the frame, 3 none came for long - it holds nothing
+                          // -, 4 a menu read - it holds nothing)
+    RECORD_TELL = 'L',    // int32 the number of the own pair (from 0 in the round) the driver's engine locked, uint8 where
+                          // (juraic::placementId): what the driver told Follower (Follower::tell)
 };
-constexpr char RECORD_MAGIC[8] = {'J', 'F', 'R', 'G', 'L', 'O', 'G', '1'};
+constexpr char RECORD_MAGIC[8] = {'J', 'F', 'R', 'G', 'L', 'O', 'G', '2'};
+constexpr char RECORD_MAGIC_1[8] = {'J', 'F', 'R', 'G', 'L', 'O', 'G', '1'}; // (records of readings and the pad only)
 
 struct PadRecord {
     int64_t frame = 0;
     uint8_t buttons = 0;
     uint16_t pad = 0;
     uint8_t by = 0;
+};
+struct TimeRecord {
+    int64_t shown = 0, came = 0, read = 0;
+    uint8_t followed = 1;
+};
+struct SentRecord {
+    int64_t driven = 0, set = 0;
+    uint8_t why = 0;
+};
+struct TellRecord {
+    int32_t pair = -1;
+    uint8_t placement = 0;
 };
 
 class Record {
@@ -104,6 +129,27 @@ public:
         bin.write(reinterpret_cast<const char*>(&p.buttons), 1);
         bin.write(reinterpret_cast<const char*>(&p.pad), sizeof p.pad);
         bin.write(reinterpret_cast<const char*>(&p.by), 1);
+    }
+    void time(const TimeRecord& t) {
+        if (!bin) return;
+        const uint8_t kind = RECORD_TIME;
+        bin.write(reinterpret_cast<const char*>(&kind), 1);
+        for (const int64_t v : {t.shown, t.came, t.read}) bin.write(reinterpret_cast<const char*>(&v), sizeof v);
+        bin.write(reinterpret_cast<const char*>(&t.followed), 1);
+    }
+    void sent(const SentRecord& s) {
+        if (!bin) return;
+        const uint8_t kind = RECORD_SENT;
+        bin.write(reinterpret_cast<const char*>(&kind), 1);
+        for (const int64_t v : {s.driven, s.set}) bin.write(reinterpret_cast<const char*>(&v), sizeof v);
+        bin.write(reinterpret_cast<const char*>(&s.why), 1);
+    }
+    void tell(const TellRecord& t) {
+        if (!bin) return;
+        const uint8_t kind = RECORD_TELL;
+        bin.write(reinterpret_cast<const char*>(&kind), 1);
+        bin.write(reinterpret_cast<const char*>(&t.pair), sizeof t.pair);
+        bin.write(reinterpret_cast<const char*>(&t.placement), 1);
     }
     // A line of events.txt, after the frame it is of (from either thread).
     void event(int64_t frame, const std::string& line) {
@@ -189,19 +235,23 @@ private:
     }
 };
 
-// readings.bin read back: its records in their order.
+// readings.bin read back: its records in their order (of either kind of record: JFRGLOG1 has readings and the pad only).
 class RecordReader {
 public:
+    TimeRecord time; // (the last of these kinds read)
+    SentRecord sent;
+    TellRecord tell;
     bool open(const std::filesystem::path& file) {
         in.open(file, std::ios::binary);
         char magic[8] = {};
         uint32_t size = 0;
         in.read(magic, sizeof magic);
         in.read(reinterpret_cast<char*>(&size), sizeof size);
-        return in && std::memcmp(magic, RECORD_MAGIC, sizeof magic) == 0 && size == sizeof(SideRead);
+        return in && (std::memcmp(magic, RECORD_MAGIC, sizeof magic) == 0 || std::memcmp(magic, RECORD_MAGIC_1, sizeof magic) == 0) && size == sizeof(SideRead);
     }
     void close() { in.close(); }
-    // The next record: its kind (0 at the end), and its fields in `r`, `frame`, `width`, `height` or `p`.
+    // The next record: its kind (0 at the end), and its fields in `r`, `frame`, `width`, `height` or `p` - or in `time`,
+    // `sent` or `tell`.
     uint8_t next(Reading& r, int64_t& frame, int& width, int& height, PadRecord& p) {
         uint8_t kind = 0;
         if (!in.read(reinterpret_cast<char*>(&kind), 1)) return 0;
@@ -218,6 +268,15 @@ public:
             in.read(reinterpret_cast<char*>(&p.buttons), 1);
             in.read(reinterpret_cast<char*>(&p.pad), sizeof p.pad);
             in.read(reinterpret_cast<char*>(&p.by), 1);
+        } else if (kind == RECORD_TIME) {
+            for (int64_t* v : {&time.shown, &time.came, &time.read}) in.read(reinterpret_cast<char*>(v), sizeof *v);
+            in.read(reinterpret_cast<char*>(&time.followed), 1);
+        } else if (kind == RECORD_SENT) {
+            for (int64_t* v : {&sent.driven, &sent.set}) in.read(reinterpret_cast<char*>(v), sizeof *v);
+            in.read(reinterpret_cast<char*>(&sent.why), 1);
+        } else if (kind == RECORD_TELL) {
+            in.read(reinterpret_cast<char*>(&tell.pair), sizeof tell.pair);
+            in.read(reinterpret_cast<char*>(&tell.placement), 1);
         } else {
             return 0;
         }

@@ -137,13 +137,14 @@ public:
     // points as the game reckons them.
     bool observe(int me, const juraic::Rules& real, juraic::ai::Observation& o) const {
         if (!observeSpawn(tracker, me, real, o)) return false;
-        complete(o);
+        complete(o, tracker.frame);
         return true;
     }
-    // ... and with the own side as the caller follows it at the frame `at` of the clock (observeWith).
+    // ... and with the own side as the caller follows it at the frame `at` of the clock (observeWith) - the frame its
+    // own side is of (the engine of Driver plays ahead of the pictures, to the frame its buttons reach the game).
     void observeAt(int me, const juraic::Rules& real, const juraic::Player& own, int64_t at, juraic::ai::Observation& o) const {
         observeWith(tracker, me, real, &own, at, o);
-        complete(o);
+        complete(o, at);
     }
 
 private:
@@ -163,12 +164,16 @@ private:
     };
     static Before before(const SideTrack& t) { return {t.pairs, t.colors, t.under}; }
 
-    void complete(juraic::ai::Observation& o) const {
+    // The run of the other side (SideModel::run) is of the frame of the last reading; the AI is shown it at the frame `at`
+    // its own side is of: played on to it as far as the game's frames alone decide it - its split, its landing, the
+    // waves of its chain, garbage falling -, not into what the pictures have not shown yet (the garbage that falls after
+    // it, its columns and how much, and the pair after it): there it stays as in the frame before.
+    void complete(juraic::ai::Observation& o, int64_t at) const {
         for (int s = 0; s < 2; ++s) {
             juraic::Player& p = o.player[s];
             p.field = withHidden(p.field, model[s].core.field); // (the 13th and 14th rows as the moves followed put them)
             if (s != o.me && model[s].running) {
-                const juraic::Player& run = model[s].run;
+                const juraic::Player run = runTo(model[s], at);
                 // (garbage falling: its columns are the screen's - those of a row not filled are a guess in the run)
                 if (run.phase != juraic::Phase::Garbage) p.field = run.field;
                 p.phase = run.phase, p.wait = run.wait, p.chain = run.chain, p.wave = run.wave, p.placed = run.placed;
@@ -179,7 +184,27 @@ private:
         }
     }
 
+    // The run of `m` played on from its frame to the frame `at` (complete): only through the phases the game's frames
+    // alone decide. (Before its frame: as it is.)
+    juraic::Player runTo(const SideModel& m, int64_t at) const {
+        juraic::Player run = m.run;
+        const juraic::Tsumo none;
+        for (int64_t g = m.runAt; g < at; ++g) {
+            juraic::Player next = run;
+            juraic::Incoming nobody;
+            juraic::advancePlayer(next, nobody, 0, none, rules, tracker.timing, tracker.roundFrame(g));
+            if (!byFrames(next.phase)) break;
+            run = next;
+        }
+        return run;
+    }
+
 public:
+    // The phases in which nothing but the game's frames decides what comes next (no button, no pair, no garbage yet to be
+    // decided): a piece splitting off, a landing, the waves of a chain, garbage falling.
+    static bool byFrames(juraic::Phase p) {
+        return p == juraic::Phase::Split || p == juraic::Phase::Land || p == juraic::Phase::Wave || p == juraic::Phase::Garbage;
+    }
     // `read` (the twelve rows the screen shows) with the pieces of `game` in the rows it does not show where they can
     // rest: in the 13th row of a column read twelve high, and in the 14th row.
     static juraic::GameField withHidden(const juraic::GameField& read, const juraic::GameField& game) {

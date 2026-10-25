@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -49,6 +50,7 @@ public:
     int played = 0;                           // pairs played
     int corrected = 0;                        // pictures that showed the pair elsewhere than the engine had it
     int explained = 0;                        // ... of the others, those a cell of the 13th or 14th row not sure of explained (explain)
+    int replans = 0;                          // ways to the placement planned again from where the engine had the pair (steer)
     bool unsureWays = true; // the AI plans its ways with the cells not sure of (tellUnsure), and a picture can tell them (explain)
     std::vector<int> lags;                    // the lag the pictures of each pair fitted best, the last ones (at most 15)
     // The buttons of the two turns are sent the other way round: the game turns its pair so (fit).
@@ -87,6 +89,10 @@ public:
     // play/realgame_log.h) - each pair begun, the placement it is brought to, a pair put where the picture shows it,
     // the lag the pictures of a pair fitted.
     std::vector<std::pair<int64_t, std::string>>* notes = nullptr;
+    // When set: the buttons that go to the pad from the frame of the clock `now` on, given those the driver decided (the
+    // two turns as the agent names them). The engine takes what this gives, so that it plays the buttons that went out:
+    // none while the pad is to hold nothing (a menu read, the pictures stopped), or those of a record played again.
+    std::function<uint8_t(int64_t now, uint8_t decided)> gate;
 
     // Another AI to play from the next pair on (the level changed while the AI plays): it takes over when no pair is in
     // play, the one before let go on a thread of its own (it waits for a search it may have begun, as long as its
@@ -162,6 +168,12 @@ public:
     // The columns whose 13th or 14th row the pair in play was begun with is not sure of (shareHidden), and the field it
     // was begun with.
     uint8_t unsureColumns() const { return uint8_t(unsure13 | unsure14); }
+    // The number (from 0 in the round) of the own pair the engine locked last (-1: none), and where: what tick tells
+    // Follower.
+    int toldPair() const { return lockedPair; }
+    juraic::Placement toldPlacement() const { return lockedPlacement; }
+    // The buttons `b` with the two turns the other way round (as they go to the pad when turnsSwapped).
+    static uint8_t otherTurns(uint8_t b) { return swapTurns(b); }
     const juraic::GameField& begunField() const { return startOwn.field; }
 
     // The placement the pair in play is brought to (-1: none); once the engine has put it, the one it was brought to then,
@@ -197,8 +209,8 @@ private:
         keepShot(f);
         watchFitted(f);
         watchWindow(t);
-        watchOther(t, now);
-        if (stoppedFor == pairsSeen && otherMovedAt == now) stoppedFor = -1; // (the game goes on: the pair begun again is played on)
+        watchOther(t);
+        if (stoppedFor == pairsSeen && otherMovedAt == t.frame) stoppedFor = -1; // (the game goes on: the pair begun again is played on)
         if (!t.side[me].clear) unclearAt = now;
         if (!active) {
             wait(f, now);
@@ -213,6 +225,7 @@ private:
         }
         if (!active && overdue(f)) resume(f, now);
         if (!active) return holdDown(f, now);
+        knowColours(t);
         correct(f);
         const int64_t at = now + lag;
         // (frames of the game whose buttons were sent before: they took what was held. A frame the clock went past without
@@ -301,7 +314,7 @@ private:
         //  the game may have stopped before it appeared, the engine going on)
         const bool unseenInAir = unshown() && !(side.clear && side.loose == 0);
         // (the game stopped: it takes no button, and the down button held on went on to the pair as it appeared)
-        if (stoppedFor == pairsSeen) return press(now, held = tapToEnd(now, 0));
+        if (stoppedFor == pairsSeen) return press(now, held = sendable(now, tapToEnd(now, 0)));
         // A pair read as lying can lift again while earlier buttons arrive. Resume its down button when a clear
         // picture shows it in the air; one such pair was left for 10 frames after a light of 80 frames.
         const bool heldBefore = untilLocked;
@@ -334,18 +347,18 @@ private:
             //  read, never both unread: 9 frames before a pair, the down button held on went on to that pair)
             const bool moving = (!side.nextRead[0] && !side.nextRead[1]) || windowOddFor >= 2;
             if (moving && windowReadAt > startNext && windowReadAt > windowPauseAt) windowPauseAt = t.frame;
-            if (windowPauseAt >= startNext && now < windowPauseAt + t.timing.nextSlide) return press(now, held = tapToEnd(now, 0));
+            if (windowPauseAt >= startNext && now < windowPauseAt + t.timing.nextSlide) return press(now, held = sendable(now, tapToEnd(now, 0)));
             // (nor from the button that would reach the next pair, once the window has moved on since the pair in play was
             //  begun and tells the frame the next one appears in: the pair is put, the window moves on only after that -
             //  held again after the window moved, the engine running a chain the game did not have, the down button went on
             //  to the next pair in a round drawn with words over the field. Not for a move of the window before the pair
             //  was begun: for a pair begun unseen that move was its own coming, and let go so it fell by itself.)
             const int64_t comes = appeared(t);
-            if (comes >= 0 && side.shiftedAt > shiftBegun && now + lag >= comes) return press(now, held = tapToEnd(now, 0));
-            return press(now, held = tapToEnd(now, juraic::BTN_DOWN));
+            if (comes >= 0 && side.shiftedAt > shiftBegun && now + lag >= comes) return press(now, held = sendable(now, tapToEnd(now, 0)));
+            return press(now, held = sendable(now, tapToEnd(now, juraic::BTN_DOWN)));
         }
         untilLocked = false;
-        return press(now, held = tapToEnd(now, 0));
+        return press(now, held = sendable(now, tapToEnd(now, 0)));
     }
     struct Past {
         int64_t frame;        // the state after this frame of the game,
@@ -383,7 +396,7 @@ private:
     bool earlyShifted = false;  // ... the window has moved on since it was begun
     int stoppedFor = -1;        // the pair not shown when the game stopped (stopped), until the game goes on (-1: none)
     int againFor = -1;          // the pair begun again (beginAgain), until the screen shows it (-1: none)
-    int64_t otherMovedAt = -1;  // the last frame of the clock the other side was read otherwise than before, or not clear
+    int64_t otherMovedAt = -1;  // the frame of the last picture that read the other side otherwise than before, or not clear
     juraic::GameField otherResting; // ... and as it was read then: the pieces at rest,
     bool otherInHand = false;       // ... a pair in hand,
     juraic::PairControl otherAt{};  // ... and where
@@ -473,6 +486,8 @@ private:
         }
         return b;
     }
+    // The buttons decided for the frame `now` of the clock as they go out (gate).
+    uint8_t sendable(int64_t now, uint8_t decided) const { return gate ? gate(now, decided) : decided; }
     // The buttons the pad held in the frame `at` of the clock (0 before any). (pads: by the frame, one after the other)
     uint8_t padAt(int64_t at) const {
         const auto after = std::upper_bound(pads.begin(), pads.end(), at, [](int64_t frame, const std::pair<int64_t, uint8_t>& p) { return frame < p.first; });
@@ -541,6 +556,21 @@ private:
             tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2] = p.axis, tsumo.piece[(i % juraic::TSUMO_PAIRS) * 2 + 1] = p.child;
         }
     }
+
+    // The pairs the screen has shown since the pair in play was begun, and that pair's colours once they are known (begun
+    // before the screen showed it, of the first colour - learnPairs: the AI then waits for it, ai::PlacementAgent).
+    void knowColours(const Tracker& t) {
+        if (t.pairsLearnt() == learntAt.first && t.knownCount() == learntAt.second) return;
+        learntAt = {t.pairsLearnt(), t.knownCount()};
+        learnPairs(t);
+        const int i = own.nextPair - 1;
+        if (own.phase != juraic::Phase::Control || !t.knows(me, i)) return;
+        const juraic::Pair c = t.pairOf(me, i);
+        own.colors = c;
+        for (Past& q : past)
+            if (q.state.phase == juraic::Phase::Control && q.state.nextPair - 1 == i) q.state.colors = c;
+    }
+    std::pair<size_t, size_t> learntAt{0, 0}; // (knowColours: what the screen had shown as it last looked)
 
     // The engine begins pair `pair` with the 13th and 14th rows the AI is shown (Follower::withHidden: those Follower
     // made out, and the engine's own in the 13th row where Follower has none there), not those the engine made by
@@ -780,7 +810,7 @@ private:
             note(next, "2P pair " + std::to_string(pairsSeen) + " choice renewed: the field or known pairs changed");
         // (a tap the agent lets go before its end - its way planned again, a picture put right - is held to its end: one
         //  that went out for a frame as a pair was put right was lost by a frame of the game under load now and then)
-        if (send) held = tapToEnd(next - lag, wanted), sentFor = true;
+        if (send) held = sendable(next - lag, tapToEnd(next - lag, wanted)), sentFor = true;
         // (a frame whose buttons went out before took what the pad held lag frames before it: a pair begun early and
         //  taken again from the screen, as it was held now, had its first move played twice, a column too far)
         const uint8_t took = send ? held : givenAt(next - lag);
@@ -881,15 +911,16 @@ private:
     bool stopped(const Follower& f, int64_t now) const {
         const SideTrack& side = f.tracker.side[me];
         if (!unshown() || !following || side.clear || !windowWaits(side) || side.pairs + side.unseen >= pairsSeen) return false;
-        return own.phase == juraic::Phase::Next && own.wait <= 2 && now >= next + own.wait - 2 + BLIND_SLACK && now - otherMovedAt >= STOP_FRAMES;
+        return own.phase == juraic::Phase::Next && own.wait <= 2 && now >= next + own.wait - 2 + BLIND_SLACK && f.tracker.frame - otherMovedAt >= STOP_FRAMES;
     }
-    // The other side as last read clear (watchOther): the pieces at rest, the pair in hand and where it is.
-    void watchOther(const Tracker& t, int64_t now) {
+    // The other side as last read clear (watchOther): the pieces at rest, the pair in hand and where it is - by the frames
+    // of the pictures (no picture coming for a while is not the other side standing still).
+    void watchOther(const Tracker& t) {
         const SideTrack& o = t.side[1 - me];
         const bool same = o.clear && o.resting == otherResting && o.inHand == otherInHand &&
                           (!o.inHand || (o.pair.seen && o.pair.at.x == otherAt.x && o.pair.at.y == otherAt.y && o.pair.at.upper == otherAt.upper && o.pair.at.dir == otherAt.dir));
         if (same) return;
-        otherMovedAt = now; // (not read clear: not known to stand still)
+        otherMovedAt = t.frame; // (not read clear: not known to stand still)
         if (o.clear) otherResting = o.resting, otherInHand = o.inHand, otherAt = o.pair.at;
     }
     // ... the pair is begun again as the engine began it, appearing in the frame the button sent now reaches the game, the
@@ -978,6 +1009,7 @@ private:
     }
 
     void steer(const Follower& f) {
+        ++replans;
         if (auto* placing = placer()) {
             juraic::ai::Observation o;
             observe(f, own, next, o);

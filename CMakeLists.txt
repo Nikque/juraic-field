@@ -46,9 +46,9 @@ endif()
 
 if(MSVC)
     # The playable game (Direct2D, XAudio2). One self-contained executable.
-    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_capture_win.h play/realgame_pad_win.h play/realgame_log.h play/realgame_menu.h play/start_beat.h game/link.h)
+    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_capture_win.h play/realgame_pad_win.h play/realgame_log.h play/realgame_menu.h play/realgame_pace.h play/start_beat.h game/link.h)
     set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
-    target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32 d3d11 dxgi dwmapi)
+    target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32 d3d11 dxgi dwmapi winmm)
     # The pad the mode of the real game presses 2P with: the client of the driver ViGEmBus (third_party/ViGEmClient, MIT).
     add_library(vigem_client STATIC third_party/ViGEmClient/src/ViGEmClient.cpp)
     target_include_directories(vigem_client PUBLIC third_party/ViGEmClient/include PRIVATE third_party/ViGEmClient/src)
@@ -187,7 +187,7 @@ if(BUILD_TESTING)
 target_link_libraries(ai_tests PRIVATE Threads::Threads)
     add_test(NAME ai COMMAND ai_tests)
     # The reading of the real game's screen (play/realgame_read.h, realgame_follow.h), with pictures drawn from rounds of this program.
-    add_executable(realgame_tests tests/realgame_tests.cpp play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_log.h play/realgame_menu.h ai/observe.h ai/agents.h)
+    add_executable(realgame_tests tests/realgame_tests.cpp play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_log.h play/realgame_menu.h play/realgame_pace.h ai/observe.h ai/agents.h)
     target_link_libraries(realgame_tests PRIVATE Threads::Threads)
     add_test(NAME realgame_screen_read COMMAND realgame_tests "${CMAKE_CURRENT_BINARY_DIR}")
     # (13 minutes on Windows run alone, longer on slower machines: more than the default 25)
@@ -232,7 +232,7 @@ target_link_libraries(ai_tests PRIVATE Threads::Threads)
             # The virtual pad of the mode of the real game (play/realgame_win.h): plugged in only with
             # JURAIC_TEST_VIRTUAL_PAD=1 set, skipped otherwise.
             add_executable(realgame_pad_tests tests/realgame_pad_tests.cpp play/realgame_win.h play/realgame_pad_win.h)
-            target_link_libraries(realgame_pad_tests PRIVATE vigem_client windowsapp d3d11 dxgi dwmapi user32)
+            target_link_libraries(realgame_pad_tests PRIVATE vigem_client windowsapp d3d11 dxgi dwmapi user32 winmm)
             if(JURAIC_REALGAME_DEBUG)
                 target_compile_definitions(realgame_pad_tests PRIVATE JURAIC_REALGAME_DEBUG=1)
             endif()

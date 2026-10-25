@@ -122,6 +122,7 @@ public:
     std::vector<int> climbing; // ... and the pairs whose ways were let go up into the 13th row so, by their number (for tools)
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
     int64_t revisedChoices = 0; // choices discarded because their field or known pairs changed
+    int64_t unknownFrames = 0;  // frames a pair in the air waited for its colours to be known (unknownPair; for tools)
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
     // after it has appeared, and falls by itself, before the first button moves it. The wait ends earlier when
     // one more frame of it would lock the pair or take the placement chosen out of its reach. Frames a pair
@@ -169,7 +170,7 @@ public:
         if (late && p.phase != Phase::Control) finish(); // the pair came to rest before its choice was made
         if (second && p.phase != Phase::Control && p.phase != Phase::Next) endSecond(-1); // ... before its second choice came
         if (p.phase == Phase::Next || p.phase == Phase::Control) {
-            if (!revising && (thought || late || second) && !sameChoice(o)) {
+            if (!revising && !unknownPair && (thought || late || second) && !sameChoice(o)) {
                 revising = true, ++revisedChoices;
                 target = -1, step = 0;
                 path.buttons.clear();
@@ -184,17 +185,14 @@ public:
                 target = -1, step = 0;
                 path.buttons.clear();
                 if (p.phase == Phase::Control) {
-                    Observation fresh = o;
-                    Player& q = fresh.player[fresh.me];
-                    q.phase = Phase::Next, q.wait = 1, --q.nextPair;
-                    think(fresh);
-                    late = true;
+                    thinkInAir(o);
                     if (!lateScript) lateLog.push_back(int(p.moves)), lateLog.push_back(0);
                 }
             }
         }
         if (p.phase == Phase::Next && !p.field.dead()) {
-            if (!thought && (p.wait == 1 || p.wait <= ahead)) {
+            // (a pair whose colours are not known - not read on the screen of another program - is chosen once they are)
+            if (!thought && (p.wait == 1 || p.wait <= ahead) && o.mine().known(p.nextPair)) {
                 think(o);
             } else if (thought && !asked && o.mine().count() > shownAtThink) {
                 // The screen shows a pair the choice did not know. The second choice is made with what
@@ -220,12 +218,14 @@ public:
                 step = 0;
                 path.buttons.clear();
                 idle = handWait;
-                if (thinking == Thinking::Free && !made()) late = true, lateLog.push_back(int(p.moves)), lateLog.push_back(0);
+                if (!thought) late = true, unknownPair = true, lateLog.push_back(int(p.moves)), lateLog.push_back(0);
+                else if (thinking == Thinking::Free && !made()) late = true, lateLog.push_back(int(p.moves)), lateLog.push_back(0);
                 else if (lateScript && (lateLeft = scriptedLate(int(p.moves))) > 0) late = true;
                 else route(o, pair);
             }
         } else if (late) {
-            if (lateScript ? --lateLeft <= 0 : made()) late = false, route(o, p.pair, true);
+            if (unknownPair && p.phase == Phase::Control && o.mine().known(p.nextPair - 1)) unknownPair = false, thinkInAir(o);
+            if (!unknownPair && (lateScript ? --lateLeft <= 0 : made())) late = false, route(o, p.pair, true);
         } else if (p.phase == Phase::Control) {
             if (askInAir && !asked && !second && target >= 0 && p.nextPair - 1 == choiceIndex && o.mine().count() > shownAtThink) {
                 asked = true, ++againAsked;
@@ -250,6 +250,7 @@ public:
             }
         }
         if (late) {
+            unknownFrames += unknownPair;
             if (!lateScript) ++lateLog.back();
             if (idle > 0) --idle; // (slow hands: the pair is left alone in this frame anyway)
             return ++lateFrames, last = holdSecond && !downWhenPlaced && downKeepsWays(o) ? BTN_DOWN : 0;
@@ -303,7 +304,7 @@ protected:
         if (job.valid()) job.wait(), job = std::future<int>();
         if (again_.valid()) again_.wait(), again_ = std::future<int>();
         if (second) endSecond(-1); // (the round was over first)
-        thought = late = pending = false;
+        thought = late = pending = unknownPair = false;
     }
 
     Rng rng{0};
@@ -398,6 +399,19 @@ private:
         } else {
             chosen = choose(shown, colors, legal);
         }
+    }
+    // The pair in the air chosen now (its choice dropped, or its colours known only now), as the pair about to appear;
+    // not while its colours are not known (unknownPair: the pair waits for them, late).
+    void thinkInAir(const Observation& o) {
+        late = true;
+        if (!o.mine().known(o.self().nextPair - 1)) {
+            unknownPair = true;
+            return;
+        }
+        Observation fresh = o;
+        Player& q = fresh.player[fresh.me];
+        q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+        think(fresh);
     }
     // The choice of that pair once more (again() said so). The first one stands until this one has come.
     void thinkAgain(const Observation& o) {
@@ -581,6 +595,7 @@ private:
     int choiceIndex = -1, choiceCount = 0;
     Pair choicePairs[3]{};
     bool late = false;    // Free: the pair is in the air and its placement is not made yet
+    bool unknownPair = false; // ... nor begun: its colours are not known (Observation: the own pairs known end before it)
     int lateLeft = 0;     // lateScript: the frames the pair still waits
     int chosen = -1;      // the placement, when it was worked out at once; -1 = none is legal
     Pair coming{};        // the pair the choice is for
