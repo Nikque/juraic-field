@@ -1099,14 +1099,21 @@ private:
             const PairSeen any = readPair(field, resting, {});
             if (atSpawn(any) && at - t.changedAt >= stillFrames && looseOver(field, resting, any) == 0) {
                 if (t.strayAt >= 0 && at - t.strayAt <= 2 && t.strayAxis == any.colors.axis) {
-                    if (firstOfRound) {
+                    // (of the colours of the pair after the one that comes, the window showing the pair after that
+                    //  first: the one that came was put unseen - under a light, the window moving on as this one
+                    //  appeared read with its second place not read, so that it did not tell -, and this is the next)
+                    const bool after = !firstOfRound && knows(s, comes + 1) && knows(s, comes + 2) && t.nextRead[0] && same(t.next[0], pairOf(s, comes + 2)) &&
+                                       any.colors.axis == pairOf(s, comes + 1).axis && (any.childHidden || any.colors.child == pairOf(s, comes + 1).child);
+                    if (after) {
+                        ++t.unseen;
+                    } else if (firstOfRound) {
                         for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
                         shift = 0;
                     } else {
                         const juraic::Cell child = !any.childHidden ? any.colors.child : knows(s, comes) ? pairOf(s, comes).child : any.colors.axis;
                         learn(s, comes, {any.colors.axis, child});
                     }
-                    ++doubts;
+                    if (!after) ++doubts;
                     newPair(s, any, resting, field, t.strayAt);
                 } else {
                     t.strayAt = at, t.strayAxis = any.colors.axis;

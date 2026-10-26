@@ -1289,6 +1289,57 @@ static void testOneColourSliding() {
     std::cout << "a pair of one colour on its way up the window is no pair after it; two alike in a row are learnt\n";
 }
 
+// A pair put under a light, and the next one appearing as the window, moving on, is read with its second place not
+// read: the next one, seen where pairs appear of the colours of the pair after the one that came, the window showing
+// the pair after that first, is that pair - the one that came was put unseen (in the records of the real game three
+// such pairs, one of 2P, were taken for the pair that came and its colours learnt again: the pairs after them one place
+// off). Of other colours the pair that came is learnt again as before (testPairsNeverLeft).
+static void testPutUnseenWindowHalfRead() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 4}, side.next[1] = {5, 3};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after, bool afterRead = true) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after, side.nextRead[1] = afterRead;
+        return r;
+    };
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(1, i) && t.pairOf(1, i).axis == p.axis && t.pairOf(1, i).child == p.child; };
+    int64_t at = 70000;
+    Tracker t;
+    for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+    // Pair 0 (5 4) appears; the window moves on to 5 3 / 2 2.
+    Reading first = window(empty, {5, 3}, {2, 2});
+    first.side[1].point[SPAWN_X][23] = 5;
+    for (int f = 0; f < 4; ++f) t.step(first, at++);
+    check(t.side[1].pairs == 1 && is(t, 1, {5, 3}) && is(t, 2, {2, 2}), "the pairs after the first one are not learnt");
+    // It comes to rest in the first column.
+    Reading rest = window(empty, {5, 3}, {2, 2});
+    rest.side[1].point[0][0] = rest.side[1].point[0][1] = 5, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 4;
+    for (int f = 0; f < 30; ++f) t.step(rest, at++);
+    // A light over the field: the window moves on to 2 2 / 4 1 (pair 1, 5 3, appears) and stands; pair 1 is put under
+    // the light in the sixth column.
+    Reading lit = window(rest, {2, 2}, {4, 1});
+    lit.side[1].unsure = 6;
+    for (int f = 0; f < 40; ++f) t.step(lit, at++);
+    check(is(t, 3, {4, 1}), "the pair the window shows as it moves on under a light is not learnt");
+    // Pair 2 (2 2) appears as the window moves on, read 4 1 / not read; the light goes, and pair 2 is seen where pairs
+    // appear, its child above the screen.
+    Reading put = rest;
+    put.side[1].point[5][0] = put.side[1].point[5][1] = 5, put.side[1].point[5][2] = put.side[1].point[5][3] = 3;
+    Reading litMoving = window(lit, {4, 1}, {}, false);
+    for (int f = 0; f < 3; ++f) t.step(litMoving, at++);
+    Reading second = window(put, {4, 1}, {}, false);
+    second.side[1].point[SPAWN_X][23] = 2;
+    for (int f = 0; f < 4; ++f) t.step(second, at++);
+    check(t.side[1].pairs + t.side[1].unseen == 3 && t.side[1].inHand && t.side[1].colors.axis == 2,
+          "a pair seen after one put under a light, the window half read, is not the pair after it (" + std::to_string(t.side[1].pairs) + "+" + std::to_string(t.side[1].unseen) + " pairs)");
+    check(is(t, 1, {5, 3}) && is(t, 2, {2, 2}) && t.doubts == 0, "the pair put under a light is learnt again as the one seen after it");
+    std::cout << "a pair seen after one put under a light, the window half read, is the pair after it\n";
+}
+
 static void testPredictionResetAtRound() {
     struct Watching : ai::PlacementAgent {
         GameField lastField;
@@ -4866,6 +4917,7 @@ int main(int argc, char** argv) {
         testViewsOfBothSides();
         testSidesCountedApart();
         testOneColourSliding();
+        testPutUnseenWindowHalfRead();
         testPredictionResetAtRound();
         testChainAfterMissedLanding();
         testPairsAfterLight();
