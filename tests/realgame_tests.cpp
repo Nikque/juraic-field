@@ -1246,6 +1246,49 @@ static void testSidesCountedApart() {
     std::cout << "a side that counted its pairs apart from the other is shown the other side's window where the two agree\n";
 }
 
+// A pair of one colour on its way up the window reads in both of its places for a few readings (in the records of the
+// real game 1P's window read so for 3 to 7 readings 217 times, and the pair after it was learnt as that colour for 6
+// frames, then again): taken only when the window stands so long. Two pairs of one colour, alike, one after the
+// other are learnt so all the same.
+static void testOneColourSliding() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 1}, side.next[1] = {3, 3};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [&](Pair a, Pair b) {
+        Reading r = empty;
+        r.side[0].next[0] = a, r.side[0].next[1] = b;
+        return r;
+    };
+    const auto is = [](const Tracker& t, int i, Pair p) {
+        return i < int(t.knownOf[0].size()) && t.knownOf[0][size_t(i)] && t.pairsOf[0][size_t(i)].axis == p.axis && t.pairsOf[0][size_t(i)].child == p.child;
+    };
+    {
+        Tracker t;
+        int64_t at = 50000;
+        for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+        check(is(t, 0, {5, 1}) && is(t, 1, {3, 3}), "the first two pairs are not learnt before the round");
+        bool wrong = false;
+        for (int f = 0; f < 2; ++f) t.step(window({3, 5}, {3, 3}), at++), wrong = wrong || is(t, 2, {3, 3});
+        for (int f = 0; f < 4; ++f) t.step(window({3, 3}, {3, 3}), at++), wrong = wrong || is(t, 2, {3, 3});
+        for (int f = 0; f < 6; ++f) t.step(window({3, 3}, {4, 3}), at++), wrong = wrong || is(t, 2, {3, 3});
+        check(!wrong, "a pair of one colour on its way up the window is learnt for the pair after it");
+        check(is(t, 2, {4, 3}) && t.doubts == 0, "the pair after a pair of one colour is not learnt as the window stands");
+    }
+    {
+        Tracker t;
+        int64_t at = 60000;
+        for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+        for (int f = 0; f < 2; ++f) t.step(window({3, 5}, {3, 3}), at++);
+        for (int f = 0; f < 30; ++f) t.step(window({3, 3}, {3, 3}), at++);
+        check(is(t, 2, {3, 3}) && t.doubts == 0, "two pairs of one colour, alike, one after the other are not learnt so");
+    }
+    std::cout << "a pair of one colour on its way up the window is no pair after it; two alike in a row are learnt\n";
+}
+
 static void testPredictionResetAtRound() {
     struct Watching : ai::PlacementAgent {
         GameField lastField;
@@ -4822,6 +4865,7 @@ int main(int argc, char** argv) {
         testChoiceAfterCorrection();
         testViewsOfBothSides();
         testSidesCountedApart();
+        testOneColourSliding();
         testPredictionResetAtRound();
         testChainAfterMissedLanding();
         testPairsAfterLight();

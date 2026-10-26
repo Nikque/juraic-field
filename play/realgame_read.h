@@ -813,7 +813,15 @@ public:
     // The window of the next pairs moves for some frames as a pair appears, reading as other pairs on its way: the two
     // after a new pair are learnt once it has read the same windowStill readings in a row, after it moved - at most
     // windowBefore frames before the pair appeared - or windowWait frames after the pair appeared (the same pairs again).
-    int windowStill = 2, windowBefore = 10, windowWait = 30;
+    // Reading one pair in both places it stands still for learning pairs after windowStillSame readings in a row
+    // (stillNeeded): a pair of one colour on its way up reads in both places for a few readings - on the real game 1P's
+    // window read so for 3 to 7 readings 217 times in 152 rounds (2P's 68), 8 to 15 29 times, and 16 or more 374 times
+    // (two pairs alike in a row, 2P's 369); taken as standing, the pair after it was learnt as that colour, and learnt
+    // again 6 frames later. (Whether the window has moved on - the counting of pairs put unseen - still takes windowStill:
+    // with windowStillSame there too, pairs lit long took the previous pair's down button in rounds drawn and read. So
+    // does the window before a round, learnFirstWindow: two first pairs alike read so for too few readings on one side,
+    // and the first pair was not known in 6 records of the real game.)
+    int windowStill = 2, windowBefore = 10, windowWait = 30, windowStillSame = 8;
     // Before the first pair of a round the window shows the first two pairs; the screens before a round (the title, the
     // menus) may read as a window standing still too. A window that stands still for windowLong readings and reads
     // other pairs than those learnt is taken instead (on the real game the window read three pictures as other pairs on
@@ -856,11 +864,11 @@ public:
         const juraic::Timing t = timing;
         const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames, twice = pairGap, broken = roundBreak, hiddenFor = outOfSight;
         const int windowS = windowStill, windowB = windowBefore, windowW = windowWait, windowL = windowLong, wordsF = wordsFrames, wordsP = wordsPoints;
-        const int shiftMost = maxShift, run = alignRun;
+        const int shiftMost = maxShift, run = alignRun, windowSS = windowStillSame;
         *this = Tracker{};
         timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness, pairGap = twice, roundBreak = broken, outOfSight = hiddenFor;
         windowStill = windowS, windowBefore = windowB, windowWait = windowW, windowLong = windowL, wordsFrames = wordsF, wordsPoints = wordsP;
-        maxShift = shiftMost, alignRun = run;
+        maxShift = shiftMost, alignRun = run, windowStillSame = windowSS;
     }
 
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
@@ -980,7 +988,7 @@ private:
         // The window moves on before the next pair appears (Timing::nextShown): it shows the second of the two it
         // showed, and the pair after them, which is learnt then (the AI waiting for its pair is shown it then, as
         // in a match of this program).
-        if (t.learnFor < 0 && t.nextStill >= windowStill && knows(s, comes) && knows(s, comes + 1) && same(t.next[0], pairOf(s, comes + 1)) &&
+        if (t.learnFor < 0 && t.nextStill >= stillNeeded(t) && knows(s, comes) && knows(s, comes + 1) && same(t.next[0], pairOf(s, comes + 1)) &&
             !(same(t.next[0], pairOf(s, comes)) && same(t.next[1], pairOf(s, comes + 1))))
             learn(s, comes + 2, t.next[1]);
     }
@@ -1205,8 +1213,10 @@ private:
         pairs[size_t(index)] = p, k = sure ? 1 : 2;
         if (sure && changed) align();
     }
+    // Readings in a row in which a window must read the same to stand still (windowStillSame).
+    int stillNeeded(const SideTrack& t) const { return t.nextRead[0] && t.nextRead[1] && same(t.next[0], t.next[1]) ? windowStillSame : windowStill; }
     bool windowSettled(const SideTrack& t, int64_t at) const {
-        return t.nextStill >= windowStill && (t.nextMovedAt >= t.spawnedAt - windowBefore || at - t.spawnedAt >= windowWait);
+        return t.nextStill >= stillNeeded(t) && (t.nextMovedAt >= t.spawnedAt - windowBefore || at - t.spawnedAt >= windowWait);
     }
     void newRound() {
         ++rounds;
