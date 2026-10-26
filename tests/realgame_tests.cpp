@@ -845,7 +845,7 @@ static void testPairsAfterLight() {
     Reading rest = window(empty, {3, 1}, {2, 2});
     rest.side[1].point[0][0] = rest.side[1].point[0][1] = 1, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 5;
     for (int f = 0; f < 30; ++f) t.step(rest, at++);
-    for (int f = 0; f < 3; ++f) t.step(window(rest, {2, 2}, {4, 5}), at++);
+    for (int f = 0; f < 5; ++f) t.step(window(rest, {2, 2}, {4, 5}), at++);
     check(t.side[1].pairs == 1 && is(t, 3, {4, 5}), "the pair the window shows as it moves on before a pair appears is not learnt");
     // Garbage falls (pieces above the field), under a light it comes to rest, and the next pair (3 1) is first seen
     // after the light a cell and a half below where pairs appear, both pieces showing.
@@ -1294,6 +1294,36 @@ static void testOneColourSliding() {
 // the pair after that first, is that pair - the one that came was put unseen (in the records of the real game three
 // such pairs, one of 2P, were taken for the pair that came and its colours learnt again: the pairs after them one place
 // off). Of other colours the pair that came is learnt again as before (testPairsNeverLeft).
+// A window on its way read as other pairs for a few readings in a row, and taken as standing: the pair it showed second
+// was learnt so; the window then standing long shows it otherwise, and it is learnt again from it - not only as the
+// next pair appears (in the records of the real game such pairs stood wrong for 80 to 190 frames as the median).
+static void testWindowStandingLongLearnt() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {1, 4}, side.next[1] = {2, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(1, i) && t.pairOf(1, i).axis == p.axis && t.pairOf(1, i).child == p.child; };
+    int64_t at = 80000;
+    Tracker t;
+    for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+    // Pair 0 (1 4) appears; the window on its way reads 2 2 / 3 4 three times, then stands at 2 2 / 3 1.
+    Reading first = window(empty, {2, 2}, {3, 4});
+    first.side[1].point[SPAWN_X][23] = 1;
+    for (int f = 0; f < 3; ++f) t.step(first, at++);
+    check(t.side[1].pairs == 1 && is(t, 2, {3, 4}), "the window read three times on its way is not learnt");
+    Reading stands = window(first, {2, 2}, {3, 1});
+    for (int f = 0; f < 20; ++f) t.step(stands, at++);
+    check(is(t, 2, {3, 1}), "the pair the window shows standing long after it was learnt otherwise is not learnt again");
+    std::cout << "the pairs a window shows standing long are learnt again from it\n";
+}
+
 static void testPutUnseenWindowHalfRead() {
     Reading empty;
     for (SideRead& side : empty.side) {
@@ -3514,7 +3544,7 @@ static void testToldPlacements() {
         else check(g.f.get(1, 12) == 4, "with nothing told, the pair is not found as the first placement that shows the twelve rows so");
         for (int k = 0; k < 2; ++k) f.step(next, at++);
         if (telling) f.tell(1, 1, placement(placementId({4, UP})));
-        for (int k = 0; k < 40; ++k) f.step(landed, at++);
+        for (int k = 0; k < 40; ++k) f.step(window(landed, {3, 3}, {4, 4}), at++);
         for (int k = 0; k < 6; ++k) f.step(window(landed, {4, 4}, {2, 2}), at++);
         Reading third = window(landed, {4, 4}, {2, 2});
         third.side[1].point[SPAWN_X][23] = 3;
@@ -4918,6 +4948,7 @@ int main(int argc, char** argv) {
         testSidesCountedApart();
         testOneColourSliding();
         testPutUnseenWindowHalfRead();
+        testWindowStandingLongLearnt();
         testPredictionResetAtRound();
         testChainAfterMissedLanding();
         testPairsAfterLight();

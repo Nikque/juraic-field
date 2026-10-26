@@ -821,7 +821,15 @@ public:
     // with windowStillSame there too, pairs lit long took the previous pair's down button in rounds drawn and read. So
     // does the window before a round, learnFirstWindow: two first pairs alike read so for too few readings on one side,
     // and the first pair was not known in 6 records of the real game.)
-    int windowStill = 2, windowBefore = 10, windowWait = 30, windowStillSame = 8;
+    // A window on its way reads as other pairs for a few readings in a row too, and stands still so: pairs are learnt from
+    // it standing windowLearn readings (stillNeeded; with 2, in the records of the real game, 152 rounds, pairs learnt
+    // and learnt again otherwise before they appeared were 78 on 1P and 19 on 2P, wrong for 16516 and 3252 frames in all;
+    // with 3, 62 and 13, 13474 and 2589 frames; with 4, 54 and 8, but in a round drawn and read, lit 80 frames, a pair
+    // went elsewhere than the AI chose; the window moving on before the next pair appears stands 2 or 3 readings before
+    // it, and its pairs are then learnt as the pair appears, as a window that may be moving, and again once it stands);
+    // and standing windowRelearn readings, soon after a pair appeared, what it shows second is learnt again from it (a
+    // pair it showed so first otherwise stood learnt until the next pair appeared).
+    int windowStill = 2, windowBefore = 10, windowWait = 30, windowStillSame = 8, windowRelearn = 8, windowLearn = 3;
     // Before the first pair of a round the window shows the first two pairs; the screens before a round (the title, the
     // menus) may read as a window standing still too. A window that stands still for windowLong readings and reads
     // other pairs than those learnt is taken instead (on the real game the window read three pictures as other pairs on
@@ -864,11 +872,11 @@ public:
         const juraic::Timing t = timing;
         const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames, twice = pairGap, broken = roundBreak, hiddenFor = outOfSight;
         const int windowS = windowStill, windowB = windowBefore, windowW = windowWait, windowL = windowLong, wordsF = wordsFrames, wordsP = wordsPoints;
-        const int shiftMost = maxShift, run = alignRun, windowSS = windowStillSame;
+        const int shiftMost = maxShift, run = alignRun, windowSS = windowStillSame, windowR = windowRelearn, windowLe = windowLearn;
         *this = Tracker{};
         timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness, pairGap = twice, roundBreak = broken, outOfSight = hiddenFor;
         windowStill = windowS, windowBefore = windowB, windowWait = windowW, windowLong = windowL, wordsFrames = wordsF, wordsPoints = wordsP;
-        maxShift = shiftMost, alignRun = run, windowStillSame = windowSS;
+        maxShift = shiftMost, alignRun = run, windowStillSame = windowSS, windowRelearn = windowR, windowLearn = windowLe;
     }
 
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
@@ -991,6 +999,13 @@ private:
         if (t.learnFor < 0 && t.nextStill >= stillNeeded(t) && knows(s, comes) && knows(s, comes + 1) && same(t.next[0], pairOf(s, comes + 1)) &&
             !(same(t.next[0], pairOf(s, comes)) && same(t.next[1], pairOf(s, comes + 1))))
             learn(s, comes + 2, t.next[1]);
+        // The window standing windowRelearn readings, its first place the pair learnt there: its second place is learnt
+        // again from it (windowRelearn).
+        if (t.learnFor < 0 && t.nextStill == windowRelearn && t.nextRead[0] && t.nextRead[1] && !same(t.next[0], t.next[1]) && t.spawnedAt >= 0 &&
+            at - t.spawnedAt <= windowWait + windowRelearn) {
+            const int from = t.shiftedAt > t.spawnedAt + pairGap ? comes + 1 : comes; // (moved on before the next pair)
+            if (knows(s, from) && same(t.next[0], pairOf(s, from))) learn(s, from + 1, t.next[1]);
+        }
     }
     // The pair in hand, from a clear reading of its side (`field`, without the words; `resting`, its pieces at rest):
     // where it is seen, or let go.
@@ -1221,7 +1236,7 @@ private:
         if (sure && changed) align();
     }
     // Readings in a row in which a window must read the same to stand still (windowStillSame).
-    int stillNeeded(const SideTrack& t) const { return t.nextRead[0] && t.nextRead[1] && same(t.next[0], t.next[1]) ? windowStillSame : windowStill; }
+    int stillNeeded(const SideTrack& t) const { return t.nextRead[0] && t.nextRead[1] && same(t.next[0], t.next[1]) ? windowStillSame : std::max(windowStill, windowLearn); }
     bool windowSettled(const SideTrack& t, int64_t at) const {
         return t.nextStill >= stillNeeded(t) && (t.nextMovedAt >= t.spawnedAt - windowBefore || at - t.spawnedAt >= windowWait);
     }
