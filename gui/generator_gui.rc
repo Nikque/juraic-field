@@ -1,8 +1,8 @@
 #include <windows.h>
 
 1 VERSIONINFO
-FILEVERSION 0,9,7,2
-PRODUCTVERSION 0,9,7,2
+FILEVERSION 0,9,7,3
+PRODUCTVERSION 0,9,7,3
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -15,12 +15,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Nikque"
             VALUE "FileDescription", "Juraic Field chain board generator"
-            VALUE "FileVersion", "0.9.7.2"
+            VALUE "FileVersion", "0.9.7.3"
             VALUE "InternalName", "JuraicFieldGenerator"
             VALUE "LegalCopyright", "Copyright (c) 2026 Nikque"
             VALUE "OriginalFilename", "JuraicFieldGenerator.exe"
             VALUE "ProductName", "Juraic Field"
-            VALUE "ProductVersion", "0.9.7.2"
+            VALUE "ProductVersion", "0.9.7.3"
         END
     END
     BLOCK "VarFileInfo"
