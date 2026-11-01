@@ -77,12 +77,12 @@ enum class Screen {
 };
 
 // The items of the menu, in the order they are shown (the mode of the real game is in the Windows build only).
-enum MenuItem { MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH, MENU_REAL_GAME, MENU_NET, MENU_ARENA, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT };
+enum MenuItem { MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH, MENU_REAL_GAME, MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT };
 constexpr MenuItem MENU_ITEMS[] = {MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH,
 #ifdef _WIN32
                                    MENU_REAL_GAME,
 #endif
-                                   MENU_NET, MENU_ARENA, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT};
+                                   MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT};
 constexpr int MENU_COUNT = int(sizeof MENU_ITEMS / sizeof MENU_ITEMS[0]);
 const wchar_t* menuText(MenuItem item) {
     switch (item) {
@@ -92,7 +92,6 @@ const wchar_t* menuText(MenuItem item) {
     case MENU_WATCH: return L"観戦（AI 対 AI）";
     case MENU_REAL_GAME: return L"実機の 2P を Juraic が操作";
     case MENU_NET: return L"ネット対戦（人 対 人）";
-    case MENU_ARENA: return L"対戦場（Juraic Arena）";
     case MENU_REPLAY: return L"リプレイを見る";
     case MENU_SETTINGS: return L"設定";
     case MENU_BINDINGS: return L"操作の割り当て";
@@ -683,7 +682,6 @@ struct App {
 #endif
             break;
         case MENU_NET: screen = Screen::NetLobby, lobbyEditing = false; break;
-        case MENU_ARENA: screen = Screen::ArenaLobby, arenaEditing = false; break;
         case MENU_REPLAY: {
             std::filesystem::path path;
             if (openDialog(L"リプレイ\0*.jfreplay\0すべてのファイル\0*.*\0", userDirectory / L"replays", path)) openReplay(path);
@@ -1374,8 +1372,8 @@ struct App {
     // ---- drawing ----
     void drawMenu() {
         gfx.text(L"Juraic Field", 0, 70, CANVAS_W, 80, 3, rgb(255, 255, 255), 0);
-        // (eleven items or more, with the mode of the real game and the arena: closer together, to end above the line of the keys)
-        const float top = MENU_COUNT > 11 ? 148.f : MENU_COUNT > 10 ? 152.f : 164.f, gap = MENU_COUNT > 11 ? 40.f : MENU_COUNT > 10 ? 43.f : 46.f;
+        // (eleven items, with the mode of the real game: a little closer together, to end above the line of the keys)
+        const float top = MENU_COUNT > 10 ? 152.f : 164.f, gap = MENU_COUNT > 10 ? 43.f : 46.f;
         for (int i = 0; i < MENU_COUNT; ++i) {
             const float y = top + i * gap;
             if (i == menuIndex) gfx.round(rectF(410, y - 1, 870, y + 43), 12, rgb(84, 104, 190));
