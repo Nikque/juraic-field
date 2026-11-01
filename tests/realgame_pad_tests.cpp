@@ -127,6 +127,14 @@ static void testReading() {
         m.pump();
         check(pictures - before > 10 && m.framesWithout < 30, "the pictures are not followed on the thread of the play");
         check(open == (JURAIC_REALGAME_DEBUG != 0), JURAIC_REALGAME_DEBUG ? "the record of the reading is not open" : "a record of the reading is open in a build that keeps none");
+        // (the film of the two windows, from the pictures of the capture: a sheet asked for is written)
+        int64_t filmed = 0;
+        {
+            const play::RealGameMode::Hold hold(m.state);
+            filmed = m.tracker.frame;
+        }
+        check(m.film.framesHeld() > 0 == (JURAIC_REALGAME_DEBUG != 0) && m.film.ask(play::realgame::WindowFilm::RELEARNT, filmed) == (JURAIC_REALGAME_DEBUG != 0),
+              JURAIC_REALGAME_DEBUG ? "the film of the windows does not run" : "the film of the windows runs in a build without the parts for finding faults");
         m.keepNext();
         pumpFor(w, 500);
         std::vector<uint8_t> kept;
@@ -138,6 +146,7 @@ static void testReading() {
         m.stopReading();
         check(m.reading == play::RealGameMode::Reading::Off && !m.record.isOpen(), "reading does not stop");
         if (JURAIC_REALGAME_DEBUG) check(std::filesystem::file_size(recorded / "readings.bin", ignored) > 1000, "the readings are not written to the record");
+        if (JURAIC_REALGAME_DEBUG) check(std::filesystem::file_size(recorded / "film" / (std::to_string(filmed) + "-relearnt.bmp"), ignored) > 1000, "the sheet of the film is not written");
         else check(!std::filesystem::exists(folder / L"realgame", ignored), "the folder of the records is made in a build that keeps none");
         std::printf("a window read: first picture after %lu ms; %lld fresh pictures followed on the thread of the play in 1.5 s\n", startupMs,
                     (long long)(pictures - before));

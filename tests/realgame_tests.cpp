@@ -34,6 +34,7 @@
 #endif
 #include "../ai/agents.h"
 #include "../play/realgame_drive.h"
+#include "../play/realgame_film.h"
 #include "../play/realgame_log.h"
 #include "../play/realgame_menu.h"
 #include "../play/realgame_pace.h"
@@ -41,6 +42,7 @@
 #include <chrono>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -4915,6 +4917,204 @@ static void testRecord(const std::string& folder) {
     std::cout << "the record of a reading: read back the same, pictures kept as they should be; the driver noting sends the same buttons (" << notes.size() << " notes)\n";
 }
 
+// What a pair learnt and learnt otherwise leaves for the film of the windows: the frame it was learnt wrong in, and the
+// frame the other window showed it in when the two differ.
+static void testLearntAgainNoted() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 1}, side.next[1] = {3, 3};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [&](int s, Pair a, Pair b) {
+        Reading r = empty;
+        r.side[s].next[0] = a, r.side[s].next[1] = b;
+        return r;
+    };
+    {
+        Tracker t;
+        int64_t at = 70000;
+        for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+        check(t.relearnt[0] == 0 && t.relearnt[1] == 0 && t.unlike == 0, "pairs read alike are noted as learnt again");
+        const int64_t wrong = at;
+        for (int f = 0; f < 5; ++f) t.step(window(0, {3, 3}, {4, 1}), at++);
+        const int64_t learntAt = t.learntAt[0][2];
+        check(learntAt >= wrong && learntAt < at, "the frame a pair was learnt in is not kept");
+        for (int f = 0; f < 5; ++f) t.step(window(0, {3, 3}, {2, 1}), at++);
+        check(t.relearnt[0] == 1 && t.relearnt[1] == 0 && t.doubts == 1, "a pair learnt otherwise is not noted for its side");
+        check(t.relearntFrom[0] == learntAt, "a pair learnt otherwise does not give the frame it was learnt wrong in");
+        check(t.learntAt[0][2] > learntAt, "the frame a pair was learnt in is not that of the last time");
+    }
+    {
+        Tracker t;
+        int64_t at = 80000;
+        for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+        for (int f = 0; f < 5; ++f) t.step(window(0, {3, 3}, {4, 1}), at++);
+        const int64_t first = t.learntAt[0][2];
+        Reading both = window(0, {3, 3}, {4, 1});
+        both.side[1].next[0] = {3, 3}, both.side[1].next[1] = {2, 1};
+        for (int f = 0; f < 5; ++f) t.step(both, at++);
+        check(t.unlike == 1 && t.unlikeFrom == first, "a pair the two windows show otherwise is not noted with the frame the other showed it in");
+    }
+    std::cout << "a pair learnt again or shown otherwise by the other window is noted with its frames\n";
+}
+
+// A picture all of one value (the fourth byte 255, as a window's).
+static void fillPicture(Canvas& c, uint8_t value) {
+    std::fill(c.pixels.begin(), c.pixels.end(), value);
+    for (size_t i = 3; i < c.pixels.size(); i += 4) c.pixels[i] = 255;
+}
+
+static void testWindowFilm(const std::string& folder) {
+    const std::filesystem::path dir = std::filesystem::path(folder) / "realgame-film-test";
+    std::filesystem::remove_all(dir);
+    const Layout l = measuredLayout();
+    Canvas pic(1080, 608, l);
+    const auto value = [](int64_t frame) { return uint8_t(frame % 251); };
+    Reading r;
+    r.side[0].next[0] = {1, 2}, r.side[0].next[1] = {3, 4};
+    r.side[0].nextRead[0] = r.side[0].nextRead[1] = true;
+    r.side[1].next[0] = {2, 2}, r.side[1].nextRead[0] = true;
+    const auto play = [&](WindowFilm& f, int64_t from, int64_t to) {
+        for (int64_t k = from; k < to; ++k) fillPicture(pic, value(k)), f.take(pic.picture(), k, r, l);
+    };
+    {
+        // Not open (the build without the parts for finding faults): nothing kept and nothing written.
+        WindowFilm f;
+        play(f, 0, 3);
+        check(!f.isOpen() && f.framesHeld() == 0 && !f.ask(WindowFilm::RELEARNT, 1), "a film not open keeps pictures");
+    }
+    {
+        WindowFilm f;
+        check(f.open(dir), "the film is not made");
+        play(f, 1000, 1021);
+        check(f.ask(WindowFilm::RELEARNT, 1020), "a frame asked for is refused");
+        check(!f.ask(WindowFilm::RELEARNT, 1022), "a frame inside the sheet asked for last is asked for again");
+        play(f, 1021, 1030);
+        const std::filesystem::path sheet = dir / "1020-relearnt.bmp";
+        // (the frames after it have not all come)
+        check(!std::filesystem::exists(sheet), "a sheet is written before the frames after it came");
+        play(f, 1030, 1032);
+        f.close();
+        std::vector<uint8_t> pixels;
+        int w = 0, h = 0;
+        check(loadBmp(sheet, pixels, w, h), "the sheet is not written");
+        const WindowFilm::Box a = WindowFilm::boxOf(l.side[0], l, pic.width, pic.height), b = WindowFilm::boxOf(l.side[1], l, pic.width, pic.height);
+        check(a.w > 0 && b.w > 0 && a.h > 0, "a window has no box");
+        const int cellW = a.w + b.w + WindowFilm::SIDE_GAP, cellH = std::max(a.h, b.h) + WindowFilm::BAR + WindowFilm::ROW_GAP;
+        const int frames = WindowFilm::BEFORE + WindowFilm::AFTER + 1, rows = (frames + WindowFilm::COLUMNS - 1) / WindowFilm::COLUMNS;
+        check(w == WindowFilm::COLUMNS * (cellW + WindowFilm::ROW_GAP) && h == rows * cellH, "the sheet is of another size: " + std::to_string(w) + " x " + std::to_string(h));
+        // Each cell the two windows of its frame, in the order of the frames; the bar over the frame asked for red.
+        const auto at = [&](int x, int y, int c) { return pixels[(size_t(y) * size_t(w) + size_t(x)) * 4 + size_t(c)]; };
+        for (int i = 0; i < frames; ++i) {
+            const int x = i % WindowFilm::COLUMNS * (cellW + WindowFilm::ROW_GAP), y = i / WindowFilm::COLUMNS * cellH;
+            const uint8_t want = value(1020 - WindowFilm::BEFORE + i);
+            check(at(x + 1, y + WindowFilm::BAR + 1, 0) == want && at(x + a.w + WindowFilm::SIDE_GAP + 1, y + WindowFilm::BAR + 1, 0) == want, "cell " + std::to_string(i) + " is not of its frame");
+            const bool red = at(x + 1, y + 1, 2) == 255 && at(x + 1, y + 1, 0) == 0;
+            check(red == (i == WindowFilm::BEFORE), "the bar of cell " + std::to_string(i) + " tells otherwise");
+        }
+        std::ifstream notes(dir / "1020-relearnt.txt", std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(notes)), std::istreambuf_iterator<char>());
+        notes.close();
+        check(text.find("1000 1P 12 34 2P 22 ?\n") != std::string::npos && text.find("1030 1P 12 34 2P 22 ?\n") != std::string::npos, "the notes do not give what each frame read");
+        check(text.find("box 1P " + std::to_string(a.x) + ' ' + std::to_string(a.y) + ' ' + std::to_string(a.w) + ' ' + std::to_string(a.h)) != std::string::npos, "the notes do not give the box of a window");
+    }
+    {
+        // A pair learnt long before: two sheets; close by: one, with both frames marked. Frames not held any more are left out.
+        WindowFilm f;
+        check(f.open(dir / "two"), "the film is not made");
+        play(f, 2000, 2100);
+        f.askBetween(WindowFilm::UNLIKE, 2010, 2090);
+        f.askBetween(WindowFilm::RELEARNT, 2085, 2090);
+        play(f, 2100, 2101);
+        f.close();
+        check(std::filesystem::exists(dir / "two" / "2010-unlike.bmp") && std::filesystem::exists(dir / "two" / "2090-unlike.bmp"), "a pair learnt long before does not give two sheets");
+        check(std::filesystem::exists(dir / "two" / "2090-relearnt.bmp") && !std::filesystem::exists(dir / "two" / "2085-relearnt.bmp"), "a pair learnt just before does not give one sheet");
+        std::ifstream notes(dir / "two" / "2090-relearnt.txt", std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(notes)), std::istreambuf_iterator<char>());
+        check(text.find("2065 1P") != std::string::npos && text.find("2100 1P") != std::string::npos && text.find("marks 2085 2090") != std::string::npos, "the one sheet does not cover both frames");
+    }
+    {
+        // Pictures of another size: the frames held go, a sheet of one size. The film stays bounded.
+        WindowFilm f;
+        check(f.open(dir / "size"), "the film is not made");
+        play(f, 3000, 3005);
+        Canvas other(540, 304, l);
+        fillPicture(other, 9);
+        f.take(other.picture(), 3005, r, l);
+        check(f.framesHeld() == 1, "the frames of another size stay");
+        f.close();
+        WindowFilm g;
+        check(g.open(dir / "bound"), "the film is not made");
+        const int most = WindowFilm::framesFor(pic.width, pic.height, l);
+        check(most > 0 && most <= WindowFilm::MOST_FRAMES, "the film holds no frames");
+        play(g, 4000, 4000 + most + 25);
+        check(g.framesHeld() == most, "the film holds more than it may: " + std::to_string(g.framesHeld()));
+        g.close();
+        // At most so many sheets of a kind.
+        WindowFilm m;
+        check(m.open(dir / "many"), "the film is not made");
+        play(m, 5000, 5001);
+        int asked = 0;
+        for (int i = 0; i < WindowFilm::MOST_SHEETS[WindowFilm::SLIDING] + 5; ++i) asked += m.ask(WindowFilm::SLIDING, 5000 + int64_t(i) * 1000);
+        check(asked == WindowFilm::MOST_SHEETS[WindowFilm::SLIDING], "not so many sheets of a kind are asked for: " + std::to_string(asked));
+        check(m.ask(WindowFilm::UNSEEN, 5000), "a kind counts against another");
+    }
+    {
+        // What the tracker notes asks for the sheets: a pair learnt otherwise, a window sliding; a pair alike in a row
+        // standing long does not.
+        Reading empty;
+        for (SideRead& side : empty.side) {
+            for (auto& column : side.point)
+                for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+            side.next[0] = {5, 1}, side.next[1] = {3, 3};
+            side.nextRead[0] = side.nextRead[1] = true;
+        }
+        Tracker t;
+        WindowFilm f;
+        check(f.open(dir / "noted"), "the film is not made");
+        int64_t at = 90000;
+        const auto show = [&](Pair a, Pair b, int times) {
+            Reading w = empty;
+            w.side[0].next[0] = a, w.side[0].next[1] = b;
+            for (int n = 0; n < times; ++n) {
+                fillPicture(pic, value(at));
+                t.step(w, at), f.take(pic.picture(), at, w, l), f.note(t, at);
+                ++at;
+            }
+        };
+        show({5, 1}, {3, 3}, t.roundGap + 5);
+        show({3, 3}, {4, 1}, 5);
+        show({3, 3}, {2, 1}, 5);
+        show({2, 2}, {2, 2}, 4);
+        show({2, 1}, {4, 4}, 40);
+        show({4, 4}, {4, 4}, 40);
+        show({4, 4}, {1, 2}, 40);
+        f.close();
+        std::map<std::string, int> kinds;
+        for (const auto& e : std::filesystem::directory_iterator(dir / "noted"))
+            if (e.path().extension() == ".bmp") ++kinds[e.path().stem().string().substr(e.path().stem().string().find('-') + 1)];
+        check(kinds["relearnt"] == 1 && kinds["sliding"] == 1 && kinds["unlike"] == 0 && kinds["doubt"] == 0 && kinds["unseen"] == 0,
+              "the tracker's notes ask for other sheets: relearnt " + std::to_string(kinds["relearnt"]) + ", sliding " + std::to_string(kinds["sliding"]));
+    }
+    std::filesystem::remove_all(dir);
+    // The picture the real game gives, as long as the capture's thread takes for one.
+    {
+        Canvas full(2161, 1216, l);
+        fillPicture(full, 7);
+        WindowFilm f;
+        check(f.open(dir), "the film is not made");
+        const auto began = std::chrono::steady_clock::now();
+        const int n = 2000;
+        for (int k = 0; k < n; ++k) f.take(full.picture(), k, r, l);
+        const auto took = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
+        f.close();
+        std::filesystem::remove_all(dir);
+        std::cout << "the film of the windows: frames kept, sheets written as they should be (" << took / n << " us a picture of the real game's size)\n";
+    }
+}
+
 static void testPicture(const std::string& folder) {
     const Layout l = sampleLayout();
     Canvas c(301, 173, l); // (rows of an odd length)
@@ -5011,6 +5211,8 @@ int main(int argc, char** argv) {
         testLateHoldsNothingAway();
         testPicture(argc > 1 ? argv[1] : ".");
         testRecord(argc > 1 ? argv[1] : ".");
+        testLearntAgainNoted();
+        testWindowFilm(argc > 1 ? argv[1] : ".");
         testMenus();
         testRounds();
         testSidesLearnApart();

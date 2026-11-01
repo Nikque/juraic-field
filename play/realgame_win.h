@@ -18,6 +18,7 @@
 #include "../ai/level.h"
 #include "realgame_capture_win.h"
 #include "realgame_drive.h"
+#include "realgame_film.h"
 #include "realgame_follow.h"
 #include "realgame_log.h"
 #include "realgame_menu.h"
@@ -288,6 +289,7 @@ struct RealGameMode {
     // realgame\<date and time>. Without them it is never opened, and what is offered to it is dropped.
     realgame::Record record;
     std::wstring recordError; // (it could not be made: the reading goes on without it)
+    realgame::WindowFilm film; // (of the two windows, play/realgame_film.h: with DEBUG_PARTS, in the record's folder)
 
     // Begins to read the window `w` with the table of `folder` (or the one built in); `about` begins the record.
     bool startReading(HWND w, const std::filesystem::path& folder, const std::string& about, std::wstring& error) {
@@ -328,10 +330,12 @@ struct RealGameMode {
         header += "lag " + std::to_string(lag) + " to begin with, the press " + PRESS_RECORD_NAMES[pressButton] + "\n";
         header += "each line: the frame of the clock (1/60 s), then what happened\n";
         if (DEBUG_PARTS && !record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作れませんでした（" + (folder / L"realgame").wstring() + L"）";
+        if (DEBUG_PARTS && record.isOpen()) film.open(record.folder() / L"film");
         notes.clear();
         const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table, menus); }, error);
         reading = started ? Reading::On : Reading::Off;
         if (started) startPlayer();
+        else if (DEBUG_PARTS) film.close(), record.close();
         else record.close();
         return started;
     }
@@ -341,6 +345,7 @@ struct RealGameMode {
         stopPlayer();
         const Hold hold(state);
         if (playing) stopPlaying();
+        if (DEBUG_PARTS) film.close();
         record.close(); // (after the capture: its thread offers the record pictures)
         reading = Reading::Off;
         std::lock_guard<std::mutex> handed(lock);
@@ -440,6 +445,7 @@ private:
             width = t.width, height = t.height;
             ++pictures;
             if (noting) noteStep(before, frame);
+            if (DEBUG_PARTS) film.note(tracker, frame);
             if (t.menu != menu) record.event(frame, std::string("menu: ") + realgame::menuName(t.menu));
             menu = t.menu;
             menuFor = menu == realgame::Menu::None ? 0 : menuFor + 1;
@@ -549,6 +555,7 @@ private:
         Taken t{realgame::read(p, table), realgame::frameShown(time), p.width, p.height, realgame::readMenu(p, menuTable), time, came, 0};
         t.read = clockTime();
         record.offer(p, t.frame);
+        if (DEBUG_PARTS) film.take(p, t.frame, t.reading, table);
         std::lock_guard<std::mutex> hold(lock);
         if (taken.size() >= 600) taken.pop_front(); // (no one takes them: the oldest go)
         taken.push_back(std::move(t));

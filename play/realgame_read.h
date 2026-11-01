@@ -867,6 +867,14 @@ public:
     bool late[2] = {};        // ... seen late: it was hidden as it appeared, and may have been moved already
     int doubts = 0;           // readings that did not fit what had been read before
     int rounds = 0;           // rounds seen begin (both fields empty for roundGap frames)
+    // For the record of the reading: the frame each pair was last learnt in from a window that stood still; how often a
+    // pair so learnt was learnt otherwise, and the frame of the colours it had; how often one was learnt otherwise than
+    // the other window showed it at its place, and the frame of that.
+    std::vector<int64_t> learntAt[2];
+    int relearnt[2] = {};
+    int64_t relearntFrom[2] = {-1, -1};
+    int unlike = 0;
+    int64_t unlikeFrom = -1;
 
     void reset() {
         const juraic::Timing t = timing;
@@ -1227,13 +1235,18 @@ private:
         if (index < 0) return;
         std::vector<juraic::Pair>& pairs = pairsOf[s];
         std::vector<uint8_t>& known = knownOf[s];
-        if (int(known.size()) <= index) pairs.resize(size_t(index) + 1), known.resize(size_t(index) + 1, 0);
+        if (int(known.size()) <= index) pairs.resize(size_t(index) + 1), known.resize(size_t(index) + 1, 0), learntAt[s].resize(size_t(index) + 1, -1);
         uint8_t& k = known[size_t(index)];
-        if (k == 1 && sure && !same(pairs[size_t(index)], p)) ++doubts;
+        if (k == 1 && sure && !same(pairs[size_t(index)], p)) ++doubts, ++relearnt[s], relearntFrom[s] = learntAt[s][size_t(index)];
         if (k == 1 && !sure) return;
         const bool changed = k != 1 || !same(pairs[size_t(index)], p);
         pairs[size_t(index)] = p, k = sure ? 1 : 2;
-        if (sure && changed) align();
+        if (!sure || !changed) return;
+        learntAt[s][size_t(index)] = frame;
+        const int other = otherIndex(s, index);
+        if (other >= 0 && other < int(knownOf[1 - s].size()) && knownOf[1 - s][size_t(other)] == 1 && !same(pairsOf[1 - s][size_t(other)], p))
+            ++unlike, unlikeFrom = learntAt[1 - s][size_t(other)];
+        align();
     }
     // Readings in a row in which a window must read the same to stand still (windowStillSame).
     int stillNeeded(const SideTrack& t) const { return t.nextRead[0] && t.nextRead[1] && same(t.next[0], t.next[1]) ? windowStillSame : std::max(windowStill, windowLearn); }
@@ -1243,7 +1256,7 @@ private:
     void newRound() {
         ++rounds;
         for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false, t.learnFor = -1, t.strayAt = -1, t.shiftedAt = -1, t.unseen = 0, t.words = Words{};
-        for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
+        for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear(), learntAt[k].clear();
         shift = 0;
         roundStart = -1;
         fromStart = true;
