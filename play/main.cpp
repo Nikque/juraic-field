@@ -1173,7 +1173,7 @@ struct App {
         auto line = std::make_unique<UdpLine>();
         if (lobbyIndex == 1) {
             if (!line->listen(netPort)) {
-                say(L"ポート " + std::to_wstring(netPort) + L" で待ち受けられませんでした（ほかのソフトが使っているかもしれません）");
+                say(L"ポート " + std::to_wstring(netPort) + L" で待ち受けられませんでした（ほかのソフトが使っているか、Windows が予約しているかもしれません）");
                 return;
             }
             ownAddressList = ownAddresses();
