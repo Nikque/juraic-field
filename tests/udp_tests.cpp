@@ -18,13 +18,14 @@ static void check(bool ok, const std::string& message) {
 }
 static void rest(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
-// A host line on a port that is free (a few are tried), at ::1.
+// A host line on a port that is free, at ::1: a few next to each other, then a port every so often up to the last one
+// (Windows keeps ranges of hundreds of ports for itself, for Hyper-V and WSL, and moves them as they start).
 static std::unique_ptr<UdpLine> listenSomewhere(int& port) {
-    for (port = 50811; port < 50831; ++port) {
+    for (port = 50811; port < 65536; port += port < 50831 ? 1 : 97) {
         auto line = std::make_unique<UdpLine>();
         if (line->listen(port, 1)) return line;
     }
-    throw std::runtime_error("no port of this machine could be listened on (50811 to 50830, at ::1)");
+    throw std::runtime_error("no port of this machine could be listened on (from 50811, at ::1)");
 }
 static std::unique_ptr<UdpLine> callTo(int port) {
     auto line = std::make_unique<UdpLine>();
