@@ -267,10 +267,12 @@ private:
         const bool spawned = side.spawnedAt != spawnTaken;
         spawnTaken = side.spawnedAt;
         // (a pair begun early: the window moving on as it appears tells no other pair has come; the screen showing it
-        //  appear in another frame than the engine foresaw - garbage it knows nothing of fell first -, it is taken from it)
+        //  appear in another frame than the engine foresaw - garbage it knows nothing of fell first -, it is taken from it.
+        //  Seen late within BLIND_SLACK frames after that frame - moved as it appeared, first seen aside -, it is the one
+        //  begun: taken from the screen again, 19 pairs of a play test of the real game lost what was done for them.)
         if (earlyFor >= 0 && side.shiftedAt > shiftBegun && !earlyShifted) shiftBegun = side.shiftedAt, earlyShifted = true;
         if (earlyFor >= 0 && side.pairs == earlyFor && spawned) {
-            const bool off = side.spawnedAt != earlyAt;
+            const bool off = side.late ? side.spawnedAt < earlyAt || side.spawnedAt - earlyAt > BLIND_SLACK : side.spawnedAt != earlyAt;
             earlyFor = -1, blindFor = -1;
             if (off) shots.clear(), begin(f, side);
         } else if (side.pairs > pairsSeen) {

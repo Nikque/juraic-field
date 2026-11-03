@@ -173,7 +173,7 @@ struct App {
     // called, the port a host listens on. The three are kept in the settings file. An address is shown only while F1
     // has asked for it (the screen may be on a stream).
     NetPlay net;
-    std::wstring netName = L"Player", netAddress;
+    std::wstring netName = L"Player", netAddress, netPortText;
     int netPort = NET_PORT, netDevice[2]{};
     int lobbyIndex = 0;
     bool lobbyEditing = false, showAddress = false;
@@ -1131,47 +1131,56 @@ struct App {
         return -1;
     }
     // ---- a match over a network ----
-    // The screen before it: the own name, a room opened (this machine waits for a call on its port) or entered (the
-    // address of the machine that waits). A text is typed after Enter on its row, and ended with Enter or Esc.
+    // The screen before it: the own name, the port a room opened waits on, a room opened (this machine waits for a call
+    // on that port) or entered (the address of the machine that waits). A text is typed after Enter on its row (the port:
+    // its digits), and ended with Enter or Esc.
     void updateLobby() {
         if (pressed(VK_F1)) showAddress = !showAddress;
         if (lobbyEditing) {
-            std::wstring& text = lobbyIndex == 0 ? netName : netAddress;
-            const size_t most = lobbyIndex == 0 ? 12 : 80;
+            std::wstring& text = lobbyIndex == 0 ? netName : lobbyIndex == 1 ? netPortText : netAddress;
+            const size_t most = lobbyIndex == 0 ? 12 : lobbyIndex == 1 ? 5 : 80;
             for (const wchar_t c : typed) {
                 if (c == 8 && !text.empty()) text.pop_back();
                 // (Ctrl+V: an address is usually pasted)
                 if (c == 22)
                     for (const wchar_t p : clipboardText())
-                        if (p > 32 && p < 127 && lobbyIndex == 2 && text.size() < most) text += p;
-                if (c >= 32 && c != 127 && text.size() < most && (lobbyIndex == 0 || (c > 32 && c < 127))) text += c;
+                        if (p > 32 && p < 127 && lobbyIndex == 3 && text.size() < most) text += p;
+                const bool fits = lobbyIndex == 0 ? c >= 32 && c != 127 : lobbyIndex == 1 ? c >= L'0' && c <= L'9' : c > 32 && c < 127;
+                if (fits && text.size() < most) text += c;
             }
             if (pressed(VK_RETURN) | pressed(VK_ESCAPE)) {
                 lobbyEditing = false;
                 if (netName.empty()) netName = L"Player";
+                if (lobbyIndex == 1) {
+                    // (a port from 1 to 65535; otherwise the one before is kept)
+                    const int port = netPortText.empty() || netPortText.size() > 5 ? 0 : std::stoi(netPortText);
+                    if (port >= 1 && port <= 65535) netPort = port;
+                    else say(L"ポートは 1 から 65535 までの数で入れてください（" + std::to_wstring(netPort) + L" のままです）");
+                }
                 forgetKeys();
                 saveAll();
                 audio.play(SND_SELECT);
             }
             return;
         }
-        const int count = 5;
+        const int count = 6;
         if (heldStep(NAV_UP, 6, 6)) lobbyIndex = (lobbyIndex + count - 1) % count, audio.play(SND_MOVE);
         if (heldStep(NAV_DOWN, 6, 6)) lobbyIndex = (lobbyIndex + 1) % count, audio.play(SND_MOVE);
         const bool back = nav(NAV_BACK), ok = nav(NAV_OK);
-        if (back || (ok && lobbyIndex == 4)) {
+        if (back || (ok && lobbyIndex == 5)) {
             audio.play(SND_SELECT);
             screen = Screen::Menu;
             return;
         }
         if (!ok) return;
         audio.play(SND_SELECT);
-        if (lobbyIndex == 0 || lobbyIndex == 2) {
+        if (lobbyIndex == 0 || lobbyIndex == 1 || lobbyIndex == 3) {
+            if (lobbyIndex == 1) netPortText = std::to_wstring(netPort);
             lobbyEditing = true;
             return;
         }
         auto line = std::make_unique<UdpLine>();
-        if (lobbyIndex == 1) {
+        if (lobbyIndex == 2) {
             if (!line->listen(netPort)) {
                 say(L"ポート " + std::to_wstring(netPort) + L" で待ち受けられませんでした（ほかのソフトが使っているか、Windows が予約しているかもしれません）");
                 return;
@@ -1666,10 +1675,11 @@ struct App {
     void drawLobby() {
         gfx.text(L"ネット対戦（人 対 人）", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         const std::wstring hidden(netAddress.size(), L'●');
-        const std::wstring rows[5] = {L"名前", L"部屋を立てる（相手を待つ）", L"相手のアドレス", L"部屋に入る（上のアドレスへ）", L"戻る"};
-        const std::wstring values[5] = {netName, L"ポート " + std::to_wstring(netPort), netAddress.empty() ? L"（未入力）" : showAddress ? netAddress : hidden, L"", L""};
-        for (int i = 0; i < 5; ++i) {
-            const float y = 150 + float(i) * 56;
+        const std::wstring rows[6] = {L"名前", L"ポート（部屋を立てる時）", L"部屋を立てる（相手を待つ）", L"相手のアドレス", L"部屋に入る（上のアドレスへ）", L"戻る"};
+        const std::wstring values[6] = {netName, lobbyEditing && lobbyIndex == 1 ? netPortText : std::to_wstring(netPort), L"",
+                                        netAddress.empty() ? L"（未入力）" : showAddress ? netAddress : hidden, L"", L""};
+        for (int i = 0; i < 6; ++i) {
+            const float y = 140 + float(i) * 50;
             const bool on = i == lobbyIndex;
             if (on) gfx.round(rectF(260, y - 6, 1020, y + 40), 8, lobbyEditing ? rgb(190, 110, 60) : rgb(84, 104, 190));
             gfx.text(rows[i], 284, y, 400, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));

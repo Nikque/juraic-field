@@ -2034,6 +2034,7 @@ struct DriveScenario {
     bool hiddenGarbage = false;
     bool early = true; // Driver::early
     int misreadAfterSpawn = 0; // one pair of 2P in that many drawn a column aside, in the 13th row, in the picture after the driver began it
+    int hideAppearing = 0;     // the pairs of 2P not drawn as they appear, nor in that many frames after (the first picture shows them moved)
     TimedRun timed = {};       // on: the pictures and the pad in time (lag, shaky, skipOneIn, twiceOneIn, batchAtSpawn and loseAtGround not used)
 };
 // Such a round from `seed`, counted into n.
@@ -2160,8 +2161,10 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             correctedBefore = d.corrected;
         }
         const bool misread = how.misreadAfterSpawn && clock == ps.begunAt + 1 && ps.begunFor % how.misreadAfterSpawn == 0 && r.player[1].phase == Phase::Control;
-        if (oldFor > 0 || hideFor > 0 || kickFor > 0 || liftFor > 0 || glitchNext || misread) {
+        const bool appearing = how.hideAppearing && r.player[1].phase == Phase::Next && r.player[1].wait <= 1;
+        if (oldFor > 0 || hideFor > 0 || kickFor > 0 || liftFor > 0 || glitchNext || misread || appearing) {
             Round shown = r;
+            if (appearing) shown.player[1].wait = 2;
             if (misread) {
                 PairControl& q = shown.player[1].pair;
                 q.x = int8_t(q.x < W - 1 ? q.x + 1 : q.x - 1), q.y = 12, q.upper = false;
@@ -2320,6 +2323,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         if (how.movedHidden && r.player[1].phase == Phase::Control && r.player[1].pair.x != columnBefore && !e[1].spawned) hideFor = std::max(hideFor, how.movedHidden);
         // (from the frame a pair appears in, until the frames take buttons the driver sent once it had begun that pair)
         if (e[1].spawned) ++spawns, n.early += ps.appear(clock, r.player[1].nextPair), n.appeared.push_back(clock), n.wordsSpawns += words;
+        if (e[1].spawned && how.hideAppearing) hideFor = std::max(hideFor, how.hideAppearing);
         ps.take(from);
         if (e[1].spawned) beginning = true, unbegun = 0, spawnIndex = r.player[1].nextPair - 1;
         if (beginning && ps.firstBegunAt >= 0 && from >= ps.firstBegunAt) beginning = false;
@@ -5141,6 +5145,41 @@ static void testThreeAlikeOneUnseen() {
     std::cout << "three pairs alike in a row, one put unseen: the window moving on unseen is counted when the next pair appears as it stands\n";
 }
 
+// Pairs begun early, not shown as they appear: the first picture shows them already moved, a column aside, its child above
+// the screen, and Tracker takes them seen late. A pair so seen within BLIND_SLACK frames after the engine had it appear is
+// the one begun early: it is not begun again from the screen (begun again so, 19 pairs in a play test of the real game lost
+// what the driver had done for them, and the pairs of 2P came later).
+static void testEarlyTakenAside() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    std::vector<std::pair<int64_t, std::string>> notes;
+    for (const uint64_t seed : {120, 121, 122}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        DriveScenario how{.lag = 5, .startLag = 6, .given = std::move(a), .quietLanding = true};
+        how.notes = &notes, how.hideAppearing = 2;
+        driveRound(seed, n, std::move(how));
+    }
+    std::map<std::string, int64_t> early;
+    int begunEarly = 0, again = 0;
+    for (const auto& [at, line] : notes) {
+        const size_t p = line.find("2P pair "), b = line.find(" begun");
+        if (p != 0 || b == std::string::npos) continue;
+        const std::string pair = line.substr(8, b - 8);
+        if (line.find(" begun early") == b) early[pair] = at, ++begunEarly;
+        // (seen late; one seen where pairs appear in another frame than foreseen - here only as the first frames are not
+        //  drawn - is begun again from the screen as before: garbage the engine does not know of may have fallen first)
+        else if (early.count(pair) && at - early[pair] <= Driver::BLIND_SLACK && line.find("(seen late)") != std::string::npos)
+            ++again, early.erase(pair);
+    }
+    check(begunEarly >= 10 && again == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 95,
+          "pairs begun early and seen late, moved as they appeared: " + std::to_string(again) + " of " + std::to_string(begunEarly) + " begun again from the screen seen late, " +
+              std::to_string(n.leftAlone) + " left alone, " + std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose");
+    std::cout << "pairs begun early and seen late, moved as they appeared: none begun again (" << begunEarly << " begun early), " << n.hits << " of " << n.locks
+              << " where the AI chose\n";
+}
+
 // A pair the driver began before it appeared, moved a column aside in the frame it appeared: first seen there, its child
 // still above the screen, soon after the window moved on. It is the pair that came. (Not taken, it was not followed on
 // the real game, the engine had it where it was going, and it fell with nothing pressed for 46 frames.)
@@ -6073,6 +6112,7 @@ int main(int argc, char** argv) {
         testAlikeWindowMovedUnseen();
         testSecondPlaceLitAsAlike();
         testMovedAsItAppearsChildHidden();
+        testEarlyTakenAside();
         testWindowGround();
         testLateWindowNotWaited();
         testWindowFilm(argc > 1 ? argv[1] : ".");

@@ -801,6 +801,7 @@ struct SideTrack {
     int pairs = 0;             // pairs this side has been given since the round began
     int64_t spawnedAt = -1;    // the frame in which the last of them was seen first
     int64_t spawnedBefore = -1; // ... and the one before it
+    juraic::Cell seenAxis = juraic::EMPTY; // the axis of the last of them as it was seen when taken
     bool late = false;         // ... seen late (Tracker::late)
     bool clear = true;         // the last reading of this side had no UNSURE point (otherwise nothing of its field was taken)
     int64_t unclearAt = -1;    // the frame of the last reading that was not clear
@@ -1089,7 +1090,12 @@ private:
             //  own move, made before the pair appears; for the next pair it moves on only after that one is put -: the
             //  pairs before it were put unseen, and the pair taken is the one before the window's first. On the real game
             //  the pairs after a pair seen as the window moved on again under a light were learnt a place out.)
-            if (t.spawnedAt >= 0 && t.awayFrom <= t.spawnedAt && t.standAt > t.pairs) renumber(s, t.standAt);
+            //  Only as the colours seen of the pair taken tell so - those of the one before the window's first, not of the
+            //  one it was numbered as: two pairs of one axis, a pair taken as the window moved on was numbered a place out
+            //  so in a play test of the real game.)
+            if (t.spawnedAt >= 0 && t.awayFrom <= t.spawnedAt && t.standAt > t.pairs && knows(s, t.standAt - 1) && t.seenAxis == pairOf(s, t.standAt - 1).axis &&
+                !(knows(s, t.pairs - 1) && t.seenAxis == pairOf(s, t.pairs - 1).axis))
+                renumber(s, t.standAt);
         } else if (t.standAt < t.pairs && same(t.stand[0], t.stand[1]) && asStood && t.runFrom > t.spawnedBefore) {
             // (two pairs alike in it, standing as it stood, away since the pair before the one taken last was taken: it has
             //  moved on for that one to a third pair alike - on the real game a pair seen late so was numbered as the one
@@ -1503,6 +1509,7 @@ private:
         t.pairs = index + 1, t.dealt = std::max(t.dealt, t.pairs), t.missedFor = 0;
         t.spawnedBefore = t.spawnedAt;
         t.spawnedAt = at;
+        t.seenAxis = fresh.colors.axis;
         t.late = seenLate;
         t.inHand = true;
         t.under = resting;
