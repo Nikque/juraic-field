@@ -5141,6 +5141,42 @@ static void testThreeAlikeOneUnseen() {
     std::cout << "three pairs alike in a row, one put unseen: the window moving on unseen is counted when the next pair appears as it stands\n";
 }
 
+// A pair the driver began before it appeared, moved a column aside in the frame it appeared: first seen there, its child
+// still above the screen, soon after the window moved on. It is the pair that came. (Not taken, it was not followed on
+// the real game, the engine had it where it was going, and it fell with nothing pressed for 46 frames.)
+static void testMovedAsItAppearsChildHidden() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 1}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    run(empty, t.roundGap + 5);
+    Reading base = empty;
+    for (SideRead& side : base.side) side.next[0] = {1, 2}, side.next[1] = {3, 3};
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 5;
+    run(first, t.pairGap + 3);
+    Reading put = base;
+    for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 5 : 1;
+    run(put, 20);
+    // The window moves on, and pair 1 (1 2) is first seen a column aside, its axis half a cell up, its child above.
+    for (SideRead& side : put.side) side.next[0] = {3, 3}, side.next[1] = {2, 4};
+    run(put, 3);
+    Reading aside = put;
+    aside.side[1].point[SPAWN_X + 1][23] = 1;
+    run(aside, 3);
+    check(t.side[1].pairs == 2 && t.side[1].inHand && t.side[1].colors.axis == 1, "a pair moved a column aside as it appeared, its child above the screen, is not taken: " +
+                                                                                      std::to_string(t.side[1].pairs) + " pairs");
+    std::cout << "a pair moved a column aside as it appeared, its child above the screen: taken\n";
+}
+
 // The window moved on as a pair appeared, and soon after a light over its second place reads it for three readings as the
 // pair of its first place: it does not stand as two pairs alike, and reading as it stood once the light is gone it has not
 // moved on. (On the real game it was taken as moved on, and the pairs of 1P were numbered a place ahead.)
@@ -6036,6 +6072,7 @@ int main(int argc, char** argv) {
         testFirstWindowSlidingAsMoved();
         testAlikeWindowMovedUnseen();
         testSecondPlaceLitAsAlike();
+        testMovedAsItAppearsChildHidden();
         testWindowGround();
         testLateWindowNotWaited();
         testWindowFilm(argc > 1 ? argv[1] : ".");

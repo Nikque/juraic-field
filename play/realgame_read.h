@@ -1244,24 +1244,28 @@ private:
         //  reading before had that pair's own points above the field: for it, nothing besides it may be there now.
         //  Not above where pairs appear: a screen that shows a part of the 13th row showed a piece moving there as
         //  garbage fell, the point above it beyond the screen, in rounds drawn and read.)
+        // (the window has moved on since the last pair appeared, or stands where it moves on to, no pair in hand: a pair is
+        //  coming - just now, within pairGap frames)
+        const bool movingOn = whole(t) && t.standKnown && t.standAt >= 0 && t.nextStill >= windowStill && moveOf(s) > 0;
+        const bool due = !t.inHand && (t.dealt > t.pairs || movingOn);
+        const bool justMoved = due && at - (t.dealt > t.pairs ? t.shiftedAt : t.stillAt) <= pairGap;
+        // (... a pair moved a column aside as it appeared, its child still above the screen, is so too, just after the
+        //  window moved on: a pair the driver began before it appeared does so - not taken, it was not followed on the real
+        //  game, the engine had it where it was going, and it fell with nothing pressed for 46 frames)
+        const bool aside = std::abs(fresh.at.x - spawn.x) <= (justMoved ? 1 : 0);
         const bool colours = knows(s, comes) && fresh.colors.axis == pairOf(s, comes).axis &&
-                             (fresh.childHidden ? fresh.at.x == spawn.x && fresh.at.y >= juraic::SPAWN_Y - 1 && fresh.at.y <= juraic::SPAWN_Y &&
-                                                      (t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap) &&
-                                                      !resting.f.empty()
+                             (fresh.childHidden ? aside && fresh.at.y >= juraic::SPAWN_Y - 1 && fresh.at.y <= juraic::SPAWN_Y &&
+                                                      (t.spawnedAt < 0 || at - t.spawnedAt >= 2 * pairGap || justMoved) && !resting.f.empty()
                                                 : fresh.colors.child == pairOf(s, comes).child);
         const bool settledLate = at - t.changedAt >= stillFrames && (t.loose == 0 || (t.loose <= 4 && looseOver(field, resting, fresh) == 0));
         const bool samePair = t.inHand && resting == t.under && at - t.spawnedAt < pairGap;
-        // (the window has moved on since the last pair appeared, or stands where it moves on to, no pair in hand: a pair is
-        //  coming)
-        const bool movingOn = whole(t) && t.standKnown && t.standAt >= 0 && t.nextStill >= windowStill && moveOf(s) > 0;
-        const bool due = !t.inHand && (t.dealt > t.pairs || movingOn);
         // (... and seen whole, in the air, a column at most beside where pairs appear and not far below, of the colours
         //  of the pair that comes, soon after the window moved on: turned or moved in the frame it appeared - a pair the
         //  driver began before it appeared does so -, it was never shown where pairs appear. Not taken, it was not counted,
         //  the window's move as it appeared was taken for the next pair coming, and the pair lay with no button for 10
-        //  frames before it locked, in rounds drawn so.)
+        //  frames before it locked, in rounds drawn so. Its child above the screen: as `colours` says.)
         //  (Lying already when first seen so - on a column high near where pairs appear -, it is taken all the same.)
-        const bool movedFirst = due && at - (t.dealt > t.pairs ? t.shiftedAt : t.stillAt) <= pairGap && !fresh.childHidden && std::abs(fresh.at.x - spawn.x) <= 1 && fresh.at.y >= juraic::SPAWN_Y - 3;
+        const bool movedFirst = justMoved && std::abs(fresh.at.x - spawn.x) <= 1 && fresh.at.y >= juraic::SPAWN_Y - 3;
         const bool hidden = !there && !t.inHand && fresh.seen && colours && fresh.at.y >= juraic::SPAWN_Y - 3 &&
                             ((t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && !pairLying(fresh, resting)) || movedFirst);
         // (the first pair of a round: its own pieces read in the reading before, when it was not taken, do not keep
