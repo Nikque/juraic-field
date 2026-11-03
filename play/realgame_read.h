@@ -1209,9 +1209,14 @@ private:
                         //  it: then the count is behind, and the colours seen are those of the pair in hand)
                         const bool nextOne = knows(s, comes + 1) && any.colors.axis == pairOf(s, comes + 1).axis && (any.childHidden || any.colors.child == pairOf(s, comes + 1).child);
                         // (nor when the colours seen are those of the pair learnt turned over - its child read where its
-                        //  axis appears, the axis up out of sight: on the real game 1P turned pairs so as they appeared,
-                        //  and seven right pairs were learnt again wrong in the records, six of them as the pair after them)
-                        const bool turned = knows(s, comes) && any.colors.axis == pairOf(s, comes).child && (any.childHidden || any.colors.child == pairOf(s, comes).axis);
+                        //  axis appears, the axis up out of sight -, the pair shown alike or not shown at all by the other
+                        //  side's window: on the real game 1P turned pairs so as they appeared, and seven right pairs were
+                        //  learnt again wrong in the records, six of them as the pair after them. Shown otherwise there,
+                        //  the pair learnt may be wrong, and the picture tells its colours as before.)
+                        const int other = otherIndex(s, comes);
+                        const bool otherLearnt = other >= 0 && other < int(knownOf[1 - s].size()) && knownOf[1 - s][size_t(other)];
+                        const bool turned = knows(s, comes) && any.colors.axis == pairOf(s, comes).child &&
+                                            (any.childHidden || any.colors.child == pairOf(s, comes).axis) && (shownAlike(s, comes) || !otherLearnt);
                         if (!turned && (!shownAlike(s, comes) || nextOne)) learn(s, comes, {any.colors.axis, child});
                     }
                     if (!after) ++doubts;

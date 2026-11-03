@@ -4789,9 +4789,11 @@ static void testBothWindowsOverOnePicture() {
         run(ahead, 2);
         check(t.pairOf(1, 1).axis == 3, "a pair seen as the pair after the one learnt, the count behind, did not take the colours seen");
     }
-    {
+    for (const bool otherLearnt : {true, false}) {
         // Seen with its child hidden, of the colour of the child learnt: the pair may have been turned over as it
-        // appeared, its axis up out of sight - not learnt again, even when that colour is also the next pair's axis.
+        // appeared, its axis up out of sight - not learnt again, even when that colour is also the next pair's axis;
+        // so too when the other side's window never showed it (on the real game 1P turned pairs so that 2P had not
+        // learnt yet).
         Tracker t;
         int64_t at = 50000;
         const auto run = [&](const Reading& r, int frames) {
@@ -4809,12 +4811,14 @@ static void testBothWindowsOverOnePicture() {
         run(put, 5);
         for (SideRead& side : put.side) side.next[0] = {2, 4}, side.next[1] = {3, 3};
         run(put, 4);
+        if (!otherLearnt) t.knownOf[0][1] = 0;
         Reading turned = put;
         turned.side[1].point[SPAWN_X][23] = 2;
         run(turned, 2);
         check(t.side[1].pairs == 2, "a pair turned over as it appeared is not counted");
         const Pair now = t.pairOf(1, 1);
-        check(now.axis == 1 && now.child == 2, "a pair turned over as it appeared was learnt again from a picture of it: " + std::to_string(int(now.axis)) + std::to_string(int(now.child)));
+        check(now.axis == 1 && now.child == 2, std::string("a pair turned over as it appeared was learnt again from a picture of it") + (otherLearnt ? "" : ", the other window not showing it") +
+                                                   ": " + std::to_string(int(now.axis)) + std::to_string(int(now.child)));
     }
     std::cout << "a pair both windows showed alike is not learnt again from a picture of it, unless it shows the pair after it; a pair turned over is not\n";
 }
