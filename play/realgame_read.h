@@ -774,9 +774,12 @@ inline SideRead withoutWords(const SideRead& read, const Words& words) {
                 if (below != above) (below ? low : high) += below ? -1 : 1;
             }
             // (a run that is the words' at every point, right between two pieces that are not: a piece of a stack - the
-            //  words are behind the pieces, and a stack shows nothing of them between two of its pieces)
+            //  words are behind the pieces, and a stack shows nothing of them between two of its pieces. So too the words'
+            //  points at the bottom of a run, right on a piece that is not the words': on rounds drawn so, the two pieces
+            //  above them were left over a gap and taken for a pair in the air)
             const auto piece = [&](int j) { return j >= 0 && j < POINTS && isPiece(read.point[x][j]) && words.at[x][j] != read.point[x][j]; };
             if (low < 0 && piece(k - 1) && piece(end)) low = k, high = end - 1;
+            else if (low > k && piece(k - 1)) low = k;
             for (int j = k; j < end; ++j)
                 if (low < 0 || j < low || j > high) out.point[x][j] = juraic::EMPTY;
             k = end;
@@ -797,6 +800,7 @@ struct SideTrack {
     PairSeen lastSeen;         // as seen last
     int pairs = 0;             // pairs this side has been given since the round began
     int64_t spawnedAt = -1;    // the frame in which the last of them was seen first
+    int64_t spawnedBefore = -1; // ... and the one before it
     bool late = false;         // ... seen late (Tracker::late)
     bool clear = true;         // the last reading of this side had no UNSURE point (otherwise nothing of its field was taken)
     int64_t unclearAt = -1;    // the frame of the last reading that was not clear
@@ -807,27 +811,34 @@ struct SideTrack {
     bool nextRead[2]{};
     int nextStill = 0;         // readings in a row that showed the window as the one before it (both pairs read)
     int64_t nextMovedAt = -1;  // the last reading in which it was read otherwise (moving)
-    int64_t nextChangedAt = -1; // the last reading in which it stood otherwise than it stood before (a pair of one colour first: always)
-    bool unseenToTell = false; // the last pair came with the window, moved on long before, moving again and not read (Tracker::newPair)
-    int learnFor = -1;         // the pair whose next two are still to be learnt from the window (-1: none)
+    int64_t runFrom = -1;      // the frame of the first of those readings in a row
+    int64_t stillAt = -1;      // ... and of the one in which it had read so windowStill readings after the first
+    // The window as it last stood (Tracker::readWindow): its two pairs, and the number of the first of them among the pairs
+    // of the round (-1: not known - a round not followed from its beginning, before its first pair). The number is the
+    // state the pairs are counted by: the window moves on by one just before each pair appears.
+    juraic::Pair stand[2]{};
+    bool standKnown = false;
+    int standAt = -1;
+    int64_t awayFrom = -1;     // the first reading of the last time it was not read whole as it stood (moving on, or lit)
+    bool asStood = false;      // the last reading showed it whole as it stood
+    int64_t standFrom = -1;    // the first reading that showed it standing where it stands (moved on there)
+    int anchorFor = -1;        // the pair the window is to be numbered after, its number not known (Tracker::anchor)
+    // The frame the window last stood moved on (stillAt), when that told of a pair not shown before - or of the pair that
+    // appeared, the window read standing pairGap frames after it at most: later than that, it was hidden as the pair
+    // appeared, and its move tells nothing of a pair to come. So too, for the driver, as soon as it stands where it moves
+    // on to, not taken as moved yet (provisional), and as before (shiftedBefore) when it goes away from there untaken.
+    int64_t shiftedAt = -1;
+    int64_t shiftedBefore = -1;
+    bool provisional = false;
+    // The pairs this side has been given in the round: as the window moved on, and as the field showed them (the number of
+    // the pair that comes after them). More than `pairs`: the window has moved on for a pair not seen yet; by more than one,
+    // pairs before that one were put with the screen not showing them (a light over the field): `unseen` of them.
+    int dealt = 0;
+    int unseen = 0;
     // A pair seen where pairs appear and not taken (pieces above the field in the reading before; before the first pair
     // of the round, other colours than those learnt): the frame of the reading it was seen in, and its axis (Tracker::step).
     int64_t strayAt = -1;
     juraic::Cell strayAxis = juraic::EMPTY;
-    // The window as it last stood still, and the frame it stood still moved on by one from that (its first pair the
-    // second one before): it moves on only after the pair before has been put, so a pair is coming.
-    juraic::Pair stood[2]{};
-    bool stoodKnown = false;
-    // The window as it last stood windowStillSame readings, and nextChangedAt then: on its way, or under a light, it stands
-    // for a few readings as pairs it never showed.
-    juraic::Pair settled[2]{};
-    bool settledKnown = false;
-    int64_t settledChangedAt = -1;
-    int64_t shiftedAt = -1;
-    // Pairs that came and were put with the screen not showing them (a light over the field): the window moved on
-    // again, to the pairs learnt after them, with no pair seen since it moved on before. The next pair seen is counted
-    // after them.
-    int unseen = 0;
     // Clear readings in a row in which the pair in hand was not seen, over the field it appeared over with nothing above
     // it (Tracker::outOfSight).
     int missedFor = 0;
@@ -864,26 +875,29 @@ public:
     // it, has been put out of sight (both pieces in the 13th and 14th rows), the window moved on or not. (The real game
     // does not show a pair as it turns: 9 frames for two turns in its records.)
     int outOfSight = 20;
-    // The window of the next pairs moves for some frames as a pair appears, reading as other pairs on its way: the two
-    // after a new pair are learnt once it has read the same windowStill readings in a row, after it moved - at most
-    // windowBefore frames before the pair appeared - or windowWait frames after the pair appeared (the same pairs again).
-    // Reading one pair in both places it stands still for learning pairs after windowStillSame readings in a row
-    // (stillNeeded): a pair of one colour on its way up reads in both places for a few readings - on the real game 1P's
-    // window read so for 3 to 7 readings 217 times in 152 rounds (2P's 68), 8 to 15 29 times, and 16 or more 374 times
-    // (two pairs alike in a row, 2P's 369); taken as standing, the pair after it was learnt as that colour, and learnt
-    // again 6 frames later. (Whether the window has moved on - the counting of pairs put unseen - still takes windowStill:
-    // with windowStillSame there too, pairs lit long took the previous pair's down button in rounds drawn and read. So
-    // does the window before a round, learnFirstWindow: two first pairs alike read so for too few readings on one side,
-    // and the first pair was not known in 6 records of the real game.)
-    // A window on its way reads as other pairs for a few readings in a row too, and stands still so: pairs are learnt from
-    // it standing windowLearn readings (stillNeeded; with 2, in the records of the real game, 152 rounds, pairs learnt
-    // and learnt again otherwise before they appeared were 78 on 1P and 19 on 2P, wrong for 16516 and 3252 frames in all;
-    // with 3, 62 and 13, 13474 and 2589 frames; with 4, 54 and 8, but in a round drawn and read, lit 80 frames, a pair
-    // went elsewhere than the AI chose; the window moving on before the next pair appears stands 2 or 3 readings before
-    // it, and its pairs are then learnt as the pair appears, as a window that may be moving, and again once it stands);
-    // and standing windowRelearn readings, soon after a pair appeared, what it shows second is learnt again from it (a
-    // pair it showed so first otherwise stood learnt until the next pair appeared).
-    int windowStill = 2, windowBefore = 10, windowWait = 30, windowStillSame = 8, windowRelearn = 8, windowLearn = 3;
+    // The window of the next pairs (readWindow). On the real game it stands, slides for 7 frames as the pair before is put
+    // (6 to 9 in nearly every move of the records of 36 sessions), stands moved on by one, and the pair appears a reading
+    // later (1P 887 of 1003 moves, 2P 1019 of 1082, in the records of 11-03). On its way, and under a light, it reads
+    // for some readings in a row as a window it never showed: in those records, as the window moved on by one (its first
+    // pair the one it showed second) for 5 readings at most (1 with the window's ground read as no piece), two pairs alike
+    // in it as their first and another for 5 at most, its second place otherwise for 8 at most (19 as it moved on, the
+    // pair new in it lit, in records read before the ground was), and its first place as a pair of neither place for 9.
+    //  - windowStill: readings in a row (after the first) in which it reads the same to stand (Tracker::readWindow
+    //    looks at it then; Driver too).
+    //  - windowMove: ... to be taken as moved on with no pair seen since it left where it stood (with a pair seen,
+    //    windowStill).
+    //  - windowLearn: ... for the pairs it shows to be learnt for sure (before that, as it may be moving: with 2, in the
+    //    records, 152 rounds, pairs learnt and learnt again otherwise before they appeared were 78 on 1P and 19 on 2P; with
+    //    3, 62 and 13; with 4, 54 and 8, but in a round drawn and read, lit 80 frames, a pair went elsewhere than the AI
+    //    chose).
+    //  - windowOver: ... for a pair learnt for sure to be learnt otherwise from it - and more than the readings that
+    //    showed it as learnt.
+    // A window whose number is not known is numbered after the first pair seen when it stands, having moved on at most
+    // windowBefore frames before that pair appeared, or windowWait frames after it (anchor).
+    // The window can be taken as moved on by windowAhead pairs at most at once (pairs put unseen under a light; it is read
+    // so only as the pairs learnt tell). Away from where it stood windowSlide frames or more before standing again, it may
+    // have slid (Tracker::newPair).
+    int windowStill = 2, windowMove = 5, windowLearn = 3, windowOver = 8, windowBefore = 10, windowWait = 30, windowAhead = 4, windowSlide = 5;
     // Before the first pair of a round the window shows the first two pairs; the screens before a round (the title, the
     // menus) may read as a window standing still too. A window that stands still for windowLong readings and reads
     // other pairs than those learnt is taken instead (on the real game the window read three pictures as other pairs on
@@ -904,8 +918,10 @@ public:
     // side showed them by that side's own count: a side that counted its pairs wrong learns them at the wrong places,
     // for itself only (on the real game the person's side, three pairs short, made 2P wait for colours that did not
     // come). knownOf: 1 learnt from a window that stood still; 2 from one that may have been moving (put right after).
+    // strengthOf: the readings of the side's window, standing, that showed a pair learnt for sure so (windowOver).
     std::vector<juraic::Pair> pairsOf[2];
     std::vector<uint8_t> knownOf[2];
+    std::vector<int> strengthOf[2];
     // The pairs of 2P are numbered `shift` places on from the same pairs of 1P, as the two windows showed them (align);
     // aligns: the times it changed.
     int shift = 0;
@@ -934,11 +950,11 @@ public:
         const juraic::Timing t = timing;
         const int still = stillFrames, gap = roundGap, notice = noticeFrames, lateness = lateFrames, twice = pairGap, broken = roundBreak, hiddenFor = outOfSight;
         const int windowS = windowStill, windowB = windowBefore, windowW = windowWait, windowL = windowLong, wordsF = wordsFrames, wordsP = wordsPoints;
-        const int shiftMost = maxShift, run = alignRun, windowSS = windowStillSame, windowR = windowRelearn, windowLe = windowLearn;
+        const int shiftMost = maxShift, run = alignRun, windowM = windowMove, windowO = windowOver, windowLe = windowLearn, windowA = windowAhead, windowSl = windowSlide;
         *this = Tracker{};
         timing = t, stillFrames = still, roundGap = gap, noticeFrames = notice, lateFrames = lateness, pairGap = twice, roundBreak = broken, outOfSight = hiddenFor;
         windowStill = windowS, windowBefore = windowB, windowWait = windowW, windowLong = windowL, wordsFrames = wordsF, wordsPoints = wordsP;
-        maxShift = shiftMost, alignRun = run, windowStillSame = windowSS, windowRelearn = windowR, windowLearn = windowLe;
+        maxShift = shiftMost, alignRun = run, windowMove = windowM, windowOver = windowO, windowLearn = windowLe, windowAhead = windowA, windowSlide = windowSl;
     }
 
     // The pieces of side s stand still: read the same for stillFrames frames, nothing above them but the pair, and the
@@ -1030,69 +1046,145 @@ public:
         else if (empty && emptySince < 0) emptySince = at;
         if (empty && at - emptySince >= roundGap && (side[0].pairs || side[1].pairs || !fromStart)) newRound();
         learnFirstWindow();
+        for (SideTrack& t : side) t.unseen = t.dealt > t.pairs ? t.dealt - t.pairs - 1 : 0;
     }
 
 private:
-    // The notice and the window of side s in the reading `read`: the pairs it shows learnt as they come.
+    // The notice and the window of side s in the reading `read`. The window standing (windowStill readings in a row):
+    // where it has moved on to from where it stood (moveOf), taken as a move once it has stood windowMove readings, or
+    // windowStill with the pairs it moved on for seen where pairs appear since; the pairs it shows learnt at its number.
     void readWindow(int s, const SideRead& read, int64_t at) {
         SideTrack& t = side[s];
         if (read.notice != t.noticeRead) t.noticeRead = read.notice, t.noticeSince = at;
         if (at - t.noticeSince + 1 >= noticeFrames) t.notice = t.noticeRead;
         const bool sameWindow = read.nextRead[0] && read.nextRead[1] && t.nextRead[0] && t.nextRead[1] && same(read.next[0], t.next[0]) && same(read.next[1], t.next[1]);
         t.nextStill = sameWindow ? t.nextStill + 1 : 0;
-        if (!sameWindow) t.nextMovedAt = at;
+        if (!sameWindow) t.nextMovedAt = t.runFrom = at;
+        if (!sameWindow && t.provisional) t.shiftedAt = t.shiftedBefore, t.provisional = false;
+        if (t.nextStill == windowStill) t.stillAt = at;
         for (int n = 0; n < 2; ++n) t.next[n] = read.next[n], t.nextRead[n] = read.nextRead[n];
-        if (t.nextStill == windowStill && t.nextRead[0] && t.nextRead[1]) {
-            if (movedOn(t)) {
-                if (cameUnseen(t, s)) ++t.unseen;
-                else if (t.unseenToTell && knows(s, t.pairs + 1) && same(t.next[0], pairOf(s, t.pairs + 1))) {
-                    // (standing, it shows first the pair after the one taken for the last: that one was put unseen)
-                    ++t.pairs;
-                    if (t.learnFor >= 0) ++t.learnFor;
-                    if (knows(s, t.pairs - 1)) t.colors = t.pair.colors = t.lastSeen.colors = pairOf(s, t.pairs - 1);
-                }
-                t.shiftedAt = at;
+        const bool asStood = whole(t) && t.standKnown && same(t.next[0], t.stand[0]) && same(t.next[1], t.stand[1]);
+        if (!asStood && t.asStood) t.awayFrom = at;
+        t.asStood = asStood;
+        // (not with no pieces at rest on either field, no pair in hand and nothing drawn over the fields after pairs have
+        //  come: the window is that of the next round, which has not been taken to begin)
+        const auto bare = [](const SideTrack& u) { return u.resting.f.empty() && !u.inHand && !u.words.any; };
+        const bool roundOver = (side[0].pairs || side[1].pairs) && bare(side[0]) && bare(side[1]);
+        if (!whole(t) || t.nextStill < windowStill || roundOver) return;
+        if (t.standAt < 0) {
+            anchor(s, at);
+            return;
+        }
+        const int k = moveOf(s);
+        if (k < 0) return;
+        if (k > 0) {
+            // (moved on: once it has stood windowMove readings, or windowStill with the pairs it moved on for, or one
+            //  more, seen where pairs appear since it left where it stood)
+            if (t.nextStill < windowMove && t.dealt < t.standAt + k && t.spawnedAt < t.awayFrom) {
+                if (!t.provisional) t.shiftedBefore = t.shiftedAt, t.shiftedAt = t.stillAt, t.provisional = true;
+                return;
             }
-            t.unseenToTell = false;
-            if (t.settledKnown && same(t.next[0], t.settled[0]) && same(t.next[1], t.settled[1]) && !same(t.next[0], t.next[1])) t.nextChangedAt = t.settledChangedAt;
-            else if (!t.stoodKnown || !same(t.next[0], t.stood[0]) || !same(t.next[1], t.stood[1]) || same(t.next[0], t.next[1])) t.nextChangedAt = at;
-            t.stood[0] = t.next[0], t.stood[1] = t.next[1], t.stoodKnown = true;
+            moveOn(s, k, t.stillAt);
+            // (moved on past the pair after the one taken last, having left where it stood before that one was taken - its
+            //  own move, made before the pair appears; for the next pair it moves on only after that one is put -: the
+            //  pairs before it were put unseen, and the pair taken is the one before the window's first. On the real game
+            //  the pairs after a pair seen as the window moved on again under a light were learnt a place out.)
+            if (t.spawnedAt >= 0 && t.awayFrom <= t.spawnedAt && t.standAt > t.pairs) renumber(s, t.standAt);
+        } else if (t.standAt < t.pairs && same(t.stand[0], t.stand[1]) && asStood && t.runFrom > t.spawnedBefore) {
+            // (two pairs alike in it, standing as it stood, away since the pair before the one taken last was taken: it has
+            //  moved on for that one to a third pair alike - on the real game a pair seen late so was numbered as the one
+            //  before it, and the pairs after it a place out)
+            moveOn(s, t.pairs - t.standAt, t.stillAt);
         }
-        if (t.nextStill == windowStillSame && t.nextRead[0] && t.nextRead[1]) t.settled[0] = t.next[0], t.settled[1] = t.next[1], t.settledKnown = true, t.settledChangedAt = t.nextChangedAt;
-        if (t.learnFor >= 0 && windowSettled(t, at)) {
-            learn(s, t.learnFor + 1, t.next[0]), learn(s, t.learnFor + 2, t.next[1]);
-            t.learnFor = -1;
+        learnStand(s);
+    }
+    static bool whole(const SideTrack& t) { return t.nextRead[0] && t.nextRead[1]; }
+    // How far the window as read has moved on from where it stood: 0 as it stood or with its second place otherwise, 1 with
+    // first the pair it showed second (two pairs alike in it: with its first pair and another - but not within pairGap
+    // frames after it moved on there, as it does not move on again so soon: its second place read otherwise then; on the
+    // real game a window read before its ground was, sliding, stood for 6 readings as two pairs alike, and its move on
+    // to the first of them and another was counted again), more as the pairs learnt after those tell (either side's
+    // window, windowAhead at most); -1 as no window it can have moved on to (a light, the screen after a round, a window
+    // read wrong).
+    int moveOf(int s) const {
+        const SideTrack& t = side[s];
+        if (same(t.next[0], t.stand[0]) && same(t.next[1], t.stand[1])) return 0;
+        if (same(t.next[0], t.stand[1]) && !(same(t.stand[0], t.stand[1]) && frame - t.standFrom < pairGap)) return 1;
+        if (same(t.next[0], t.stand[0])) return 0;
+        for (int k = 2; k <= windowAhead; ++k) {
+            const int index = t.standAt + k;
+            if (knows(s, index) && same(t.next[0], pairOf(s, index)) && (!knows(s, index + 1) || same(t.next[1], pairOf(s, index + 1)))) return k;
         }
-        // The number of the pair that comes.
-        const int comes = t.pairs + t.unseen;
-        // The window moves on before the next pair appears (Timing::nextShown): it shows the second of the two it
-        // showed, and the pair after them, which is learnt then (the AI waiting for its pair is shown it then, as
-        // in a match of this program). (Not with no pieces at rest on either field and no pair in hand after pairs have
-        // come: the window is that of the next round, which has not been taken to begin.) Its first place as the window
-        // that stood long showed it, only its second place changed, it is taken once it has stood windowStillSame readings:
-        // a light over the second place reads as another pair there for a few readings and stands so (on the real game
-        // the pair after the next was learnt as the lit one, with no pair coming, two pairs alike in a row first and a
-        // window that had moved on before its pair appeared too).
-        const bool roundOver = (side[0].pairs || side[1].pairs) && side[0].resting.f.empty() && side[1].resting.f.empty() && !side[0].inHand && !side[1].inHand;
-        const bool secondOnly = t.settledKnown && same(t.next[0], t.settled[0]);
-        if (!roundOver && t.learnFor < 0 && t.nextStill >= (secondOnly ? windowStillSame : stillNeeded(t)) && knows(s, comes) && knows(s, comes + 1) && same(t.next[0], pairOf(s, comes + 1)) &&
-            !(same(t.next[0], pairOf(s, comes)) && same(t.next[1], pairOf(s, comes + 1))))
-            learn(s, comes + 2, t.next[1]);
-        // The window standing windowRelearn readings, its first place the pair learnt there: its second place is learnt
-        // again from it (windowRelearn).
-        if (t.learnFor < 0 && t.nextStill == windowRelearn && t.nextRead[0] && t.nextRead[1] && !same(t.next[0], t.next[1]) && t.spawnedAt >= 0 &&
-            at - t.spawnedAt <= windowWait + windowRelearn) {
-            const int from = t.shiftedAt > t.spawnedAt + pairGap ? comes + 1 : comes; // (moved on before the next pair)
-            if (knows(s, from) && same(t.next[0], pairOf(s, from))) learn(s, from + 1, t.next[1]);
+        return -1;
+    }
+    // The window of side s has moved on by k from where it stood, standing so from the frame `when`: as many pairs given,
+    // fewer the field has shown already.
+    void moveOn(int s, int k, int64_t when) {
+        SideTrack& t = side[s];
+        t.standAt += k;
+        const bool told = t.standAt > t.dealt; // (it tells of pairs the field has not shown)
+        t.dealt = std::max(t.dealt, t.standAt);
+        if (t.provisional) t.shiftedAt = t.shiftedBefore, t.provisional = false;
+        if (told || when <= t.spawnedAt + pairGap) t.shiftedAt = when;
+        t.stand[0] = t.next[0], t.stand[1] = t.next[1], t.asStood = true, t.standFrom = t.runFrom;
+    }
+    // The pair taken last is pair `pairs` - 1 (the window tells so).
+    void renumber(int s, int pairs) {
+        SideTrack& t = side[s];
+        t.pairs = pairs;
+        if (knows(s, pairs - 1)) t.colors = t.pair.colors = t.lastSeen.colors = pairOf(s, pairs - 1);
+    }
+    // The two pairs the window standing shows, learnt at its number: for sure once it has stood windowLearn readings, and
+    // pairGap frames since it moved on there (on its way it reads as another pair in its second place for a few readings,
+    // and so stands); over a pair learnt for sure otherwise only once it has stood windowOver readings, and more than the
+    // readings that showed that pair so (strengthOf, with the other side's window when it showed it alike).
+    void learnStand(int s) {
+        SideTrack& t = side[s];
+        const bool sure = t.nextStill >= windowLearn && frame - t.standFrom >= pairGap;
+        for (int n = 0; n < 2; ++n) {
+            const int index = t.standAt + n;
+            const juraic::Pair p = t.next[n];
+            if (learnt(s, index) && knownOf[s][size_t(index)] == 1) {
+                int& shown = strengthAt(s, index);
+                if (same(pairsOf[s][size_t(index)], p)) ++shown;
+                else if (t.nextStill >= windowOver && t.nextStill + 1 > strength(s, index)) learn(s, index, p), shown = t.nextStill + 1;
+            } else if (!learnt(s, index) || same(pairsOf[s][size_t(index)], p) || t.nextStill >= windowLearn) {
+                learn(s, index, p, sure);
+                if (sure) strengthAt(s, index) = t.nextStill + 1;
+            }
+            // (what it stands as is what is learnt: a pair learnt as it may be moving is learnt otherwise only once it has
+            //  stood windowLearn readings so - a light over its second place for 3 readings made it stand as two pairs
+            //  alike, and the light gone it was taken as moved on, on the real game)
+            if (learnt(s, index)) t.stand[n] = pairsOf[s][size_t(index)];
         }
+    }
+    // The readings that showed pair `index` as side s learnt it for sure (a pair set from outside: windowOver).
+    int& strengthAt(int s, int index) {
+        if (int(strengthOf[s].size()) <= index) strengthOf[s].resize(size_t(index) + 1, windowOver);
+        return strengthOf[s][size_t(index)];
+    }
+    int strength(int s, int index) const {
+        const auto of = [&](int k, int i) { return i >= 0 && i < int(strengthOf[k].size()) ? strengthOf[k][size_t(i)] : windowOver; };
+        return of(s, index) + (shownAlike(s, index) ? of(1 - s, otherIndex(s, index)) : 0);
+    }
+    // A window whose number is not known (a round not followed from its beginning): numbered after the first pair seen
+    // (anchorFor) once it stands windowLearn readings, moved on at most windowBefore frames before that pair appeared, or
+    // windowWait frames after it.
+    void anchor(int s, int64_t at) {
+        SideTrack& t = side[s];
+        if (t.anchorFor < 0 || t.nextStill < windowLearn || (t.runFrom < t.spawnedAt - windowBefore && at - t.spawnedAt < windowWait)) return;
+        t.standAt = t.anchorFor + 1, t.standKnown = true, t.anchorFor = -1, t.standFrom = t.runFrom, t.stand[0] = t.next[0], t.stand[1] = t.next[1];
+        t.dealt = std::max(t.dealt, t.standAt);
+        learnStand(s);
+        t.asStood = true;
     }
     // The pair in hand, from a clear reading of its side (`field`, without the words; `resting`, its pieces at rest):
     // where it is seen, or let go.
     void followHand(SideTrack& t, const SideRead& field, const juraic::GameField& resting, int64_t at) {
-        // (the window has moved on since the pair in hand appeared: it has been put - out of sight, both pieces in the
-        //  13th and 14th rows, if the screen showed nothing of it: on the real game the next pair, of the same colour
-        //  below, was taken for it still where pairs appear, and nothing played it)
-        if (t.inHand && t.shiftedAt > t.spawnedAt + pairGap) t.inHand = false;
+        // (the window has moved on for another pair since the pair in hand appeared: it has been put - out of sight, both
+        //  pieces in the 13th and 14th rows, if the screen showed nothing of it: on the real game the next pair, of the same
+        //  colour below, was taken for it still where pairs appear, and nothing played it)
+        if (t.inHand && t.dealt > t.pairs) t.inHand = false;
         if (t.inHand) {
             // (gone: the field under it changed - a chain, or a field read wrong -, or something came to rest and
             //  the pair is not seen - it split, or it turns on the ground)
@@ -1116,13 +1208,32 @@ private:
     // No pair seen in hand on side s: a new one looked for in a clear reading of it.
     void lookForPair(int s, const SideRead& field, const juraic::GameField& resting, int64_t at) {
         SideTrack& t = side[s];
-        const int comes = t.pairs + t.unseen; // (the number of the pair that comes)
+        const juraic::PairControl spawn = juraic::spawnPair(timing);
+        const auto atSpawn = [&](const PairSeen& p) { return p.seen && p.at.x == spawn.x && p.at.y == spawn.y && p.at.upper == spawn.upper && p.at.dir == spawn.dir; };
+        // (the number of the pair that comes - or, the window read standing where it moves on to and not taken as moved
+        //  yet, the one it moves on for, when that is seen where pairs appear: the pair seen takes the move. Not for a
+        //  pair seen elsewhere, late: words over the field read as two pieces of its colours under them, in rounds drawn
+        //  so, the pair before it was numbered as it.)
+        int comes = comesOf(t);
+        const int moving = whole(t) && t.standKnown && t.standAt >= 0 && t.nextStill >= 1 ? moveOf(s) : 0;
+        if (moving > 0 && t.standAt + moving - 1 > comes) {
+            const int ahead = t.standAt + moving - 1;
+            if (atSpawn(readPair(field, resting, knows(s, ahead) ? pairOf(s, ahead) : juraic::Pair{}))) comes = ahead;
+        }
+        // (... or the one after that, when the window, two pairs alike in it, moved on for that one 2 * pairGap frames
+        //  or more ago, the field has changed since - it has been put, unseen -, and a pair of that one's colours is seen,
+        //  of not the colours of the one it moved on for: it moved on again, showing two pairs alike as before - on the
+        //  real game a window of 1P read before its ground was, three pairs alike after one put unseen, and the pairs of
+        //  1P were numbered a place behind)
+        bool alikeOn = false;
+        if (t.dealt > t.pairs && comes == t.dealt - 1 && t.standKnown && t.standAt == t.dealt && same(t.stand[0], t.stand[1]) && at - t.shiftedAt >= 2 * pairGap &&
+            t.changedAt > t.shiftedAt && knows(s, comes) && knows(s, comes + 1) && pairOf(s, comes).axis != pairOf(s, comes + 1).axis &&
+            readPair(field, resting, pairOf(s, comes + 1)).seen)
+            ++comes, alikeOn = true;
         // A new pair where pairs appear, on a field that stood still before it with nothing above it in the
         // last clear reading (pieces of a chain falling past the place are no pair).
         const juraic::Pair coming = knows(s, comes) ? pairOf(s, comes) : juraic::Pair{};
         const PairSeen fresh = readPair(field, resting, coming);
-        const juraic::PairControl spawn = juraic::spawnPair(timing);
-        const auto atSpawn = [&](const PairSeen& p) { return p.seen && p.at.x == spawn.x && p.at.y == spawn.y && p.at.upper == spawn.upper && p.at.dir == spawn.dir; };
         const bool there = atSpawn(fresh);
         const bool settled = at - t.changedAt >= stillFrames && t.loose == 0;
         // (hidden by a light as it appeared: seen after it, in the air, both pieces, of the colours of the pair
@@ -1140,20 +1251,24 @@ private:
                                                 : fresh.colors.child == pairOf(s, comes).child);
         const bool settledLate = at - t.changedAt >= stillFrames && (t.loose == 0 || (t.loose <= 4 && looseOver(field, resting, fresh) == 0));
         const bool samePair = t.inHand && resting == t.under && at - t.spawnedAt < pairGap;
-        // (the window has moved on since the last pair appeared, no pair in hand: a pair is coming)
-        const bool due = !t.inHand && t.shiftedAt > t.spawnedAt + pairGap;
+        // (the window has moved on since the last pair appeared, or stands where it moves on to, no pair in hand: a pair is
+        //  coming)
+        const bool movingOn = whole(t) && t.standKnown && t.standAt >= 0 && t.nextStill >= windowStill && moveOf(s) > 0;
+        const bool due = !t.inHand && (t.dealt > t.pairs || movingOn);
         // (... and seen whole, in the air, a column at most beside where pairs appear and not far below, of the colours
         //  of the pair that comes, soon after the window moved on: turned or moved in the frame it appeared - a pair the
         //  driver began before it appeared does so -, it was never shown where pairs appear. Not taken, it was not counted,
         //  the window's move as it appeared was taken for the next pair coming, and the pair lay with no button for 10
         //  frames before it locked, in rounds drawn so.)
         //  (Lying already when first seen so - on a column high near where pairs appear -, it is taken all the same.)
-        const bool movedFirst = due && at - t.shiftedAt <= pairGap && !fresh.childHidden && std::abs(fresh.at.x - spawn.x) <= 1 && fresh.at.y >= juraic::SPAWN_Y - 3;
+        const bool movedFirst = due && at - (t.dealt > t.pairs ? t.shiftedAt : t.stillAt) <= pairGap && !fresh.childHidden && std::abs(fresh.at.x - spawn.x) <= 1 && fresh.at.y >= juraic::SPAWN_Y - 3;
         const bool hidden = !there && !t.inHand && fresh.seen && colours && fresh.at.y >= juraic::SPAWN_Y - 3 &&
                             ((t.unclearAt >= 0 && at - t.unclearAt <= lateFrames && !pairLying(fresh, resting)) || movedFirst);
         // (the first pair of a round: its own pieces read in the reading before, when it was not taken, do not keep
-        //  the field from standing still; seen there before as a pair of other colours than those learnt, it came then)
-        const bool firstOfRound = fromStart && comes == 0;
+        //  the field from standing still; seen there before as a pair of other colours than those learnt, it came then.
+        //  Not once the window has moved on from the first two pairs: they were the round's, and a pair after the first
+        //  may be seen - on rounds drawn so, the first put under a light, the pairs learnt were dropped for the second.)
+        const bool firstOfRound = fromStart && comes == 0 && t.dealt == 0;
         // (seen there in the clear reading before and not taken - pieces above the field then, or other colours
         //  than learnt before the first pair of a round -, it came then: pieces of a chain do not stay there)
         const bool seenBefore = t.strayAt >= 0 && at - t.strayAt <= 2 && fresh.seen && t.strayAxis == fresh.colors.axis;
@@ -1171,8 +1286,10 @@ private:
         //  and then standing as it stood - a light passing over it - it has not moved, and its move that ended as the last
         //  pair appeared is not one since: on the real game pieces of a chain seen there were counted so, and the pairs
         //  after them numbered a place out. A window still moving, or one the last pair seen late left no time to tell,
-        //  has moved as far as it reads.)
-        const bool windowMoved = t.spawnedAt < 0 || (t.nextMovedAt >= t.spawnedAt && (t.late || t.nextStill < windowStill || t.nextChangedAt > t.spawnedAt + pairGap));
+        //  has moved as far as it reads; one standing where it moves on to, or taken as moved on, has moved; so has one of
+        //  two pairs alike standing again, pairGap frames after the pair appeared, as it stood: it moves on so to a third.)
+        const bool alikeAgain = whole(t) && t.standKnown && same(t.stand[0], t.stand[1]) && t.runFrom > t.spawnedAt + pairGap;
+        const bool windowMoved = t.spawnedAt < 0 || (t.nextMovedAt >= t.spawnedAt && (t.late || t.nextStill < windowStill || t.dealt > t.pairs || movingOn || alikeAgain));
         // (first seen there pairGap frames or more after the window last moved, the screen not read clear since then and
         //  the pieces at rest changed since then: the pair that came has been put while the screen was lit - a piece drawn
         //  once there after the light, of its colour, was taken for it in a round drawn and read. Taken when seen there in
@@ -1182,12 +1299,7 @@ private:
         if (((((firstOfRound || seenBefore) ? settledLate || restedSinceSeen : settled) && there && (seenBefore || !overdue)) ||
              (((fresh.childHidden || longAfter) ? settledLate : settled) && hidden)) &&
             !samePair && windowMoved) {
-            // (the window, moved on again since a pair came unseen, not read standing yet: that pair has been
-            //  put, as the window standing tells a reading later - on the real game a pair seen so under the
-            //  words of an all clear was numbered as the one put unseen, and the pairs after it learnt a place
-            //  out. Not when the window last stood fewer than pairGap frames before: on its way it stands for a
-            //  few readings as other pairs, and a pair seen then was counted twice in the records.)
-            if (t.nextStill < windowStill && t.nextRead[0] && t.nextRead[1] && at - t.shiftedAt >= pairGap && movedOn(t) && cameUnseen(t, s)) ++t.unseen;
+            if (alikeOn) t.dealt = std::max(t.dealt, comes + 1), t.standAt = std::max(t.standAt, comes + 1);
             newPair(s, fresh, resting, field, seenBefore ? t.strayAt : at, hidden), late[s] = hidden;
         } else if (there && !samePair) {
             t.strayAt = at, t.strayAxis = fresh.colors.axis;
@@ -1207,29 +1319,33 @@ private:
                     const bool after = !firstOfRound && knows(s, comes + 1) && knows(s, comes + 2) && t.nextRead[0] && same(t.next[0], pairOf(s, comes + 2)) &&
                                        any.colors.axis == pairOf(s, comes + 1).axis && (any.childHidden || any.colors.child == pairOf(s, comes + 1).child);
                     if (after) {
-                        ++t.unseen;
+                        t.dealt = std::max(t.dealt, comes + 2);
                     } else if (firstOfRound) {
-                        for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear();
+                        for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear(), strengthOf[k].clear();
                         shift = 0;
                     } else {
                         const juraic::Cell child = !any.childHidden ? any.colors.child : knows(s, comes) ? pairOf(s, comes).child : any.colors.axis;
-                        // (shown alike by both windows standing, the pair is as learnt: it is the picture of it that was
-                        //  read wrong - on the real game right pairs were learnt again so -, unless it shows the pair after
-                        //  it: then the count is behind, and the colours seen are those of the pair in hand)
+                        // (the window standing since the last pair appeared numbers this one: the picture of it was read
+                        //  wrong, or the pair turned as it appeared - its child read where its axis appears, the axis up
+                        //  out of sight: on the real game 1P turned pairs so, and seven right pairs were learnt again wrong
+                        //  in the records, six of them as the pair after them. Not so, the window was not read standing -
+                        //  under a long light -: the colours of the pair after it seen, the count is behind, and the pair
+                        //  that comes was put unseen; the colours of the pair learnt turned over, the other side's window
+                        //  showing it alike or not at all, it turned.)
+                        const int moved = whole(t) && t.nextStill >= windowStill && t.standKnown && t.standAt >= 0 ? moveOf(s) : -1;
+                        const bool numbered = moved >= 0 && t.standAt + moved == comes + 1 && t.stillAt > t.spawnedAt;
                         const bool nextOne = knows(s, comes + 1) && any.colors.axis == pairOf(s, comes + 1).axis && (any.childHidden || any.colors.child == pairOf(s, comes + 1).child);
-                        // (nor when the colours seen are those of the pair learnt turned over - its child read where its
-                        //  axis appears, the axis up out of sight -, the pair shown alike or not shown at all by the other
-                        //  side's window: on the real game 1P turned pairs so as they appeared, and seven right pairs were
-                        //  learnt again wrong in the records, six of them as the pair after them. Shown otherwise there,
-                        //  the pair learnt may be wrong, and the picture tells its colours as before.)
                         const int other = otherIndex(s, comes);
                         const bool otherLearnt = other >= 0 && other < int(knownOf[1 - s].size()) && knownOf[1 - s][size_t(other)];
                         const bool turned = knows(s, comes) && any.colors.axis == pairOf(s, comes).child &&
                                             (any.childHidden || any.colors.child == pairOf(s, comes).axis) && (shownAlike(s, comes) || !otherLearnt);
-                        if (!turned && (!shownAlike(s, comes) || nextOne)) learn(s, comes, {any.colors.axis, child});
+                        // (shown alike by both windows standing, the pair is as learnt: it is the picture of it that was
+                        //  read wrong - on the real game right pairs were learnt again so)
+                        if (!numbered && !turned && nextOne) t.dealt = std::max(t.dealt, comes + 2);
+                        else if (!turned && !(nextOne && numbered) && !shownAlike(s, comes)) learn(s, comes, {any.colors.axis, child});
                     }
                     if (!after) ++doubts;
-                    newPair(s, any, resting, field, t.strayAt, false, !firstOfRound);
+                    newPair(s, any, resting, field, t.strayAt, false);
                 } else {
                     t.strayAt = at, t.strayAxis = any.colors.axis;
                 }
@@ -1245,31 +1361,33 @@ private:
                 if (!knows(0, 0)) ++doubts;
             } else if (!knows(0, 0)) {
                 for (int k = 0; k < 2; ++k) learn(k, 0, a), learn(k, 1, b);
+                standFirst(a, b);
             } else if (side[0].nextStill >= windowLong && !(same(pairOf(0, 0), a) && knows(0, 1) && same(pairOf(0, 1), b))) {
                 if (knows(0, 1) && same(pairOf(0, 1), a) && side[0].nextStill < roundGap)
                     for (int k = 0; k < 2; ++k) learn(k, 2, b);
                 else {
-                    for (int k = 0; k < 2; ++k) pairsOf[k].assign({a, b}), knownOf[k].assign(2, 1);
+                    for (int k = 0; k < 2; ++k) pairsOf[k].assign({a, b}), knownOf[k].assign(2, 1), strengthOf[k].clear();
                     shift = 0;
+                    standFirst(a, b);
                 }
             }
         }
+    }
+    // Both windows stand before the first pair of the round, at its first two pairs.
+    void standFirst(juraic::Pair a, juraic::Pair b) {
+        for (SideTrack& t : side)
+            if (t.standAt <= 0) {
+                t.stand[0] = a, t.stand[1] = b, t.standKnown = true, t.standAt = 0, t.dealt = 0, t.standFrom = t.runFrom;
+                t.asStood = whole(t) && same(t.next[0], a) && same(t.next[1], b);
+            }
     }
     int64_t emptySince = -1;
     int fullFor = 0; // readings in a row in which the fields were not empty
 
     static bool same(juraic::Pair a, juraic::Pair b) { return a.axis == b.axis && a.child == b.child; }
-    // The window shows the pairs after those it showed standing last, or standing long, moved on by one.
-    static bool movedOn(const SideTrack& t) {
-        const auto from = [&](const juraic::Pair* was) { return same(t.next[0], was[1]) && !(same(t.next[0], was[0]) && same(t.next[1], was[1])); };
-        return (t.stoodKnown && from(t.stood)) || (t.settledKnown && from(t.settled));
-    }
-    // ... and it moved on before, after the last pair seen, and now shows first the pair after the one that came then:
-    // that one has been put unseen.
-    bool cameUnseen(const SideTrack& t, int s) const {
-        const int after = t.pairs + t.unseen + 2;
-        return t.shiftedAt > t.spawnedAt + pairGap && knows(s, after) && same(t.next[0], pairOf(s, after));
-    }
+    // The number of the pair that comes on side t: the one the window moved on for last, not seen yet, or else the one
+    // after the pair taken last.
+    static int comesOf(const SideTrack& t) { return t.dealt > t.pairs ? t.dealt - 1 : t.pairs; }
     // Points that show a piece above the field the pair moves over (or above the pieces at rest), the pair's own left out.
     static int looseOf(const SideRead& read, const SideTrack& t) { return looseOver(read, t.inHand ? t.under : t.resting, t.pair); }
     // ... above `base`, those of `pair` (if seen) left out.
@@ -1345,31 +1463,41 @@ private:
         const int other = otherIndex(s, index);
         if (other >= 0 && other < int(knownOf[1 - s].size()) && knownOf[1 - s][size_t(other)] == 1 && !same(pairsOf[1 - s][size_t(other)], p))
             ++unlike, unlikeFrom = learntAt[1 - s][size_t(other)];
+        strengthAt(s, index) = 1;
         align();
-    }
-    // Readings in a row in which a window must read the same to stand still (windowStillSame).
-    int stillNeeded(const SideTrack& t) const { return t.nextRead[0] && t.nextRead[1] && same(t.next[0], t.next[1]) ? windowStillSame : std::max(windowStill, windowLearn); }
-    bool windowSettled(const SideTrack& t, int64_t at) const {
-        return t.nextStill >= stillNeeded(t) && (t.nextMovedAt >= t.spawnedAt - windowBefore || at - t.spawnedAt >= windowWait);
     }
     void newRound() {
         ++rounds;
-        for (SideTrack& t : side) t.pairs = 0, t.spawnedAt = -1, t.inHand = false, t.learnFor = -1, t.strayAt = -1, t.shiftedAt = -1, t.nextChangedAt = -1, t.settledKnown = false, t.unseenToTell = false, t.unseen = 0, t.words = Words{};
-        for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear(), learntAt[k].clear();
+        for (SideTrack& t : side)
+            t.pairs = t.dealt = t.unseen = 0, t.spawnedAt = t.spawnedBefore = -1, t.inHand = false, t.strayAt = -1, t.shiftedAt = -1, t.provisional = t.asStood = false, t.awayFrom = -1, t.standKnown = false, t.standAt = t.anchorFor = -1,
+            t.words = Words{};
+        for (int k = 0; k < 2; ++k) pairsOf[k].clear(), knownOf[k].clear(), learntAt[k].clear(), strengthOf[k].clear();
         shift = 0;
         roundStart = -1;
         fromStart = true;
     }
-    // (otherColours: taken where pairs appear as other colours than learnt, after the window moved on - it may have come
-    //  long before, turned over as it appeared, not known for the pair it was)
-    void newPair(int s, const PairSeen& fresh, const juraic::GameField& resting, const SideRead& read, int64_t at, bool seenLate = false, bool otherColours = false) {
+    // A new pair seen where pairs appear on side s (seenLate: hidden as it appeared, and seen after). The window moving on
+    // as it appears tells so too: read standing where it moves on to, the move is taken with the pair (windowMove not
+    // waited for); two pairs alike in it, slid (away windowSlide frames or more) and standing as it stood just before the
+    // pair appeared, long after it moved on for a pair not seen, the field changed since - that one put unseen -, it moved
+    // on for this one. The pair is the one the window moved on for last, or, no move of it seen, the one after the pair
+    // taken last.
+    void newPair(int s, const PairSeen& fresh, const juraic::GameField& resting, const SideRead& read, int64_t at, bool seenLate = false) {
         SideTrack& t = side[s];
-        const int index = t.pairs + t.unseen; // (after the pairs put unseen)
-        const int64_t before = t.spawnedAt;   // (the pair before it appeared then)
-        // (under a light over the window as it moves on again, it cannot tell here that a pair was put unseen: readWindow,
-        //  once it stands. On the real game the pairs after such a one were learnt a place out.)
-        t.unseenToTell = t.nextStill < windowStill && !(t.nextRead[0] && t.nextRead[1]) && at - t.shiftedAt >= pairGap && t.shiftedAt > t.spawnedAt + pairGap;
-        t.pairs = index + 1, t.unseen = 0, t.missedFor = 0;
+        if (whole(t) && t.standKnown && t.standAt >= 0 && !seenLate) {
+            const int k = moveOf(s);
+            if (k > 0 && t.nextStill >= 1) moveOn(s, k, t.nextStill >= windowStill ? t.stillAt : at);
+            else if (k == 0 && t.asStood && same(t.stand[0], t.stand[1]) && t.dealt > t.pairs && t.runFrom >= at - windowBefore && t.runFrom - t.awayFrom >= windowSlide &&
+                     t.awayFrom > t.shiftedAt + pairGap && t.changedAt > t.shiftedAt)
+                moveOn(s, 1, at);
+            // (... and, no pair to come, away since the pair before was taken: it moved on for this one to a third pair
+            //  alike - not taken so, the pair after the next was not learnt as the pair appeared, in rounds drawn so)
+            else if (k == 0 && t.asStood && same(t.stand[0], t.stand[1]) && t.dealt == t.pairs && t.runFrom > t.spawnedAt)
+                moveOn(s, 1, at);
+        }
+        const int index = comesOf(t);
+        t.pairs = index + 1, t.dealt = std::max(t.dealt, t.pairs), t.missedFor = 0;
+        t.spawnedBefore = t.spawnedAt;
         t.spawnedAt = at;
         t.late = seenLate;
         t.inHand = true;
@@ -1384,20 +1512,14 @@ private:
             //  a window that may have been moving does; not known, the AI would wait for it: observeWith)
             learn(s, index, fresh.colors, false);
         }
-        // (the window has moved on: the two pairs after this one, sure once it stands still - until then as it reads.
-        //  Seen late, a window that moved on since the pair before it appeared and stands shows them now: waited for, it
-        //  moved on again for the next pair, not seen yet, and its pairs were learnt a place before their own on the
-        //  real game. So too a pair taken as other colours, turned over as it appeared and seen so under a light. Not when
-        //  the window shows first another pair than the one learnt after this one: it may be the move of the pair before,
-        //  late under a light.)
-        const bool shownSince = (seenLate || otherColours) && before >= 0 && t.nextStill >= stillNeeded(t) && t.nextChangedAt > before + pairGap &&
-                                (!knows(s, index + 1) || same(read.next[0], pairOf(s, index + 1)));
-        if (shownSince || windowSettled(t, at)) {
-            learn(s, index + 1, read.next[0]), learn(s, index + 2, read.next[1]);
-        } else {
+        // (the two pairs after it, as the window standing at its number shows them - as it may be moving, until it has
+        //  stood windowLearn readings: learnStand. A window whose number is not known is numbered after this pair: anchor.)
+        if (t.standAt == index + 1 && whole(t) && moveOf(s) == 0) {
+            learnStand(s);
+        } else if (t.standAt < 0) {
             for (int n = 0; n < 2; ++n)
                 if (read.nextRead[n]) learn(s, index + 1 + n, read.next[n], false);
-            t.learnFor = index;
+            t.anchorFor = index;
         }
         spawned[s] = true;
         // The first pair of a round is seen in its frame firstSpawn (game/player.h startPlayer).

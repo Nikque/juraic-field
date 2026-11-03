@@ -847,7 +847,8 @@ static void testPairsAfterLight() {
     Reading rest = window(empty, {3, 1}, {2, 2});
     rest.side[1].point[0][0] = rest.side[1].point[0][1] = 1, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 5;
     for (int f = 0; f < 30; ++f) t.step(rest, at++);
-    for (int f = 0; f < 5; ++f) t.step(window(rest, {2, 2}, {4, 5}), at++);
+    // (no pair seen with it: taken as moved on once it has stood windowMove readings)
+    for (int f = 0; f < t.windowMove + 1; ++f) t.step(window(rest, {2, 2}, {4, 5}), at++);
     check(t.side[1].pairs == 1 && is(t, 3, {4, 5}), "the pair the window shows as it moves on before a pair appears is not learnt");
     // Garbage falls (pieces above the field), under a light it comes to rest, and the next pair (3 1) is first seen
     // after the light a cell and a half below where pairs appear, both pieces showing.
@@ -881,7 +882,9 @@ static void testPairsAfterLight() {
     const int64_t came = at;
     t.step(next, at++);
     t.step(next, at++);
-    check(t.side[1].pairs == 3 && t.side[1].inHand && t.side[1].spawnedAt == came, "a pair where pairs appear, a piece above the field in the reading before, is not seen in its second reading");
+    check(t.side[1].pairs == 3 && t.side[1].inHand && t.side[1].spawnedAt == came, "a pair where pairs appear, a piece above the field in the reading before, is not seen in its second reading (" +
+                                                                                      std::to_string(t.side[1].pairs) + " pairs, in hand " + std::to_string(t.side[1].inHand) + ", seen " +
+                                                                                      std::to_string(t.side[1].spawnedAt - came) + " frames after it came)");
     std::cout << "a pair first seen after a light, both pieces showing, is the pair that came; the pair the window shows as it moves on is learnt\n";
 }
 
@@ -948,8 +951,10 @@ static void testPairsNeverLeft() {
     }
     // (the fifth column twelve high)
     for (int k = 0; k < 24; ++k) empty.side[1].point[4][k] = k / 2 % 2 ? 1 : 2;
+    // (once the round has begun, 1P's window not read: 2P's alone shows the pairs, and may be read wrong)
     const auto window = [](Reading r, Pair next, Pair after) {
         for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        r.side[0].nextRead[0] = r.side[0].nextRead[1] = false;
         return r;
     };
     int64_t at = 50000;
@@ -4472,6 +4477,28 @@ static void testWordsInAStack() {
     check(h[column] == 12 && t.side[1].loose == 0 && t.side[1].pairs == before,
           "a column twelve high through the words, a yellow piece of it where they read yellow: " + std::to_string(h[column]) + " pieces at rest, " +
               std::to_string(t.side[1].loose) + " points in the air, " + std::to_string(t.side[1].pairs - before) + " pairs counted");
+    // So too with the piece above it yellow, where the words do not read yellow: the two read as one run of yellow, its
+    // lowest points the words'. (Taken for the words, the two pieces above them stood over a gap, and were taken for a
+    // pair seen late, of the colours of the pair that came, in a round drawn so.)
+    {
+        int col = -1;
+        for (int x = 0; x < W && col < 0; ++x)
+            if (WORDS[0][x] == '4' && WORDS[1][x] == '4' && !(WORDS[2][x] == '4' && WORDS[3][x] == '4')) col = x;
+        check(col >= 0, "the words have no cell of yellow at both its points under one that is not");
+        Tracker u;
+        int64_t uat = 1000;
+        for (int k = 0; k < 40; ++k) u.step(empty, uat++);
+        for (int k = 0; k < 80; ++k) u.step(withWords(empty), uat++);
+        Reading high = empty;
+        for (int y = 0; y < 11; ++y) {
+            const Cell c = y == 8 || y == 9 ? Cell(4) : Cell(1 + 2 * (y % 2));
+            high.side[1].point[col][2 * y] = high.side[1].point[col][2 * y + 1] = c;
+        }
+        for (int k = 0; k < 30; ++k) u.step(withWords(high), uat++);
+        u.side[1].resting.heights(h);
+        check(h[col] == 11 && u.side[1].loose == 0, "a column through the words, two yellow pieces of it the lower where they read yellow: " + std::to_string(h[col]) +
+                                                        " pieces at rest, " + std::to_string(u.side[1].loose) + " points in the air");
+    }
     std::cout << "a column stacked through the words: its piece where the words read alike is a piece\n";
 }
 
@@ -4680,7 +4707,7 @@ static void testNextRoundsWindow() {
     run(ended, 4);
     Reading next = ended;
     next.side[0].nextRead[0] = next.side[1].nextRead[0] = false, next.side[0].next[0] = next.side[1].next[0] = {8, 8};
-    run(next, 2), run(ended, t.windowStillSame + 4);
+    run(next, 2), run(ended, t.windowOver + 4);
     check(t.rounds == rounds, "the next round is taken to begin too soon for this test");
     const Pair kept = t.pairOf(1, 3);
     check(kept.axis == 2 && kept.child == 4, "a pair of the round that ended was learnt from the window of the next one");
@@ -4719,8 +4746,9 @@ static void testShortStandInTheWay() {
     Reading wayside = put;
     wayside.side[1].next[0] = {3, 3}, wayside.side[1].next[1] = {3, 2};
     run(wayside, 3);
+    // (moved on with no pair seen: taken once it has stood windowMove readings)
     for (SideRead& side : put.side) side.next[0] = {2, 4}, side.next[1] = {4, 5};
-    run(put, 3);
+    run(put, t.windowMove + 1);
     check(t.side[1].unseen == 1, "a pair put unseen is not counted past a window standing on its way: " + std::to_string(t.side[1].unseen));
     std::cout << "a window that stood a few readings as a pair it never showed does not hide its move from the one that stood long\n";
 }
@@ -4766,7 +4794,8 @@ static void testBothWindowsOverOnePicture() {
         else check(now.axis == 4, "a pair the windows showed otherwise was not learnt again from a picture of it");
     }
     {
-        // Shown as the pair after it: the count is behind, and the colours seen are those of the pair in hand.
+        // Shown as the pair after it, the window not read since it moved on for the pair before it (a light over it): the
+        // count is behind - that one was put unseen -, and the colours seen are those of the pair in hand.
         Tracker t;
         int64_t at = 50000;
         const auto run = [&](const Reading& r, int frames) {
@@ -4783,11 +4812,15 @@ static void testBothWindowsOverOnePicture() {
         for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 5 : 1;
         run(put, 5);
         for (SideRead& side : put.side) side.next[0] = {3, 3}, side.next[1] = {2, 4};
-        run(put, 4);
-        Reading ahead = put;
+        run(put, t.windowMove + 3);
+        Reading lit = put;
+        lit.side[1].nextRead[0] = lit.side[1].nextRead[1] = false;
+        run(lit, 20);
+        Reading ahead = lit;
         ahead.side[1].point[SPAWN_X][23] = 3;
         run(ahead, 2);
-        check(t.pairOf(1, 1).axis == 3, "a pair seen as the pair after the one learnt, the count behind, did not take the colours seen");
+        check(t.side[1].pairs == 3 && t.side[1].colors.axis == 3 && t.side[1].colors.child == 3 && t.pairOf(1, 1).axis == 1 && t.pairOf(1, 1).child == 2,
+              "a pair seen as the pair after the one learnt, the count behind, is not taken for that pair: " + std::to_string(t.side[1].pairs) + " pairs");
     }
     for (const bool otherLearnt : {true, false}) {
         // Seen with its child hidden, of the colour of the child learnt: the pair may have been turned over as it
@@ -4853,7 +4886,7 @@ static void testSecondPlaceLit() {
         Reading put = base;
         for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 5 : 1;
         if (!alike) put.side[1].next[0] = {3, 3}, put.side[1].next[1] = {2, 4}; // (moved on before the next pair appears)
-        run(put, t.windowStillSame + 12);
+        run(put, t.windowOver + 12);
         const bool knew = t.knows(1, 3);
         const Pair was = knew ? t.pairOf(1, 3) : Pair{};
         // The second place lit: read as 4 4 for four readings, then as it was.
@@ -4867,7 +4900,7 @@ static void testSecondPlaceLit() {
             // The window does move on as the next pair comes: its second place is learnt once it stands.
             Reading moved = put;
             moved.side[1].next[1] = {3, 3};
-            run(moved, t.windowStillSame + 2);
+            run(moved, t.windowOver + 2);
             check(t.knows(1, 3) && t.pairOf(1, 3).axis == 3 && t.pairOf(1, 3).child == 3 && t.relearnt[1] == 0, "two pairs alike moving on are not learnt");
         }
     }
@@ -4960,6 +4993,250 @@ static void testPairAsTheLastPieceRests() {
     run(seen, 2);
     check(t.side[1].pairs == 2 && t.side[1].inHand, "a pair seen twice where pairs appear, as the last piece of the pair before came to rest, is not taken");
     std::cout << "a pair seen where pairs appear as the pair before comes to rest is taken from the reading after\n";
+}
+
+// A window on its way, or under a light, reads for a few readings as another window and then as it stood: as the window
+// moved on by one with its second place read wrong (first the pair it showed second), as two pairs it never showed, or,
+// two pairs alike in it, as its first pair and another one. It has not moved on: no pair is coming, none was put unseen,
+// and nothing of it is learnt. (On the real game a window read so for up to 5 readings in a row, 9 as pairs it never
+// showed; taken as a move after 2, the pair after the next was learnt as the one read, and learnt again as the window
+// moved on.) The window moving on as the next pair appears is taken.
+static void testSlidingAsAnotherWindow() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 1}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    for (const int kind : {0, 1, 2}) {
+        Tracker t;
+        int64_t at = 50000;
+        const auto run = [&](const Reading& r, int frames) {
+            for (int k = 0; k < frames; ++k) t.step(r, at++);
+        };
+        const std::string what = kind == 0 ? "moved on with its second place read wrong" : kind == 1 ? "as pairs it never showed" : "two pairs alike, its second place read wrong";
+        // (pairs 1 and 2: 1 2 and 3 3, or 3 3 twice)
+        const Pair one = kind == 2 ? Pair{3, 3} : Pair{1, 2}, two{3, 3};
+        Reading before = empty;
+        for (SideRead& side : before.side) side.next[1] = one;
+        run(before, t.roundGap + 5);
+        Reading base = empty;
+        for (SideRead& side : base.side) side.next[0] = one, side.next[1] = two;
+        Reading first = base;
+        first.side[1].point[SPAWN_X][23] = 5;
+        run(first, t.pairGap + 3);
+        check(t.side[1].pairs == 1, "the pair before the window read as another is not counted (" + what + ")");
+        Reading put = base;
+        for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 5 : 1;
+        run(put, 20);
+        Reading way = put;
+        way.side[1].next[0] = kind == 1 ? Pair{4, 4} : two, way.side[1].next[1] = kind == 1 ? Pair{1, 5} : Pair{4, 4};
+        Reading unread = put;
+        unread.side[1].nextRead[0] = unread.side[1].nextRead[1] = false;
+        run(unread, 2), run(way, 5), run(unread, 2), run(put, 20);
+        check(t.side[1].unseen == 0 && t.side[1].shiftedAt <= t.side[1].spawnedAt + t.pairGap, "a window read a few readings " + what + " was taken for a move of it");
+        check(t.relearnt[1] == 0 && !(t.knows(1, 3) && t.pairOf(1, 3).axis == 4), "a pair was learnt from a window read a few readings " + what);
+        // The window moves on, and pair 1 appears.
+        for (SideRead& side : put.side) side.next[0] = two, side.next[1] = {2, 4};
+        run(put, 4);
+        Reading next = put;
+        next.side[1].point[SPAWN_X][23] = one.axis;
+        run(next, 10);
+        check(t.side[1].pairs == 2 && t.side[1].unseen == 0 && t.side[1].inHand, "the pair after a window read " + what + " is not counted: " + std::to_string(t.side[1].pairs) + "+" + std::to_string(t.side[1].unseen));
+        check(t.knows(1, 3) && t.pairOf(1, 3).axis == 2 && t.pairOf(1, 3).child == 4 && t.relearnt[1] == 0, "the pairs after a window read " + what + " are not learnt");
+    }
+    std::cout << "a window read a few readings as another window has not moved on\n";
+}
+
+// The window before a round, and as the first pair comes it slides and reads for four readings as moved on with its second
+// place read wrong, then moves on and the first pair appears: it moved on by one, and the pair is the first. (On the real
+// game, read before the window's ground was read, the first pair was numbered as the second, and the pairs of 1P a place
+// out until the two windows were set side by side again.)
+static void testFirstWindowSlidingAsMoved() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {4, 5}, side.next[1] = {3, 3};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    // (the round taken to begin, and the window learnt, in the reading before it slides)
+    run(empty, t.roundGap + 1);
+    check(t.fromStart && t.knows(1, 0) && t.knows(1, 1), "the window before the round is not learnt");
+    Reading sliding = empty;
+    sliding.side[1].nextRead[0] = false;
+    run(sliding, 2);
+    Reading way = empty;
+    way.side[1].next[0] = {3, 3};
+    run(way, 4);
+    Reading moved = empty;
+    for (SideRead& side : moved.side) side.next[0] = {3, 3}, side.next[1] = {5, 3};
+    run(moved, 1);
+    Reading first = moved;
+    first.side[1].point[SPAWN_X][23] = 4;
+    run(first, 3);
+    check(t.side[1].pairs == 1 && t.side[1].unseen == 0, "the first pair after a window read on its way as moved on is not counted as the first: " + std::to_string(t.side[1].pairs) + "+" +
+                                                             std::to_string(t.side[1].unseen));
+    check(t.side[1].colors.axis == 4 && t.side[1].colors.child == 5 && t.knows(1, 2) && t.pairOf(1, 2).axis == 5, "the pairs after the first are not learnt from the window that moved on");
+    std::cout << "a window read on its way as moved on before the first pair: the first pair is counted as the first\n";
+}
+
+// Three pairs alike in a row, the first of them put unseen under a light: the window, two pairs alike, slides on as the
+// next pair comes and stands as it stood, and that pair is seen where pairs appear. It is the pair after the one put
+// unseen - the window moved on long before for that one -, not that one. (On the real game it was taken for the pair put
+// unseen, and the side's pairs were numbered a place behind to the end of the round.)
+static void testThreeAlikeOneUnseen() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 1}, side.next[1] = {2, 1};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    run(empty, t.roundGap + 5);
+    // (pair 0: 5 1; pair 1: 2 1; pairs 2, 3 and 4: 2 3)
+    Reading base = empty;
+    for (SideRead& side : base.side) side.next[0] = {2, 1}, side.next[1] = {2, 3};
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 5;
+    run(first, t.pairGap + 3);
+    check(t.side[1].pairs == 1, "the pair before three alike is not counted");
+    Reading put = base;
+    for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 5 : 1;
+    run(put, 20);
+    // Pair 1 comes under a light over the field and is put unseen; the window slides on to the pairs alike.
+    Reading sliding = put;
+    sliding.side[1].nextRead[0] = sliding.side[1].nextRead[1] = false;
+    run(sliding, 6);
+    Reading alike = put;
+    alike.side[1].next[0] = alike.side[1].next[1] = {2, 3};
+    Reading lit = alike;
+    lit.side[1].unsure = 4;
+    run(lit, 30);
+    Reading put1 = alike;
+    put1.side[1].point[1][0] = put1.side[1].point[1][1] = 2, put1.side[1].point[1][2] = put1.side[1].point[1][3] = 1;
+    run(put1, 20);
+    check(t.side[1].pairs == 1 && t.side[1].pairs + t.side[1].unseen == 1, "pair 1, put unseen, is counted before the window moves on again");
+    // Pair 2 comes: the window slides and stands as it stood, and the pair is seen.
+    Reading sliding1 = put1;
+    sliding1.side[1].nextRead[0] = sliding1.side[1].nextRead[1] = false;
+    run(sliding1, 6), run(put1, 1);
+    Reading next = put1;
+    next.side[1].point[SPAWN_X][23] = 2;
+    run(next, 10);
+    check(t.side[1].pairs == 3 && t.side[1].unseen == 0 && t.side[1].inHand, "the pair after one put unseen, three alike in a row, is not counted as pair 2: " + std::to_string(t.side[1].pairs) + "+" + std::to_string(t.side[1].unseen));
+    check(t.pairOf(1, 1).axis == 2 && t.pairOf(1, 1).child == 1 && t.relearnt[1] == 0, "the pair put unseen was learnt again from the one after it");
+    check(t.side[1].colors.axis == 2 && t.side[1].colors.child == 3, "the pair in hand is not the one after the pair put unseen");
+    std::cout << "three pairs alike in a row, one put unseen: the window moving on unseen is counted when the next pair appears as it stands\n";
+}
+
+// The window moved on as a pair appeared, and soon after a light over its second place reads it for three readings as the
+// pair of its first place: it does not stand as two pairs alike, and reading as it stood once the light is gone it has not
+// moved on. (On the real game it was taken as moved on, and the pairs of 1P were numbered a place ahead.)
+static void testSecondPlaceLitAsAlike() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 1}, side.next[1] = {1, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    run(empty, t.roundGap + 5);
+    Reading base = empty;
+    for (SideRead& side : base.side) side.next[0] = {1, 2}, side.next[1] = {3, 3};
+    run(base, 2);
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 5;
+    run(first, 3);
+    // (its second place not read until pairGap frames after it moved on, then lit)
+    Reading unread = first;
+    unread.side[1].nextRead[1] = false;
+    run(unread, t.pairGap);
+    Reading lit = first;
+    lit.side[1].next[1] = {1, 2};
+    run(lit, 3);
+    run(first, t.pairGap + 10);
+    check(t.side[1].pairs == 1 && t.side[1].unseen == 0 && t.side[1].dealt == 1 && t.side[1].inHand, "a light over the second place of a window just moved on made it move on again: " +
+                                                                                                         std::to_string(t.side[1].pairs) + " pairs, " + std::to_string(t.side[1].dealt) + " given");
+    check(t.knows(1, 2) && t.pairOf(1, 2).axis == 3 && t.pairOf(1, 2).child == 3, "the pair after the next was learnt from a light over the second place");
+    std::cout << "a light over the second place of a window just moved on: it stays where it moved on to\n";
+}
+
+// Three pairs alike in a row after a pair put unseen, the window showing two of them and reading so as it moves on (a
+// window read before its ground was, sliding, read as two pairs alike): the pair seen late, after a light, of the colours
+// of the pair after the one the window moved on for long before - not of that one -, is that pair after it; the one before
+// was put unseen, and the window moved on unseen. (Taken for none, the pairs of 1P were numbered a place behind on the
+// real game until the two windows were set side by side again.)
+static void testAlikeWindowMovedUnseen() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {5, 1}, side.next[1] = {1, 4};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    run(empty, t.roundGap + 5);
+    // (pair 0: 5 1; pair 1: 1 4; pairs 2, 3 and 4: 3 3; pair 5: 5 5)
+    Reading base = empty;
+    for (SideRead& side : base.side) side.next[0] = {1, 4}, side.next[1] = {3, 3};
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 5;
+    run(first, t.pairGap + 3);
+    Reading put = base;
+    for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 5 : 1;
+    run(put, 20);
+    // Pair 1 comes, the field lit, and is put unseen; the window moves on to the pairs alike.
+    Reading alike = put;
+    for (SideRead& side : alike.side) side.next[0] = side.next[1] = {3, 3};
+    Reading lit = alike;
+    lit.side[1].unsure = 4;
+    run(lit, 30);
+    Reading put1 = alike;
+    put1.side[1].point[1][0] = put1.side[1].point[1][1] = 1, put1.side[1].point[1][2] = put1.side[1].point[1][3] = 4;
+    run(put1, 40);
+    // Pair 2 comes, the window reading as it stood; a light, and the pair is seen in the air after it.
+    Reading lit2 = put1;
+    lit2.side[1].unsure = 4;
+    run(lit2, 10);
+    Reading late = put1;
+    late.side[1].point[SPAWN_X][18] = late.side[1].point[SPAWN_X][19] = late.side[1].point[SPAWN_X][20] = late.side[1].point[SPAWN_X][21] = 3;
+    run(late, 3);
+    check(t.side[1].pairs == 3 && t.side[1].unseen == 0 && t.side[1].inHand && t.side[1].colors.axis == 3,
+          "a pair seen late of the colours of the pair after the one the window moved on for, two pairs alike in it, is not that pair: " + std::to_string(t.side[1].pairs) + "+" +
+              std::to_string(t.side[1].unseen));
+    check(t.pairOf(1, 1).axis == 1 && t.pairOf(1, 1).child == 4 && t.relearnt[1] == 0, "the pair put unseen was learnt again from the one seen late");
+    // It is put; the window moves on to 3 3 / 5 5 and pair 3 appears.
+    Reading put2 = put1;
+    put2.side[1].point[2][0] = put2.side[1].point[2][1] = put2.side[1].point[2][2] = put2.side[1].point[2][3] = 3;
+    run(put2, 20);
+    for (SideRead& side : put2.side) side.next[0] = {3, 3}, side.next[1] = {5, 5};
+    run(put2, 4);
+    Reading next = put2;
+    next.side[1].point[SPAWN_X][23] = 3;
+    run(next, 3);
+    check(t.side[1].pairs == 4 && t.knows(1, 5) && t.pairOf(1, 5).axis == 5, "the pair after it is not numbered after it: " + std::to_string(t.side[1].pairs) + " pairs");
+    std::cout << "three pairs alike after a pair put unseen, the window not showing its move: a pair seen late of the next colours is the next pair\n";
 }
 
 // The real table: a point of a window that shows the window's own ground, or the edges of two pieces of colours whose mean
@@ -5465,11 +5742,13 @@ static void testLearntAgainNoted() {
         int64_t at = 70000;
         for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
         check(t.relearnt[0] == 0 && t.relearnt[1] == 0 && t.unlike == 0, "pairs read alike are noted as learnt again");
+        // (the window moved on, no pair seen: taken once it has stood windowMove readings, its pairs sure pairGap frames
+        //  after it moved on; learnt otherwise once it has stood longer than it showed them)
         const int64_t wrong = at;
-        for (int f = 0; f < 5; ++f) t.step(window(0, {3, 3}, {4, 1}), at++);
+        for (int f = 0; f < t.windowMove + t.pairGap; ++f) t.step(window(0, {3, 3}, {4, 1}), at++);
         const int64_t learntAt = t.learntAt[0][2];
         check(learntAt >= wrong && learntAt < at, "the frame a pair was learnt in is not kept");
-        for (int f = 0; f < 5; ++f) t.step(window(0, {3, 3}, {2, 1}), at++);
+        for (int f = 0; f < 30; ++f) t.step(window(0, {3, 3}, {2, 1}), at++);
         check(t.relearnt[0] == 1 && t.relearnt[1] == 0 && t.doubts == 1, "a pair learnt otherwise is not noted for its side");
         check(t.relearntFrom[0] == learntAt, "a pair learnt otherwise does not give the frame it was learnt wrong in");
         check(t.learntAt[0][2] > learntAt, "the frame a pair was learnt in is not that of the last time");
@@ -5478,11 +5757,11 @@ static void testLearntAgainNoted() {
         Tracker t;
         int64_t at = 80000;
         for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
-        for (int f = 0; f < 5; ++f) t.step(window(0, {3, 3}, {4, 1}), at++);
+        for (int f = 0; f < t.windowMove + t.pairGap; ++f) t.step(window(0, {3, 3}, {4, 1}), at++);
         const int64_t first = t.learntAt[0][2];
         Reading both = window(0, {3, 3}, {4, 1});
         both.side[1].next[0] = {3, 3}, both.side[1].next[1] = {2, 1};
-        for (int f = 0; f < 5; ++f) t.step(both, at++);
+        for (int f = 0; f < t.windowMove + t.pairGap; ++f) t.step(both, at++);
         check(t.unlike == 1 && t.unlikeFrom == first, "a pair the two windows show otherwise is not noted with the frame the other showed it in");
     }
     std::cout << "a pair learnt again or shown otherwise by the other window is noted with its frames\n";
@@ -5613,8 +5892,10 @@ static void testWindowFilm(const std::string& folder) {
             }
         };
         show({5, 1}, {3, 3}, t.roundGap + 5);
-        show({3, 3}, {4, 1}, 5);
-        show({3, 3}, {2, 1}, 5);
+        // (moved on, no pair seen: its pairs sure windowMove + pairGap readings on; learnt otherwise by a window standing
+        //  longer than it showed them)
+        show({3, 3}, {4, 1}, t.windowMove + t.pairGap);
+        show({3, 3}, {2, 1}, 30);
         show({2, 2}, {2, 2}, 4);
         show({2, 1}, {4, 4}, 40);
         show({4, 4}, {4, 4}, 40);
@@ -5623,8 +5904,10 @@ static void testWindowFilm(const std::string& folder) {
         std::map<std::string, int> kinds;
         for (const auto& e : std::filesystem::directory_iterator(dir / "noted"))
             if (e.path().extension() == ".bmp") ++kinds[e.path().stem().string().substr(e.path().stem().string().find('-') + 1)];
-        check(kinds["relearnt"] == 1 && kinds["sliding"] == 1 && kinds["unlike"] == 0 && kinds["doubt"] == 0 && kinds["unseen"] == 0,
-              "the tracker's notes ask for other sheets: relearnt " + std::to_string(kinds["relearnt"]) + ", sliding " + std::to_string(kinds["sliding"]));
+        // (the window moving on three times more with no pair seen: the pairs before were put unseen, a sheet each)
+        check(kinds["relearnt"] == 1 && kinds["sliding"] == 1 && kinds["unlike"] == 0 && kinds["doubt"] == 0 && kinds["unseen"] == 3,
+              "the tracker's notes ask for other sheets: relearnt " + std::to_string(kinds["relearnt"]) + ", sliding " + std::to_string(kinds["sliding"]) + ", unlike " +
+                  std::to_string(kinds["unlike"]) + ", doubt " + std::to_string(kinds["doubt"]) + ", unseen " + std::to_string(kinds["unseen"]));
     }
     std::filesystem::remove_all(dir);
     // The picture the real game gives, as long as the capture's thread takes for one.
@@ -5748,6 +6031,11 @@ int main(int argc, char** argv) {
         testSecondPlaceLit();
         testOtherColoursTakenLate();
         testPairAsTheLastPieceRests();
+        testSlidingAsAnotherWindow();
+        testThreeAlikeOneUnseen();
+        testFirstWindowSlidingAsMoved();
+        testAlikeWindowMovedUnseen();
+        testSecondPlaceLitAsAlike();
         testWindowGround();
         testLateWindowNotWaited();
         testWindowFilm(argc > 1 ? argv[1] : ".");
