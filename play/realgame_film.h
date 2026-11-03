@@ -31,7 +31,7 @@ public:
     // for a few readings, a pair counted put unseen (SideTrack::unseen).
     enum Kind { RELEARNT, UNLIKE, DOUBT, SLIDING, UNSEEN, KINDS };
     static constexpr const char* KIND_NAMES[KINDS] = {"relearnt", "unlike", "doubt", "sliding", "unseen"};
-    static constexpr int MOST_SHEETS[KINDS] = {50, 30, 20, 30, 30};
+    static constexpr int MOST_SHEETS[KINDS] = {100, 100, 50, 100, 100};
     struct Box {
         int x = 0, y = 0, w = 0, h = 0;
     };
