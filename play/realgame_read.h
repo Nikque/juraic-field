@@ -1068,9 +1068,14 @@ private:
         // The window moves on before the next pair appears (Timing::nextShown): it shows the second of the two it
         // showed, and the pair after them, which is learnt then (the AI waiting for its pair is shown it then, as
         // in a match of this program). (Not with no pieces at rest on either field and no pair in hand after pairs have
-        // come: the window is that of the next round, which has not been taken to begin.)
+        // come: the window is that of the next round, which has not been taken to begin.) Its first place as the window
+        // that stood long showed it, only its second place changed, it is taken once it has stood windowStillSame readings:
+        // a light over the second place reads as another pair there for a few readings and stands so (on the real game
+        // the pair after the next was learnt as the lit one, with no pair coming, two pairs alike in a row first and a
+        // window that had moved on before its pair appeared too).
         const bool roundOver = (side[0].pairs || side[1].pairs) && side[0].resting.f.empty() && side[1].resting.f.empty() && !side[0].inHand && !side[1].inHand;
-        if (!roundOver && t.learnFor < 0 && t.nextStill >= stillNeeded(t) && knows(s, comes) && knows(s, comes + 1) && same(t.next[0], pairOf(s, comes + 1)) &&
+        const bool secondOnly = t.settledKnown && same(t.next[0], t.settled[0]);
+        if (!roundOver && t.learnFor < 0 && t.nextStill >= (secondOnly ? windowStillSame : stillNeeded(t)) && knows(s, comes) && knows(s, comes + 1) && same(t.next[0], pairOf(s, comes + 1)) &&
             !(same(t.next[0], pairOf(s, comes)) && same(t.next[1], pairOf(s, comes + 1))))
             learn(s, comes + 2, t.next[1]);
         // The window standing windowRelearn readings, its first place the pair learnt there: its second place is learnt
@@ -1152,6 +1157,10 @@ private:
         // (seen there in the clear reading before and not taken - pieces above the field then, or other colours
         //  than learnt before the first pair of a round -, it came then: pieces of a chain do not stay there)
         const bool seenBefore = t.strayAt >= 0 && at - t.strayAt <= 2 && fresh.seen && t.strayAxis == fresh.colors.axis;
+        // (... and the field as it was then: it stood for the two readings that showed it - the last piece of the pair
+        //  before, split, came to rest in the first of them. Waited for a reading more, such a pair was not taken before a
+        //  light on the real game, and nothing played it for 12 frames.)
+        const bool restedSinceSeen = seenBefore && t.changedAt <= t.strayAt && (t.loose == 0 || (t.loose <= 4 && looseOver(field, resting, fresh) == 0));
         // (seen late, both pieces showing, 2 * pairGap frames or more after the last pair appeared: its own
         //  pieces read in the reading before do not keep the field from standing still either - on the real game
         //  such a pair, after garbage fell under a light, was taken for none to the end of the round)
@@ -1170,7 +1179,7 @@ private:
         //  two clear readings in a row. With the field as it was, a pair seen there once after a light, which then lay
         //  where it appeared, was the last of a round on the real game.)
         const bool overdue = !firstOfRound && at - t.nextMovedAt >= pairGap && t.unclearAt > t.nextMovedAt && t.changedAt > t.nextMovedAt;
-        if (((((firstOfRound || seenBefore) ? settledLate : settled) && there && (seenBefore || !overdue)) ||
+        if (((((firstOfRound || seenBefore) ? settledLate || restedSinceSeen : settled) && there && (seenBefore || !overdue)) ||
              (((fresh.childHidden || longAfter) ? settledLate : settled) && hidden)) &&
             !samePair && windowMoved) {
             // (the window, moved on again since a pair came unseen, not read standing yet: that pair has been
@@ -1220,7 +1229,7 @@ private:
                         if (!turned && (!shownAlike(s, comes) || nextOne)) learn(s, comes, {any.colors.axis, child});
                     }
                     if (!after) ++doubts;
-                    newPair(s, any, resting, field, t.strayAt);
+                    newPair(s, any, resting, field, t.strayAt, false, !firstOfRound);
                 } else {
                     t.strayAt = at, t.strayAxis = any.colors.axis;
                 }
@@ -1351,7 +1360,9 @@ private:
         roundStart = -1;
         fromStart = true;
     }
-    void newPair(int s, const PairSeen& fresh, const juraic::GameField& resting, const SideRead& read, int64_t at, bool seenLate = false) {
+    // (otherColours: taken where pairs appear as other colours than learnt, after the window moved on - it may have come
+    //  long before, turned over as it appeared, not known for the pair it was)
+    void newPair(int s, const PairSeen& fresh, const juraic::GameField& resting, const SideRead& read, int64_t at, bool seenLate = false, bool otherColours = false) {
         SideTrack& t = side[s];
         const int index = t.pairs + t.unseen; // (after the pairs put unseen)
         const int64_t before = t.spawnedAt;   // (the pair before it appeared then)
@@ -1376,8 +1387,11 @@ private:
         // (the window has moved on: the two pairs after this one, sure once it stands still - until then as it reads.
         //  Seen late, a window that moved on since the pair before it appeared and stands shows them now: waited for, it
         //  moved on again for the next pair, not seen yet, and its pairs were learnt a place before their own on the
-        //  real game.)
-        const bool shownSince = seenLate && before >= 0 && t.nextStill >= stillNeeded(t) && t.nextChangedAt > before + pairGap;
+        //  real game. So too a pair taken as other colours, turned over as it appeared and seen so under a light. Not when
+        //  the window shows first another pair than the one learnt after this one: it may be the move of the pair before,
+        //  late under a light.)
+        const bool shownSince = (seenLate || otherColours) && before >= 0 && t.nextStill >= stillNeeded(t) && t.nextChangedAt > before + pairGap &&
+                                (!knows(s, index + 1) || same(read.next[0], pairOf(s, index + 1)));
         if (shownSince || windowSettled(t, at)) {
             learn(s, index + 1, read.next[0]), learn(s, index + 2, read.next[1]);
         } else {
