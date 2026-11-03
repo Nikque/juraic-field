@@ -61,11 +61,21 @@ public:
     int placements = 0;         // pairs whose placement was found
     int checks = 0, misses = 0; // pieces at rest checked against the game as a new pair appeared, and found other than it
     int held = 0;               // notices held back (more than reckoned) until they had read the same for noticeLong frames
+    // The last notice of each side that began to be held back (takeNotice): the frame, what it read, and what the most
+    // it could show was made of (ceiling) - the notice taken before, the garbage the other side's chains were reckoned to
+    // bring still, what its pair lying would send, and the slack. `begun`: how many began so.
+    struct Hold {
+        int begun = 0;
+        int64_t at = -1;
+        int read = 0, taken = 0, budget = 0, sends = 0, slack = 0;
+    };
+    Hold holding[2];
 
     void reset() {
         tracker.reset();
         for (SideModel& m : model) m = SideModel{};
         notice[0] = notice[1] = 0;
+        holding[0] = holding[1] = Hold{};
         placements = checks = misses = held = 0;
         told[0] = told[1] = Told{};
         round = tracker.rounds;
@@ -526,6 +536,11 @@ private:
         if (t.notice == notice[s]) return;
         const int most = ceiling(s);
         const bool take = most < 0 || t.notice <= most;
+        if (!take && (holding[s].at < t.noticeSince || holding[s].read != t.notice)) {
+            const SideModel& o = model[1 - s];
+            const int sends = o.lying ? o.sends : 0, reckoned = notice[s] + model[s].budget + sends;
+            holding[s] = {holding[s].begun + 1, at, t.notice, notice[s], model[s].budget, sends, most - reckoned};
+        }
         if (!take && at - t.noticeSince + 1 < noticeLong) return;
         if (!take) ++held;
         if (t.notice > notice[s]) model[s].budget = std::max(0, model[s].budget - (t.notice - notice[s]));

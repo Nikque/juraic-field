@@ -1545,8 +1545,12 @@ static void testNoticeCeiling() {
     lit.side[1].notice = 720;
     for (int k = 0; k < 10; ++k) f.step(lit, at++);
     check(f.notice[1] == 0 && f.tracker.side[1].notice == 720, "a notice of more than can have been sent is taken at once");
+    // (what the most it could show was made of, kept as it began to be held back: once)
+    const Follower::Hold& h = f.holding[1];
+    check(h.begun == 1 && h.read == 720 && h.taken == 0 && h.budget == 0 && h.sends == 0 && h.slack == f.slack && h.at >= f.tracker.side[1].noticeSince,
+          "the notice held back is not kept with what its ceiling was made of: begun " + std::to_string(h.begun) + ", read " + std::to_string(h.read) + ", slack " + std::to_string(h.slack));
     for (int k = 0; k < f.noticeLong; ++k) f.step(lit, at++);
-    check(f.notice[1] == 720 && f.held == 1, "a notice of more than can have been sent is not taken when it stays");
+    check(f.notice[1] == 720 && f.held == 1 && f.holding[1].begun == 1, "a notice of more than can have been sent is not taken when it stays");
     Reading few = coming;
     few.side[1].notice = 2;
     for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(few, at++);
@@ -5794,6 +5798,23 @@ static void testRecord(const std::string& folder) {
     check(hasNote(notes, " begun") && hasNote(notes, "brought to column") && hasNote(notes, "lag measured: 2 frames"), "the driver does not note the pairs begun, the placements or the lag");
     driveRound(71, shakyNoted, {.lag = 2, .shaky = true, .frames = 1500, .notes = &shakyNotes});
     check(shakyNoted.corrected == 0 || hasNote(shakyNotes, "put right: the engine had"), "the driver does not note a pair put right");
+    // ... and why (Driver::REASONS): in a round with the screen of 2P lit as one pair in three appears and garbage falling
+    // before them, the pairs begun from the screen and what kept them from being begun early, the kind of each choice and
+    // the garbage coming, and the pairs that appeared with the own side not read and how long it was so.
+    if constexpr (Driver::REASONS) {
+        DriveCounts lit;
+        std::vector<std::pair<int64_t, std::string>> why;
+        driveRound(63, lit, {.lag = 5, .frames = 2500, .notes = &why, .litAsAppears = 30, .garbageAsLit = 6});
+        int notEarly = 0, kinds = 0, lights = 0, cleared = 0;
+        for (const auto& [at, line] : why) {
+            notEarly += line.find(" not begun early: ") != std::string::npos;
+            kinds += line.find("brought to column") != std::string::npos && line.find(" confirmed]") != std::string::npos;
+            lights += line.find(" appears with the own side not read: ") != std::string::npos;
+            cleared += line.find(": the own side read clear again after ") != std::string::npos;
+        }
+        check(notEarly > 0 && kinds > 0 && lights > 0 && cleared > 0, "the driver does not note why: not begun early " + std::to_string(notEarly) + ", choices with their kind " + std::to_string(kinds) +
+                                                                          ", pairs appearing unread " + std::to_string(lights) + ", read clear again " + std::to_string(cleared));
+    }
     std::cout << "the record of a reading: read back the same, pictures kept as they should be; the driver noting sends the same buttons (" << notes.size() << " notes)\n";
 }
 

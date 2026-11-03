@@ -23,6 +23,7 @@
 // that showed a move was a frame more than the game's; turns found the other way round from two such pictures in a row
 // were never found so, each put right as it came, and the turns stayed the wrong way round through four records.)
 #include "../ai/agent.h"
+#include "../ai/pace.h"
 #include "realgame_follow.h"
 #include <algorithm>
 #include <array>
@@ -35,6 +36,13 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+// The notes that tell why the driver did what it did (a pair not begun early, the kind of the AI's choice and the
+// garbage it saw coming, the screen unclear as a pair appeared): with JURAIC_REALGAME_REASONS (the mode of the real game
+// sets it to JURAIC_REALGAME_DEBUG, so that the program's own build has none of them; on for the tests and the tools).
+#ifndef JURAIC_REALGAME_REASONS
+#define JURAIC_REALGAME_REASONS 1
+#endif
 
 namespace play::realgame {
 
@@ -90,6 +98,11 @@ public:
     // play/realgame_log.h) - each pair begun, the placement it is brought to, a pair put where the picture shows it,
     // the lag the pictures of a pair fitted.
     std::vector<std::pair<int64_t, std::string>>* notes = nullptr;
+    // ... and with them why (JURAIC_REALGAME_REASONS): a pair begun from the screen, not early, and what kept it from
+    // being begun so (earlyDue: its words as the tools count them - settle, notice, side, unclear, other, field, blind);
+    // each placement noted with the kind of the AI's choice and the garbage it saw coming; a pair that appears with the
+    // own side not read, and the readings until it is read again.
+    static constexpr bool REASONS = JURAIC_REALGAME_REASONS != 0;
     // When set: the buttons that go to the pad from the frame of the clock `now` on, given those the driver decided (the
     // two turns as the agent names them). The engine takes what this gives, so that it plays the buttons that went out:
     // none while the pad is to hold nothing (a menu read, the pictures stopped), or those of a record played again.
@@ -213,8 +226,10 @@ private:
         watchOther(t);
         if (stoppedFor == pairsSeen && otherMovedAt == t.frame) stoppedFor = -1; // (the game goes on: the pair begun again is played on)
         if (!t.side[me].clear) unclearAt = now;
+        if constexpr (REASONS) watchLight(t);
         if (!active) {
             wait(f, now);
+            if constexpr (REASONS) watchEarly(f, now);
             if (blindDue(f, now)) beginBlind(f, now);
             else if (earlyDue(f, now)) beginEarly(f, now);
             else if (stoppedFor == pairsSeen && following && unshown() && windowWaits(t.side[me])) beginAgain(f, now);
@@ -249,6 +264,7 @@ private:
         own = juraic::Player{};
         past.clear();
         round = t.rounds, pairsSeen = 0, blindFor = -1, earlyFor = -1, againFor = -1, stoppedFor = -1, shiftBegun = -1, spawnTaken = -1, putAim = -1, unsure13 = unsure14 = 0;
+        whyFor = lightFor = lightChecked = -1;
         found.clear();
         agent->startRound(me, seed++);
         stop();
@@ -276,6 +292,7 @@ private:
             earlyFor = -1, blindFor = -1;
             if (off) shots.clear(), begin(f, side);
         } else if (side.pairs > pairsSeen) {
+            if constexpr (REASONS) noteNotEarly(t, side.pairs);
             pairsSeen = side.pairs, blindFor = -1, earlyFor = -1;
             begin(f, side);
         } else if (blindFor >= 0 && side.pairs == blindFor && spawned) {
@@ -524,6 +541,7 @@ private:
             std::string why;
             if (noted >= 0 && aim >= 0)
                 why = placing->steered != steeredSeen ? " (no way to the one before: the nearest)" : placing->againSwitched != againSeen ? " (the second choice)" : "";
+            if constexpr (REASONS) why += choiceText();
             noted = aim, note(now, "2P pair " + std::to_string(pairsSeen) + ": brought to " + placementText(aim) + why);
         }
         steeredSeen = placing->steered, againSeen = placing->againSwitched;
@@ -627,6 +645,18 @@ private:
     void observe(const Follower& f, const juraic::Player& p, int64_t at, juraic::ai::Observation& o) const {
         f.observeAt(me, rules, p, at, o);
         withFound(o.player[me].field);
+        if constexpr (REASONS) shownIncoming = o.player[me].incoming;
+    }
+    mutable juraic::Incoming shownIncoming; // (REASONS: the garbage coming to the own side, as the AI was last shown it)
+    // The kind of the AI's last choice (ai::X3Pace::kind) and the garbage coming as it was shown, for the note of a
+    // placement (REASONS).
+    std::string choiceText() const {
+        static constexpr const char* KIND_WORDS[juraic::ai::X3Pace::KINDS] = {"none", "win", "answer", "answer-build", "poke", "build", "fire", "clear"};
+        const auto* pace = dynamic_cast<const juraic::ai::X3Pace*>(agent.get());
+        const std::string coming = "coming " + std::to_string(shownIncoming.pending) + " pending " + std::to_string(shownIncoming.confirmed) + " confirmed";
+        if (!pace) return " [" + coming + "]";
+        const int k = int(pace->kind);
+        return std::string(" [") + (k >= 0 && k < juraic::ai::X3Pace::KINDS ? KIND_WORDS[k] : "?") + (pace->guardedNow ? ", guarded" : "") + "; " + coming + "]";
     }
     // The cells not sure of, for the ways of the AI (PlacementAgent::unsure13, seenAfter: a way planned again after a
     // picture showed the pair otherwise begins lag + SEEN_AFTER frames after the frame shown - the next picture, and the
@@ -785,6 +815,65 @@ private:
         earlyFor = pairsSeen, earlyAt = appears, earlyShifted = false;
         start(f, std::max(now + lag, next), "2P pair " + std::to_string(pairsSeen) + " begun early: the engine has it appear in frame " + std::to_string(appears) + ", lag " +
                                                 std::to_string(lag));
+    }
+    // (REASONS) In the first frame the next pair would be begun early (its first button reaching the frame the engine
+    // foresees), what of earlyDue kept it from it - every condition that did, not the first only -, kept for the note
+    // of the pair as it is begun from the screen (noteNotEarly).
+    int whyFor = -1;         // the pair (pairsSeen) after which the next one was looked at so
+    std::string whyNotEarly; // ... and what kept it from being begun early ("" : nothing)
+    void watchEarly(const Follower& f, int64_t now) {
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        if (!early || pairsSeen == 0 || whyFor == pairsSeen || !following || own.phase != juraic::Phase::Next || own.wait > 2 || now + lag < next + own.wait - 1) return;
+        whyFor = pairsSeen;
+        std::string w;
+        const auto add = [&](const std::string& s) { w += (w.empty() ? "" : ", ") + s; };
+        if (blindFor >= 0 || earlyFor >= 0) add(std::string("blind (the pair before begun ") + (blindFor >= 0 ? "unseen" : "early") + ", not shown)");
+        if (turnsOther > -TURN_MARGIN) add("settle (the way of the turns " + std::to_string(turnsOther) + ")");
+        if (int(lags.size()) < FIT_PAIRS) add("settle (" + std::to_string(lags.size()) + " lags measured)");
+        else if (measuredLag() != lag) add("settle (lag " + std::to_string(lag) + ", measured " + std::to_string(measuredLag()) + ")");
+        if (f.notice[me] != 0) add("notice (" + std::to_string(f.notice[me]) + ")");
+        if (side.loose != 0 || side.pairs != pairsSeen || side.unseen != 0)
+            add("side (" + std::to_string(side.loose) + " in the air, counted " + std::to_string(side.pairs) + " unseen " + std::to_string(side.unseen) + ")");
+        if (now - unclearAt < EARLY_CLEAR) add("unclear (" + std::to_string(now - unclearAt) + " frames ago)");
+        if (!t.still(1 - me))
+            add(std::string("other (") + (f.model[1 - me].running ? "its chain or garbage" : !t.side[1 - me].clear ? "not read" : t.side[1 - me].loose ? "pieces in the air" : "its field changed") + ")");
+        if (!side.clear || !(Follower::shown(own.field) == Follower::shown(side.resting))) add(side.clear ? "field (not as the engine's)" : "field (not read)");
+        whyNotEarly = w;
+    }
+    // ... noted as pair `pair` is begun from the screen.
+    void noteNotEarly(const Tracker& t, int pair) {
+        if (!early || pair < 2) return;
+        const std::string why = whyFor == pair - 1 ? (whyNotEarly.empty() ? "none (begun from the screen first)" : whyNotEarly) : "foreseen (the engine did not foresee it in time)";
+        note(t.frame, "2P pair " + std::to_string(pair) + " not begun early: " + why);
+    }
+    // (REASONS) The next pair appears with the own side not read (the frame appeared tells): noted with the points read
+    // unsure, and again as the side is read clear, with the readings in between (how long a light lasts as pairs come).
+    int lightChecked = -1;  // the pair (pairsSeen) after which the next one's appearing was looked at
+    int lightFor = -1;      // the pair that appeared so, until the side is read clear (-1: none)
+    int64_t lightFrom = -1, lightRead = -1;
+    int lightReadings = 0, lightPoints = 0;
+    void watchLight(const Tracker& t) {
+        const SideTrack& side = t.side[me];
+        if (lightFor >= 0) {
+            if (t.frame == lightRead) return;
+            lightRead = t.frame;
+            if (!side.clear) {
+                ++lightReadings, lightPoints = std::max(lightPoints, t.last.side[me].unsure);
+                return;
+            }
+            note(t.frame, "2P pair " + std::to_string(lightFor) + ": the own side read clear again after " + std::to_string(lightReadings) + " readings not clear, " +
+                              std::to_string(t.frame - lightFrom) + " frames after it appeared (" + std::to_string(lightPoints) + " points unsure at most)");
+            lightFor = -1;
+            return;
+        }
+        if (lightChecked == pairsSeen) return;
+        const int64_t comes = appeared(t);
+        if (comes < 0 || t.frame < comes) return;
+        lightChecked = pairsSeen;
+        if (side.clear) return;
+        lightFor = pairsSeen + 1, lightFrom = comes, lightRead = t.frame, lightReadings = 1, lightPoints = t.last.side[me].unsure;
+        note(t.frame, "2P pair " + std::to_string(lightFor) + " appears with the own side not read: " + std::to_string(lightPoints) + " points unsure");
     }
     // The pair in play begun (begin, beginBlind, beginEarly) with the engine as it is set, noted so (`line`): the frames
     // of the game before `at` have passed - the agent decides them, the game took what the pad held.

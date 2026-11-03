@@ -15,6 +15,10 @@
 #ifndef JURAIC_REALGAME_DEBUG
 #define JURAIC_REALGAME_DEBUG 0
 #endif
+// (the driver's notes of why: in the record only, realgame_drive.h)
+#ifndef JURAIC_REALGAME_REASONS
+#define JURAIC_REALGAME_REASONS JURAIC_REALGAME_DEBUG
+#endif
 #include "../ai/level.h"
 #include "realgame_capture_win.h"
 #include "realgame_drive.h"
@@ -506,7 +510,7 @@ private:
 
     // What the record is told after each reading: what it changed of these.
     struct Counts {
-        int rounds = 0, doubts = 0, misses = 0, held = 0, followed[2]{}, notice[2]{};
+        int rounds = 0, doubts = 0, misses = 0, held = 0, followed[2]{}, notice[2]{}, holds[2]{};
         juraic::GameField reckoned[2]; // the pieces at rest as the game made them, before the reading
         bool known[2]{};
     };
@@ -514,7 +518,8 @@ private:
         Counts c;
         c.rounds = tracker.rounds, c.doubts = tracker.doubts, c.misses = follow.misses, c.held = follow.held;
         for (int s = 0; s < 2; ++s)
-            c.followed[s] = follow.model[s].followed, c.notice[s] = follow.notice[s], c.reckoned[s] = follow.model[s].core.field, c.known[s] = follow.model[s].known;
+            c.followed[s] = follow.model[s].followed, c.notice[s] = follow.notice[s], c.reckoned[s] = follow.model[s].core.field, c.known[s] = follow.model[s].known,
+            c.holds[s] = follow.holding[s].begun;
         return c;
     }
     static std::string pairText(juraic::Pair p) { return std::to_string(p.axis) + std::to_string(p.child); }
@@ -536,6 +541,14 @@ private:
                                      (m.chains ? ", a chain of " + std::to_string(m.chains) : ""));
             }
             if (follow.notice[s] != b.notice[s]) record.event(at, std::string(who) + " notice " + std::to_string(follow.notice[s]));
+            if constexpr (DEBUG_PARTS) {
+                // (why a notice is held back: what the most it can show was made of)
+                const realgame::Follower::Hold& h = follow.holding[s];
+                if (h.begun != b.holds[s])
+                    record.event(at, std::string(who) + " notice " + std::to_string(h.read) + " held back for now: the most it can show " + std::to_string(h.taken + h.budget + h.sends + h.slack) +
+                                         " (taken " + std::to_string(h.taken) + ", still to come " + std::to_string(h.budget) + ", the pair lying sends " + std::to_string(h.sends) +
+                                         ", slack " + std::to_string(h.slack) + ")");
+            }
             // (a check fails as a new pair appears: the pieces it appeared over against the game's)
             if (follow.misses != b.misses && tracker.spawned[s] && b.known[s])
                 record.event(at, std::string(who) + " pieces at rest not as the game made them; the game:\n" + realgame::fieldText(b.reckoned[s]) + "    the screen:\n" + realgame::fieldText(t.under)),
