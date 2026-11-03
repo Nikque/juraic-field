@@ -885,6 +885,53 @@ static void testPairsAfterLight() {
     std::cout << "a pair first seen after a light, both pieces showing, is the pair that came; the pair the window shows as it moves on is learnt\n";
 }
 
+// A pair seen late, the window moved on since the pair before it appeared and standing: the window shows the two pairs
+// after it then. Waited for (windowWait), the window moved on again for the next pair, not seen yet, and the pairs it
+// showed were learnt a place before their own (on the real game 1P's pair seen late lying, the next put soon after it).
+static void testLateWindowNotWaited() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {1, 5}, side.next[1] = {3, 1};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto window = [](Reading r, Pair next, Pair after) {
+        for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+        return r;
+    };
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(1, i) && t.pairOf(1, i).axis == p.axis && t.pairOf(1, i).child == p.child; };
+    int64_t at = 40000;
+    Tracker t;
+    for (int f = 0; f < t.roundGap + 5; ++f) t.step(empty, at++);
+    Reading first = window(empty, {3, 1}, {2, 2});
+    first.side[1].point[SPAWN_X][23] = 1;
+    for (int f = 0; f < 4; ++f) t.step(first, at++);
+    Reading rest = window(empty, {3, 1}, {2, 2});
+    rest.side[1].point[0][0] = rest.side[1].point[0][1] = 1, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 5;
+    for (int f = 0; f < 30; ++f) t.step(rest, at++);
+    // (the window moves on as the next pair (3 1) comes; a light; the pair is first seen after it, a cell and a half down)
+    Reading landed = window(rest, {2, 2}, {4, 5});
+    for (int f = 0; f < 5; ++f) t.step(landed, at++);
+    Reading lit = landed;
+    lit.side[1].unsure = 4;
+    for (int f = 0; f < 9; ++f) t.step(lit, at++);
+    Reading seen = landed;
+    seen.side[1].point[SPAWN_X][19] = seen.side[1].point[SPAWN_X][20] = 3;
+    seen.side[1].point[SPAWN_X][21] = seen.side[1].point[SPAWN_X][22] = 1;
+    for (int f = 0; f < 4; ++f) t.step(seen, at++);
+    check(t.side[1].pairs == 2 && t.side[1].late, "the pair seen late is not seen");
+    // (it is put; the window moves on as the next pair (2 2) comes, which is not seen for a while)
+    Reading rested = landed;
+    rested.side[1].point[SPAWN_X][0] = rested.side[1].point[SPAWN_X][1] = 3, rested.side[1].point[SPAWN_X][2] = rested.side[1].point[SPAWN_X][3] = 1;
+    for (int f = 0; f < 10; ++f) t.step(rested, at++);
+    rested = window(rested, {4, 5}, {1, 1});
+    for (int f = 0; f < 40; ++f) t.step(rested, at++);
+    check(is(t, 2, {2, 2}) && is(t, 3, {4, 5}) && t.relearnt[1] == 0,
+          "the window moved on again was learnt for the pair seen late: " + std::to_string(int(t.pairOf(1, 2).axis)) + std::to_string(int(t.pairOf(1, 2).child)));
+    std::cout << "a pair seen late takes the window that moved on before it was seen\n";
+}
+
 // A pair of 2P is never left alone. (1) A pair put out of sight - both pieces in the 13th and 14th rows - changes nothing
 // the screen shows, and the next pair, of the same colour below, appears where it appeared: once the window has moved
 // on after the pair in hand appeared, that pair is put (on the real game, its thirteenth record, fifth round, the next
@@ -4742,7 +4789,34 @@ static void testBothWindowsOverOnePicture() {
         run(ahead, 2);
         check(t.pairOf(1, 1).axis == 3, "a pair seen as the pair after the one learnt, the count behind, did not take the colours seen");
     }
-    std::cout << "a pair both windows showed alike is not learnt again from a picture of it, unless it shows the pair after it\n";
+    {
+        // Seen with its child hidden, of the colour of the child learnt: the pair may have been turned over as it
+        // appeared, its axis up out of sight - not learnt again, even when that colour is also the next pair's axis.
+        Tracker t;
+        int64_t at = 50000;
+        const auto run = [&](const Reading& r, int frames) {
+            for (int k = 0; k < frames; ++k) t.step(r, at++);
+        };
+        run(empty, t.roundGap + 5);
+        Reading base = empty;
+        for (SideRead& side : base.side) side.next[0] = {1, 2}, side.next[1] = {2, 4};
+        run(base, 4);
+        Reading first = base;
+        first.side[1].point[SPAWN_X][23] = 5;
+        run(first, t.pairGap + 3);
+        Reading put = base;
+        for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 5 : 1;
+        run(put, 5);
+        for (SideRead& side : put.side) side.next[0] = {2, 4}, side.next[1] = {3, 3};
+        run(put, 4);
+        Reading turned = put;
+        turned.side[1].point[SPAWN_X][23] = 2;
+        run(turned, 2);
+        check(t.side[1].pairs == 2, "a pair turned over as it appeared is not counted");
+        const Pair now = t.pairOf(1, 1);
+        check(now.axis == 1 && now.child == 2, "a pair turned over as it appeared was learnt again from a picture of it: " + std::to_string(int(now.axis)) + std::to_string(int(now.child)));
+    }
+    std::cout << "a pair both windows showed alike is not learnt again from a picture of it, unless it shows the pair after it; a pair turned over is not\n";
 }
 
 // The real table: a point of a window that shows the window's own ground, or the edges of two pieces of colours whose mean
@@ -5529,6 +5603,7 @@ int main(int argc, char** argv) {
         testShortStandInTheWay();
         testBothWindowsOverOnePicture();
         testWindowGround();
+        testLateWindowNotWaited();
         testWindowFilm(argc > 1 ? argv[1] : ".");
         testMenus();
         testRounds();
