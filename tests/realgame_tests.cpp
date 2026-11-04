@@ -1425,6 +1425,78 @@ static void testPutUnseenWindowHalfRead() {
     std::cout << "a pair seen after one put under a light, the window half read, is the pair after it\n";
 }
 
+// A pair of 2P put into the 13th and 14th rows under a light, the next pair seen (Follower): of the ways the game can
+// have put it over the field it appeared over - its colours as the window showed them - those that leave the twelve rows
+// as the screen shows them; taken when they leave the 13th and 14th rows alike, or as the caller told; their columns
+// unsure else. (Taken from the screen, the pieces it put there were lost: one fell where the field followed had none as
+// a chain cleared below it, in the fourth play test.)
+static void testPutUnseenIntoHiddenRows() {
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        // (0: the fifth column twelve high; 1: the fifth and sixth, not told; 2: the same, told the sixth; 3: the same, and
+        //  garbage fallen, one on each column, as pair 1 was put - which came first is not known, so the 13th row of the
+        //  fifth column is unsure, not taken as garbage)
+        Reading empty;
+        for (SideRead& side : empty.side) {
+            for (auto& column : side.point)
+                for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+            side.next[0] = {5, 4}, side.next[1] = {5, 3};
+            side.nextRead[0] = side.nextRead[1] = true;
+        }
+        for (int y = 0; y < 12; ++y) {
+            empty.side[1].point[4][2 * y] = empty.side[1].point[4][2 * y + 1] = Cell(1 + y % 2);
+            if (scenario) empty.side[1].point[5][2 * y] = empty.side[1].point[5][2 * y + 1] = Cell(3 + y % 2);
+        }
+        const auto window = [](Reading r, Pair next, Pair after) {
+            for (SideRead& side : r.side) side.next[0] = next, side.next[1] = after;
+            return r;
+        };
+        Follower f;
+        int64_t at = 70000;
+        for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+        // Pair 0 (5 4) appears and comes to rest in the first column.
+        Reading first = window(empty, {5, 3}, {2, 2});
+        first.side[1].point[SPAWN_X][23] = 5;
+        for (int k = 0; k < 4; ++k) f.step(first, at++);
+        Reading rest = window(empty, {5, 3}, {2, 2});
+        rest.side[1].point[0][0] = rest.side[1].point[0][1] = 5, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 4;
+        for (int k = 0; k < 30; ++k) f.step(rest, at++);
+        f.tell(1, 0, juraic::placement(0));
+        check(f.tracker.side[1].pairs == 1, "the first pair is not seen");
+        // A light: the window moves on to 2 2 / 4 1 (pair 1, 5 3, appears), and pair 1 is put upright on the fifth (or sixth)
+        // column, into its 13th and 14th rows.
+        Reading lit = window(rest, {2, 2}, {4, 1});
+        lit.side[1].unsure = 6;
+        for (int k = 0; k < 40; ++k) f.step(lit, at++);
+        if (scenario >= 2) f.tell(1, 1, juraic::placement(5));
+        // The light goes: pair 2 (2 2) appears.
+        Reading second = window(rest, {4, 1}, {3, 3});
+        if (scenario == 3) {
+            second.side[1].point[0][4] = second.side[1].point[0][5] = GARBAGE;
+            for (int c = 1; c < 4; ++c) second.side[1].point[c][0] = second.side[1].point[c][1] = GARBAGE;
+        }
+        second.side[1].point[SPAWN_X][23] = 2;
+        for (int k = 0; k < 4; ++k) f.step(second, at++);
+        const SideModel& m = f.model[1];
+        check(f.tracker.side[1].pairs == 3, "the pair after the one put under a light is not counted as the third (" + std::to_string(f.tracker.side[1].pairs) + ")");
+        const int x = scenario >= 2 ? 5 : 4;
+        if (scenario == 1) {
+            check(m.followed == 0 && (m.unsure >> 4 & 1) && (m.unsure >> 5 & 1), "a pair the 13th and 14th rows of two columns can have taken is not left unsure");
+            continue;
+        }
+        if (scenario == 3) {
+            check(m.followed == 1 && m.core.field.f.get(5, 12) == 5 && m.core.field.row14[5] == 3 && m.core.field.f.get(4, 12) == EMPTY && (m.unsure >> 4 & 1),
+                  "the 13th row of a column twelve high, garbage fallen as a pair put unseen was found, is not left unsure (followed " + std::to_string(m.followed) +
+                      ", unsure " + std::to_string(m.unsure) + ", row 13 of the fifth column " + std::to_string(int(m.core.field.f.get(4, 12))) + ")");
+            continue;
+        }
+        check(m.followed == 1 && m.core.field.f.get(x, 12) == 5 && m.core.field.row14[size_t(x)] == 3,
+              "the pair put under a light into the 13th and 14th rows is not found there (scenario " + std::to_string(scenario) + ": followed " + std::to_string(m.followed) +
+                  ", known " + std::to_string(m.known) + ", unsure " + std::to_string(m.unsure) + ", lying " + std::to_string(m.lying) + ", pair 1 known " +
+                  std::to_string(f.tracker.knows(1, 1)) + ")");
+    }
+    std::cout << "a pair put unseen into the 13th and 14th rows is found there as the next pair appears\n";
+}
+
 static void testPredictionResetAtRound() {
     struct Watching : ai::PlacementAgent {
         GameField lastField;
@@ -1561,6 +1633,128 @@ static void testNoticeCeiling() {
     for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(few, at++);
     check(f.notice[1] == 2 && f.held == 1, "a notice of less is not taken at once");
     std::cout << "the notice: more than the chains followed can have sent is held back until it stays\n";
+}
+
+// What 1P's chain was reckoned to send, the notice of 2P read only after the next pair of 1P has appeared (Follower):
+// taken at once in the noticeLong frames after it appeared, held back after them.
+static void testNoticeAfterNextPair() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {2, 3}, side.next[1] = {4, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    int64_t at = 10;
+    for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+    Reading first = empty;
+    first.side[0].next[0] = {4, 2}, first.side[0].next[1] = {1, 5};
+    first.side[0].point[SPAWN_X][23] = 2;
+    for (int k = 0; k < 5; ++k) f.step(first, at++);
+    check(f.tracker.side[0].pairs == 1, "the first pair of 1P is not seen");
+    f.model[1].budget = 6; // (as a chain of 1P reckoned to send 6 would leave it)
+    Reading landed = first;
+    landed.side[0].point[SPAWN_X][23] = EMPTY;
+    landed.side[0].point[0][0] = landed.side[0].point[0][1] = 2, landed.side[0].point[0][2] = landed.side[0].point[0][3] = 3;
+    for (int k = 0; k < 6; ++k) f.step(landed, at++);
+    Reading second = landed;
+    second.side[0].next[0] = {1, 5}, second.side[0].next[1] = {3, 3};
+    second.side[0].point[SPAWN_X][23] = 4;
+    f.step(second, at++);
+    check(f.tracker.spawned[0] && f.tracker.side[0].pairs == 2 && f.model[0].followed == 0, "the second pair of 1P is not seen after the first found put");
+    for (int k = 0; k < 20; ++k) f.step(second, at++);
+    Reading six = second;
+    six.side[1].notice = 6;
+    for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(six, at++);
+    check(f.notice[1] == 6 && f.holding[1].begun == 0, "the notice 1P's chain was reckoned to send, read after its next pair appeared, is held back");
+    // (a notice of many - a light over it - taken as it read so for noticeLong frames uses up nothing reckoned: the notice
+    //  then read again as before, and the chain's rest after it, are taken at once)
+    {
+        Follower g = f;
+        g.model[1].budget = 4;
+        Reading lit = six;
+        lit.side[1].notice = 37;
+        for (int k = 0; k < g.noticeLong + 2; ++k) g.step(lit, at + k);
+        check(g.notice[1] == 37, "a notice of many is not taken when it stays");
+        for (int k = 0; k < g.tracker.noticeFrames; ++k) g.step(six, at + g.noticeLong + 2 + k);
+        Reading rest = six;
+        rest.side[1].notice = 10;
+        for (int k = 0; k < g.tracker.noticeFrames; ++k) g.step(rest, at + g.noticeLong + 10 + k);
+        check(g.notice[1] == 10, "a notice of many taken after it stayed used up what the chain was reckoned to send");
+        // (... taken at once as a pair of 1P came to rest where no placement shows it: the most is not known then)
+        Follower u = f;
+        u.model[1].budget = 4;
+        Reading unfound = six;
+        unfound.side[0].point[SPAWN_X][23] = EMPTY;
+        unfound.side[0].point[5][0] = unfound.side[0].point[5][1] = 1, unfound.side[0].point[5][2] = unfound.side[0].point[5][3] = 1;
+        unfound.side[0].point[4][0] = unfound.side[0].point[4][1] = 1;
+        Reading litUnfound = unfound;
+        litUnfound.side[1].notice = 37;
+        for (int k = 0; k < u.tracker.noticeFrames + 1; ++k) u.step(litUnfound, at + k);
+        check(u.ceiling(1) < 0 && u.notice[1] == 37, "a notice of many is not taken while the most is not known");
+        // (the next pair of 1P appears: the most is known again)
+        Reading third = litUnfound;
+        third.side[0].next[0] = {3, 3}, third.side[0].next[1] = {2, 5};
+        third.side[0].point[SPAWN_X][23] = 1;
+        for (int k = 0; k < 3; ++k) u.step(third, at + 8 + k);
+        check(u.tracker.side[0].pairs == 3 && u.ceiling(1) >= 0, "the third pair of 1P is not seen");
+        third.side[1].notice = 6;
+        for (int k = 0; k < u.tracker.noticeFrames; ++k) u.step(third, at + 11 + k);
+        third.side[1].notice = 10;
+        for (int k = 0; k < u.tracker.noticeFrames; ++k) u.step(third, at + 20 + k);
+        check(u.notice[1] == 10, "a notice of many taken while the most was not known used up what the chain was reckoned to send");
+    }
+    for (int k = 0; k < f.noticeLong; ++k) f.step(six, at++);
+    Reading more = six;
+    more.side[1].notice = 12;
+    for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(more, at++);
+    check(f.notice[1] == 6 && f.holding[1].on, "a notice of more than reckoned, long after the chain's next pair appeared, is taken at once");
+    std::cout << "the notice a chain was reckoned to send is taken a while after its next pair appears\n";
+}
+
+// The notice in rounds drawn of X3 against X3 (Follower), that of 2P read 40 frames late: no notice the game showed is
+// held back - the points of the down key, which the screen does not tell, are allowed for (Follower::downMost; without,
+// a chain of one sent 6 where 2 were reckoned), and what a chain was reckoned to send is allowed for a while after its
+// next pair appears (testNoticeAfterNextPair).
+static void testNoticeReadLate() {
+    const Layout l = sampleLayout();
+    const Rules rules;
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    const int late = 40;
+    int begun[2] = {}, rises = 0;
+    for (const uint64_t seed : {120, 121, 122, 123}) {
+        Round r;
+        r.start(rules, seed, 2);
+        Canvas canvas(1280, 720, l);
+        Rng noise(seed, 7);
+        const std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow), b = ai::makeAgent("x3", narrow);
+        a->startRound(0, seed), b->startRound(1, seed + 1);
+        Follower follow;
+        std::vector<int> shown;
+        int64_t clock = 1000;
+        const auto step = [&](bool ready) {
+            draw(canvas, l, r, ready, noise);
+            Reading rd = read(canvas.picture(), l);
+            shown.push_back(rd.side[1].notice);
+            rd.side[1].notice = shown[shown.size() > size_t(late) ? shown.size() - 1 - late : 0];
+            const int before = follow.notice[1];
+            follow.step(rd, clock++);
+            rises += follow.notice[1] > before;
+        };
+        for (int f = 0; f < 45; ++f) step(true);
+        PlayerEvents e[2];
+        for (int f = 0; f < 6000 && r.state == RoundState::Playing; ++f) {
+            step(false);
+            const uint8_t both[2] = {a->frame(ai::observe(r, 0)), b->frame(ai::observe(r, 1))};
+            r.step(both, e);
+        }
+        begun[0] += follow.holding[0].begun, begun[1] += follow.holding[1].begun;
+    }
+    const std::string counts = "notices of 2P taken higher " + std::to_string(rises) + ", held back " + std::to_string(begun[1]) + " (of 1P, read as drawn: " + std::to_string(begun[0]) + ")";
+    check(rises >= 20 && begun[1] == 0, "the notice read late: " + counts);
+    std::cout << "the notice read late after the chain's next pair is not held back: " << counts << "\n";
 }
 
 // An agent that chooses the first placement it may, counting its choices.
@@ -3191,9 +3385,12 @@ static void testTapsWhole() {
         Driver::prepare(a.get());
         DriveCounts n;
         std::vector<uint8_t> sent;
-        driveRound(seed, n, {.lag = 4, .sentOut = &sent, .startLag = 6, .swapped = true, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
+        DriveScenario how{.lag = 4, .sentOut = &sent, .startLag = 6, .swapped = true, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true};
+        const size_t frames = size_t(how.frames);
+        driveRound(seed, n, std::move(how));
+        // (not a tap begun in the last frame drawn: the round drawn no further, nothing is sent after it)
         for (const uint8_t kind : {uint8_t(BTN_CW | BTN_CCW), uint8_t(BTN_LEFT | BTN_RIGHT)})
-            for (size_t i = 1; i + 1 < sent.size(); ++i) {
+            for (size_t i = 1; i + 1 < std::min(sent.size(), frames); ++i) {
                 const uint8_t b = sent[i] & kind;
                 if (!b || (sent[i - 1] & kind) == b) continue; // (a tap begins here)
                 ++taps;
@@ -3983,7 +4180,9 @@ static void testTurnAfterQuickTurn() {
         driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .litAsAppears = 50, .quickTurnLock = 3,
                              .early = early});
     };
-    litRound(121, lit, false);
+    // (rounds of more seeds with no pair begun early: the notice reckoned otherwise, that round went otherwise and turned no
+    //  pair quickly)
+    for (uint64_t seed = 120; seed < 132; ++seed) litRound(seed, lit, false);
     for (const uint64_t seed : {120, 121, 122, 123, 124, 125}) litRound(seed, litEarly, true);
     const auto litCounts = [](const DriveCounts& c) {
         return std::to_string(c.quickHits) + " of " + std::to_string(c.quickLocks) + " pairs turned quickly and " + std::to_string(c.hits) + " of " + std::to_string(c.locks) +
@@ -6084,6 +6283,8 @@ int main(int argc, char** argv) {
         testPointRules();
         testUnclearFrames();
         testNoticeCeiling();
+        testNoticeReadLate();
+        testNoticeAfterNextPair();
         testUnknownPairsUnknown();
         testOtherSideAtItsFrame();
         testPace();
@@ -6097,6 +6298,7 @@ int main(int argc, char** argv) {
         testPutUnseenWindowHalfRead();
         testWindowStandingLongLearnt();
         testPredictionResetAtRound();
+        testPutUnseenIntoHiddenRows();
         testChainAfterMissedLanding();
         testPairsAfterLight();
         testRow13Kept();

@@ -27,6 +27,11 @@ struct SideModel {
     juraic::Placement placed{};
     int chains = 0;          // of the chain that pair started
     int budget = 0;          // garbage the chains of the other side reckoned have still to bring to the notice of this side
+    // ... of the chains of the other side that have ended (its next pair appeared), kept to the frame `leftTill`: the
+    // notice can settle after that pair appears
+    int left = 0;
+    int64_t leftTill = -1;
+    int downMost = 0;        // the most points the down key can have added since the last chain of this side (Follower::downMost)
     // The pair in play lying where the pieces at rest are the field it appeared over and it: where it would be locked.
     // It may still move; it is locked when the pieces change otherwise (its chain, garbage) or the next pair appears.
     bool lying = false;
@@ -97,8 +102,12 @@ public:
         const SideTrack& o = tracker.side[1 - s];
         const SideModel& m = model[1 - s];
         const bool reckoned = m.known && (m.followed == o.pairs - 1 || m.lying || (o.inHand && o.resting == o.under));
-        if (!reckoned) return -1;
-        const int most = notice[s] + model[s].budget + (m.lying ? m.sends : 0);
+        return reckoned ? reckonedMost(s) : -1;
+    }
+    // ... as far as the chains reckoned tell, whether or not a pair of the other side came to rest unfound
+    int reckonedMost(int s) const {
+        const SideModel& m = model[1 - s];
+        const int most = notice[s] + model[s].budget + model[s].left + (m.lying ? m.sends : 0);
         return most + slack + most / 10;
     }
 
@@ -122,23 +131,33 @@ public:
                 if (!m.lying && m.known && previous[s].pairs == t.pairs - 1 && m.followed < t.pairs - 2 && told[s].pair == t.pairs - 2)
                     outOfSight(s, previous[s], at);
                 if (m.lying) lock(s, at);
+                const bool putUnseen = m.known && m.followed < t.pairs - 2 && unseen(s, previous[s], at);
                 // A new pair: the pieces it appears over, against the game (only garbage may have come above them).
                 if (m.known && m.followed == t.pairs - 2) {
                     ++checks;
                     if (!fits(withHidden(t.under, m.core.field), m.core.field)) ++misses;
                 }
                 // (the 13th and 14th rows are not on the screen: their pieces, put there by the moves followed, stay; and
-                //  garbage the screen shows fallen since may have reached the 13th row of a column read twelve high)
+                //  garbage the screen shows fallen since may have reached the 13th row of a column read twelve high - not as
+                //  pairs put unseen were found: whether it fell before or after them is not known, so the 13th rows it can
+                //  have reached are unsure)
                 const juraic::GameField was = m.core.field;
                 m.core.field = withHidden(t.under, was);
-                if (m.known && t.under.f.count() > shown(was).f.count() && fits(m.core.field, was))
+                const bool garbage = m.known && t.under.f.count() > shown(was).f.count() && fits(m.core.field, was);
+                if (garbage && !putUnseen)
                     m.core.field = withGarbage(t.under, was, rules.maxGarbagePerDrop / juraic::W, m.unsure);
                 else
                     m.unsure &= twelveHigh(t.under);
+                if (garbage && putUnseen)
+                    for (int x = 0; x < juraic::W; ++x)
+                        if ((twelveHigh(t.under) >> x & 1) && was.f.get(x, 12) == juraic::EMPTY) m.unsure |= uint8_t(1u << x);
                 m.known = true;
-                // (its chain has ended: what it sent is in the notice of the other side)
-                model[1 - s].budget = 0;
+                // (its chain has ended: what it sent is in the notice of the other side, or soon - the notice of the real
+                //  game settled after the next pair had appeared, 42 frames after once, and the notice was held back)
+                SideModel& o = model[1 - s];
+                o.left += o.budget, o.budget = 0, o.leftTill = at + noticeLong;
             }
+            if (m.leftTill >= 0 && at >= m.leftTill) m.left = 0, m.leftTill = -1;
             // (not only while the pair is in hand: a pair that splits is no longer seen as one while a piece falls)
             if (t.clear && m.known && m.followed < t.pairs - 1) find(s, at);
             takeNotice(s, at);
@@ -404,7 +423,8 @@ private:
         juraic::PlayerCore core = m.core;
         juraic::Incoming other{0, notice[1 - s]};
         core.incoming = {0, notice[s]};
-        m.sends = move(core, other, m.base, m.at, m.colors, at).sent;
+        const juraic::TurnResult r = move(core, other, m.base, m.at, m.colors, at);
+        m.sends = r.sent + (r.chains ? downGarbage(m.downMost + downMost(r.placed), at) : 0);
         // (a placement that splits: its piece falls apart only after the pair has rested a while as it locked, which
         //  the screen shows as the pair lying - shown splitting from the frame it was found so)
         juraic::GameField after = m.base;
@@ -427,6 +447,67 @@ private:
         if (!(shown(g) == shown(base))) return;
         m.base = base, m.at = p, m.colors = colors, m.index = before.pairs - 1, m.lyingSince = -1;
         lock(s, at);
+    }
+    // Pairs of side s found neither lying nor locked as the next appeared - the pair in hand before, and those Tracker
+    // counted put unseen after it -, one or two, their colours known: put as the game can have put them over the field
+    // the first appeared over (with the pieces of the rows the screen does not show), without a chain, so that the twelve
+    // rows are those the screen shows (garbage may have come above them). Taken when every such way leaves the 13th and
+    // 14th rows alike, or as the caller told the last of them (tell); else the columns twelve high whose 13th or 14th row
+    // the ways leave otherwise are unsure. (Taken from the screen, the pieces such pairs put into those rows were lost: a
+    // pair put upright into the 13th and 14th rows of a column twelve high as the next pair appeared, and one the engine
+    // had put elsewhere, half in the 13th row, of which a chain let the piece fall where the field followed had none.)
+    // True when they were taken.
+    bool unseen(int s, const Before& before, int64_t at) {
+        const SideTrack& t = tracker.side[s];
+        SideModel& m = model[s];
+        // (the field followed is that the pair in hand before appeared over, or with it put, if it was found)
+        const int first = m.followed >= before.pairs - 1 ? m.followed + 1 : before.pairs - 1, last = t.pairs - 2, n = last - first + 1;
+        if (n < 1 || n > 2 || first < 0) return false;
+        juraic::Pair colors[2];
+        for (int i = 0; i < n; ++i) {
+            const int pair = first + i;
+            colors[i] = tracker.knows(s, pair) ? tracker.pairOf(s, pair) : pair == before.pairs - 1 ? before.colors : juraic::Pair{};
+            if (!colors[i].axis || !colors[i].child) return false;
+        }
+        struct Way {
+            juraic::GameField field;
+            int last;
+        };
+        std::vector<Way> ways;
+        const auto put = [&](auto& self, const juraic::GameField& on, int i, int id) -> void {
+            if (i == n) {
+                if (fits(t.under, shown(on))) ways.push_back({on, id});
+                return;
+            }
+            for (int next = 0; next < juraic::PLACEMENTS; ++next) {
+                const juraic::Placement p = juraic::placement(next);
+                if (!fitsOn(on, p)) continue;
+                juraic::PlayerCore core = m.core;
+                juraic::Incoming other;
+                if (move(core, other, on, p, colors[i], at).chains) continue;
+                self(self, core.field, i + 1, next);
+            }
+        };
+        put(put, m.core.field, 0, -1);
+        if (ways.empty()) return false;
+        if (told[s].pair == last) {
+            const int id = juraic::placementId(told[s].at);
+            if (std::any_of(ways.begin(), ways.end(), [&](const Way& w) { return w.last == id; }))
+                std::erase_if(ways, [&](const Way& w) { return w.last != id; });
+        }
+        uint8_t otherwise = 0;
+        for (const Way& w : ways)
+            for (int x = 0; x < juraic::W; ++x)
+                if (w.field.f.get(x, 12) != ways[0].field.f.get(x, 12) || w.field.row14[size_t(x)] != ways[0].field.row14[size_t(x)]) otherwise |= uint8_t(1u << x);
+        if (otherwise) {
+            m.unsure |= uint8_t(otherwise & twelveHigh(t.under));
+            return false;
+        }
+        m.core.field = ways[0].field;
+        m.followed = last, m.placed = juraic::placement(ways[0].last), m.chains = 0, m.lying = false, m.lyingSince = -1;
+        m.downMost += n * (12 + tracker.timing.dropLockPoints + tracker.timing.dropLandPoints);
+        placements += n;
+        return true;
     }
     // A pair fits on `g` at `p`: its pieces on cells that are empty, its axis below the 14th row. (A placement told
     // where the game locked a pair: the moves of the game reach placements legalPlacements does not have - one lying
@@ -508,7 +589,17 @@ private:
         m.followed = m.index, m.placed = m.at, m.chains = result.chains, m.lying = false, m.lyingSince = -1;
         ++placements;
         o.budget += result.sent;
+        m.downMost += downMost(result.placed);
+        if (result.chains) o.budget += downGarbage(m.downMost, at), m.downMost = 0;
     }
+    // What the screen does not tell of the points (slack): those of the down key, carried over until a chain makes
+    // garbage of them (game/turn.h playTurn) - at most a point a row from where pairs appear and those of the lock, for
+    // a pair locked as `p` (in rounds drawn of X3 against X3, a chain of one sent 6 where 2 were reckoned) -, and the
+    // most garbage `points` of them make more of a chain at the frame `at`, with those carried over before.
+    int downMost(const juraic::PlaceResult& p) const {
+        return std::max(0, 12 - p.lockY) + tracker.timing.dropLockPoints + tracker.timing.dropLandPoints;
+    }
+    int downGarbage(int points, int64_t at) const { return points / rules.rateAt(tracker.roundFrame(at)) + 1; }
     // The run of `m` played on to the frame `at` of the clock (no buttons): its split and landing, its chain, then the
     // garbage that falls on it; over as its next pair is due.
     void playOn(SideModel& m, int64_t at) const {
@@ -543,13 +634,20 @@ private:
         const bool take = most < 0 || t.notice <= most;
         if (!take && (!holding[s].on || holding[s].read != t.notice)) {
             const SideModel& o = model[1 - s];
-            const int sends = o.lying ? o.sends : 0, reckoned = notice[s] + model[s].budget + sends;
-            holding[s] = {holding[s].begun + 1, true, at, t.notice, notice[s], model[s].budget, sends, most - reckoned};
+            const int sends = o.lying ? o.sends : 0, reckoned = notice[s] + model[s].budget + model[s].left + sends;
+            holding[s] = {holding[s].begun + 1, true, at, t.notice, notice[s], model[s].budget + model[s].left, sends, most - reckoned};
         }
         if (!take && at - t.noticeSince + 1 < noticeLong) return;
         holding[s].on = false;
         if (!take) ++held;
-        if (t.notice > notice[s]) model[s].budget = std::max(0, model[s].budget - (t.notice - notice[s]));
+        // (a rise comes of the chains that ended first; one of more than reckoned - taken as it read so for long, or as a
+        //  pair of the other side lay unfound - of none of them: of a light over the notice, a 37 taken so used up a 4
+        //  reckoned, and the notice of 7 read after it was held back)
+        SideModel& m = model[s];
+        if (const int rise = t.notice - notice[s]; rise > 0 && t.notice <= reckonedMost(s)) {
+            const int fromLeft = std::min(rise, m.left);
+            m.left -= fromLeft, m.budget = std::max(0, m.budget - (rise - fromLeft));
+        }
         notice[s] = t.notice;
     }
 };
