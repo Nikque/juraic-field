@@ -6380,6 +6380,7 @@ int main(int argc, char** argv) {
         testDownLostAtLock();
         testPausedRound();
         testPausedBeforeAppearing();
+        testTimedRounds();
         testSecondChoiceInAirOnThreads();
         testPicturesTakenTogether();
         testAimKeptAtLock();

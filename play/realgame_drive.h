@@ -366,16 +366,17 @@ private:
         // over have gone, nor for pieces in the air with a pair put at rest: a chain Follower did not reckon (held
         // so, the button went on to the next pair, 5 times in the records).
         const SideModel& m = f.model[me];
+        bool airShown = false; // (this picture shows it so)
         if (following && side.pairs == pairsSeen && side.clear && !seen.movedForNext(t.pairGap) && contains(side.resting, side.under)) {
             const bool put = m.followed == pairsSeen - 1;
             const bool air = colouredAbove(t.last.side[me], side.resting) > 0;
             if (air && (put ? m.chains == 0 && side.resting == side.under : !m.lying)) {
                 if (!untilLocked) note(t.frame, "2P pair " + std::to_string(pairsSeen) + " held down again: pieces of a colour in the air after it was taken as " + (put ? "put" : "lying"));
-                untilLocked = true, liftedFor = pairsSeen;
+                untilLocked = true, liftedFor = pairsSeen, airShown = true;
             }
             else if (!air && put && liftedFor == pairsSeen) untilLocked = false, liftedFor = -1;
         }
-        if (untilLocked && (side.pairs == pairsSeen || unseenInAir) && !lies(f)) {
+        if (untilLocked && (side.pairs == pairsSeen || unseenInAir) && !lies(f, airShown)) {
             // The window starts moving before the next pair appears. Release while it moves: waiting for it to
             // stand still sent the old down button to 26 next pairs in 16 rounds with lights of 30 to 120 frames.
             // An unread window alone cannot prove a lock. Keep untilLocked, and resume after nextSlide frames if
@@ -1050,7 +1051,9 @@ private:
     // it lying, a pair whose down button was lost so lay unlocked with no button for 10 frames, in a round drawn with a
     // pad a frame early or late now and then). The next pair comes 13 frames after a lock at the soonest.
     static constexpr int LOCK_DOWN = 2;
-    bool lies(const Follower& f) const {
+    // airShown: a clear picture shows pieces of a colour in the air above the pieces at rest, the pair not found lying
+    // (holdDown).
+    bool lies(const Follower& f, bool airShown = false) const {
         const SideModel& m = f.model[me];
         // (a turn sent and not yet taken by the game can lift a pair read lying: not lying until it has been)
         bool turnOnItsWay = false;
@@ -1067,6 +1070,10 @@ private:
         //  pair comes only after the window has moved on - the game stopped two frames before a pair appeared, the engine
         //  went on and foresaw the next pair, and the pair, lit as the game went on, fell by itself in rounds drawn so)
         if (unshown() && windowWaits(f.tracker.side[me])) return false;
+        // (nor while a clear picture shows pieces of a colour in the air above the pieces at rest: the game stopped for
+        //  120 frames with the pair on a full column in the 13th row, the engine went on and had it put, and let go so
+        //  the pair lay 10 frames and more before it locked, in a round drawn in time)
+        if (airShown) return false;
         return following && own.phase == juraic::Phase::Next && own.wait <= 2;
     }
     // The pair in play was begun before the screen showed it (early, or unseen), and the screen has not shown it yet.
