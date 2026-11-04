@@ -82,8 +82,9 @@ public:
     // down with the child below or in another column than the AI chose, at the end of rounds with the field nearly full.)
     static constexpr int KICK_SHOWN = 2;
     // The fit: lags from FIT_REACH less to FIT_REACH more than the driver's are tried, a pair with fewer than FIT_SHOTS
-    // clear pictures is not counted; the pictures of the last FIT_PAIRS pairs are added up, and a lag is taken when its
-    // engine shows FIT_MARGIN pictures more right than the driver's. The way of the turns, which does not change, is told
+    // clear pictures is not counted; the pictures of the last FIT_KEEP pairs are added up, and a lag is taken when its
+    // engine shows FIT_MARGIN pictures more right than the driver's (early begins wait for FIT_PAIRS pairs measured).
+    // The way of the turns, which does not change, is told
     // by every pair since the driver began (the pair is not to be read while it turns, and is soon locked after: a picture
     // or two of a pair tell of it, its records): the pictures more right with the turns the other way round, and
     // PLACED_WEIGHT for each pair locked where only that way brings it; at TURN_MARGIN the turns go the other way round
@@ -93,7 +94,7 @@ public:
     // way round at the end of a round drawn with a pad a frame early or late now and then, 10 pictures of 15 and the
     // lock, and they stayed so). Capped for every pair, a pad that turns the other way round from the start was found a
     // pair later, and 2 pairs of 80 went elsewhere for it.
-    static constexpr int FIT_REACH = 3, FIT_SHOTS = 4, FIT_PAIRS = 3, FIT_MARGIN = 4, PLACED_WEIGHT = 4, TURN_MARGIN = 3, TURN_STEP = 2;
+    static constexpr int FIT_REACH = 3, FIT_SHOTS = 4, FIT_PAIRS = 3, FIT_KEEP = 8, FIT_MARGIN = 4, PLACED_WEIGHT = 4, TURN_MARGIN = 3, TURN_STEP = 2;
     // When set: what the driver does, as lines with the frame of the clock they are of (the record of a reading,
     // play/realgame_log.h) - each pair begun, the placement it is brought to, a pair put where the picture shows it,
     // the lag the pictures of a pair fitted.
@@ -232,6 +233,7 @@ private:
             if constexpr (REASONS) watchEarly(f, now);
             if (blindDue(f, now)) beginBlind(f, now);
             else if (earlyDue(f, now)) beginEarly(f, now);
+            else if (windowDue(f, now)) beginByWindow(f, now);
             else if (stoppedFor == pairsSeen && following && unshown() && windowWaits(t.side[me])) beginAgain(f, now);
             else if (stoppedFor != pairsSeen && stopped(f, now)) {
                 stoppedFor = pairsSeen;
@@ -331,8 +333,13 @@ private:
         //  itself once in 31 pairs of rounds drawn so. Not followed on the screen, it is held until a clear picture
         //  shows nothing above the pieces at rest: held on to the engine's next pair, a few frames late, the button
         //  reached the next pair as it appeared, 11 times in 44 pairs. So too a pair begun early the screen has not shown:
-        //  the game may have stopped before it appeared, the engine going on)
-        const bool unseenInAir = unshown() && !(side.clear && side.loose == 0);
+        //  the game may have stopped before it appeared, the engine going on - and it is put only once a clear picture
+        //  shows the pieces at rest otherwise than the field it was begun over: a pair begun by the window on a field nearly
+        //  full was put by the engine in two frames, the round stopped two frames before the pair appeared, a clear
+        //  picture then showed nothing above the pieces at rest, and the pair, lit as the game went on, fell by itself, in
+        //  a round drawn so)
+        const bool restingAsBegun = earlyFor == pairsSeen && Follower::shown(side.resting) == Follower::shown(startOwn.field);
+        const bool unseenInAir = unshown() && !(side.clear && side.loose == 0 && !restingAsBegun);
         // (the game stopped: it takes no button, and the down button held on went on to the pair as it appeared)
         if (stoppedFor == pairsSeen) return press(now, held = sendable(now, tapToEnd(now, 0)));
         // A pair read as lying can lift again while earlier buttons arrive. Resume its down button when a clear
@@ -464,7 +471,7 @@ private:
     std::vector<Shot> shots;
     std::deque<std::pair<int64_t, uint8_t>> pads;
     using FitTable = std::array<std::array<int, 2>, 2 * FIT_REACH + 1>; // [lag - driver's + FIT_REACH][turns the other way]
-    std::deque<FitTable> fits;
+    std::deque<std::pair<int, FitTable>> fits; // (each with the driver's lag it was measured at)
     int turnsOther = 0; // what the pairs since the driver began tell for the turns the other way round (fit)
 
     // The agent as one that brings its pairs to placements (null for another).
@@ -791,11 +798,15 @@ private:
         // (nor before the pictures have told the lag and the way of the turns as the driver has them: the first turn of a
         //  pair begun early is taken in the frame it appears in and shown late, and a turn the other way round, or a frame
         //  late, was put right too late - pairs begun so went down turned otherwise, 3 of 77 in rounds drawn with the turns
-        //  of the pad the other way round, the lag a frame off as they began, turns shown 6 frames late)
-        if (turnsOther > -TURN_MARGIN || int(lags.size()) < FIT_PAIRS || measuredLag() != lag) return false;
+        //  of the pad the other way round, the lag a frame off as they began, turns shown 6 frames late). A lag measured a
+        //  frame off will do: the pair is begun as its first button reaches it with the shorter of the two, so that it
+        //  reaches the pair a frame after it appeared with the longer, never before it - on the real game a pair's
+        //  pictures fit one lag or the next, and the lags measured were a frame off the driver's for long.
+        if (!settled()) return false;
         if (!side.clear || !(Follower::shown(own.field) == Follower::shown(side.resting))) return false;
-        return now + lag >= next + own.wait - 1; // (the frame the engine has the pair appear in)
+        return now + std::min(lag, measuredLag()) >= next + own.wait - 1; // (the frame the engine has the pair appear in)
     }
+    bool settled() const { return turnsOther <= -TURN_MARGIN && int(lags.size()) >= FIT_PAIRS && std::abs(measuredLag() - lag) <= 1; }
     // ... begun with the engine as it stands, the pair appearing in the frame foreseen (as begin: the pair before fitted).
     void beginEarly(const Follower& f, int64_t now) {
         const Tracker& t = f.tracker;
@@ -816,6 +827,64 @@ private:
         start(f, std::max(now + lag, next), "2P pair " + std::to_string(pairsSeen) + " begun early: the engine has it appear in frame " + std::to_string(appears) + ", lag " +
                                                 std::to_string(lag));
     }
+    // The next pair is begun early by the window too (beginByWindow) when the engine could not foresee it - garbage on its
+    // way or falling, the other side moving, a light over the own side a while before, the engine's field not the
+    // screen's: the window of the next pairs goes away from where it stood WINDOW_SLIDE frames before the screen shows the
+    // pair. (In the four play tests of 11-03 and 11-04, the window of 2P read away from where it stood for WINDOW_AWAY
+    // readings in a row with the pair before found put and the own side still: the pair seen 7 frames after for 2120
+    // pairs of 2311, 6 or 8 for 137 of them - 8 for 66 -; no pair seen in 20 frames 80 times, the pair coming unseen or
+    // seen late at most of them.) Begun so with the own side read clear and still - the garbage that fell on it at
+    // rest -, the pair before found put, and the lag and the way of the turns told as for a pair begun early, on the
+    // field the screen shows; its first button reaching the pair WINDOW_SPARE frames after the frame after it appears,
+    // so that a pair seen a frame later than WINDOW_SLIDE does not take it before it is there (a pair taking its first
+    // turn before it appears may not turn: begun early with the lag a frame off, 3 pairs of 77 went down turned
+    // otherwise in rounds drawn so).
+    static constexpr int WINDOW_SLIDE = 7, WINDOW_AWAY = 2, WINDOW_SPARE = 1;
+    bool windowDue(const Follower& f, int64_t now) const {
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        const SideModel& m = f.model[me];
+        if (!early || pairsSeen == 0 || blindFor >= 0 || earlyFor >= 0 || !following) return false;
+        if (side.pairs != pairsSeen || side.unseen != 0 || side.loose != 0 || !t.still(me) || side.words.any) return false;
+        if (m.followed != pairsSeen - 1 && !(m.lying && m.index == pairsSeen - 1)) return false;
+        if (windowOddFor < WINDOW_AWAY || side.asStood || side.awayFrom <= side.spawnedAt + t.pairGap || !settled()) return false;
+        // (not long after: the screen shows the pair then, or the window tells it came unseen)
+        const int64_t first = side.awayFrom + WINDOW_SLIDE + 1 + WINDOW_SPARE, at = now + std::min(lag, measuredLag());
+        return at >= first && at <= first + 2;
+    }
+    void beginByWindow(const Follower& f, int64_t now) {
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        // (the engine on to the frame its next pair would appear in, a chain it still ran run to its end: as beginBlind)
+        for (int k = 0; k < 600 && own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control && own.phase != juraic::Phase::Dead; ++k) {
+            juraic::Incoming nobody;
+            juraic::PlayerEvents e = juraic::advancePlayer(own, nobody, 0, tsumo, rules, t.timing, t.roundFrame(next));
+            juraic::settlePlayer(own, rules, t.timing, noGarbage, e);
+        }
+        if (own.phase != juraic::Phase::Next) return;
+        // (the twelve rows as the screen shows them: the engine's with the garbage that fell, its 13th row as far as the
+        //  screen tells; the engine otherwise than that, the pair is begun from the screen)
+        const juraic::GameField engineShown = Follower::shown(own.field);
+        uint8_t guessed = 0;
+        if (!(side.resting == engineShown)) {
+            if (!Follower::fits(side.resting, engineShown)) return;
+            own.field = Follower::withGarbage(side.resting, own.field, rules.maxGarbagePerDrop / juraic::W, guessed);
+        }
+        const int64_t appears = side.awayFrom + WINDOW_SLIDE;
+        pairsSeen = side.pairs + 1;
+        fitLater(f); // (as beginEarly)
+        fitted = std::make_unique<Fitted>(toFit(pairsSeen - 1));
+        shots.clear();
+        watchFitted(f);
+        shareHidden(f, pairsSeen, guessed);
+        learnPairs(t);
+        carefulDown(guessed != 0);
+        own.wait = 1;
+        next = appears + 1;
+        earlyFor = pairsSeen, earlyAt = appears, earlyShifted = false;
+        start(f, std::max(now + lag, next), "2P pair " + std::to_string(pairsSeen) + " begun early by the window: it went away in frame " + std::to_string(side.awayFrom) +
+                                                ", the pair to appear in frame " + std::to_string(appears) + ", lag " + std::to_string(lag));
+    }
     // (REASONS) In the first frame the next pair would be begun early (its first button reaching the frame the engine
     // foresees), what of earlyDue kept it from it - every condition that did, not the first only -, kept for the note
     // of the pair as it is begun from the screen (noteNotEarly).
@@ -824,14 +893,15 @@ private:
     void watchEarly(const Follower& f, int64_t now) {
         const Tracker& t = f.tracker;
         const SideTrack& side = t.side[me];
-        if (!early || pairsSeen == 0 || whyFor == pairsSeen || !following || own.phase != juraic::Phase::Next || own.wait > 2 || now + lag < next + own.wait - 1) return;
+        const int lead = lags.empty() ? lag : std::min(lag, measuredLag());
+        if (!early || pairsSeen == 0 || whyFor == pairsSeen || !following || own.phase != juraic::Phase::Next || own.wait > 2 || now + lead < next + own.wait - 1) return;
         whyFor = pairsSeen;
         std::string w;
         const auto add = [&](const std::string& s) { w += (w.empty() ? "" : ", ") + s; };
         if (blindFor >= 0 || earlyFor >= 0) add(std::string("blind (the pair before begun ") + (blindFor >= 0 ? "unseen" : "early") + ", not shown)");
         if (turnsOther > -TURN_MARGIN) add("settle (the way of the turns " + std::to_string(turnsOther) + ")");
         if (int(lags.size()) < FIT_PAIRS) add("settle (" + std::to_string(lags.size()) + " lags measured)");
-        else if (measuredLag() != lag) add("settle (lag " + std::to_string(lag) + ", measured " + std::to_string(measuredLag()) + ")");
+        else if (std::abs(measuredLag() - lag) > 1) add("settle (lag " + std::to_string(lag) + ", measured " + std::to_string(measuredLag()) + ")");
         if (f.notice[me] != 0) add("notice (" + std::to_string(f.notice[me]) + ")");
         if (side.loose != 0 || side.pairs != pairsSeen || side.unseen != 0)
             add("side (" + std::to_string(side.loose) + " in the air, counted " + std::to_string(side.pairs) + " unseen " + std::to_string(side.unseen) + ")");
@@ -1258,21 +1328,28 @@ private:
             fits.clear(); // (the tables were of the turns before)
             return;
         }
-        // The lag, with the turns as they are.
-        fits.push_back(table);
-        if (fits.size() > size_t(FIT_PAIRS)) fits.pop_front();
-        std::array<int, 2 * FIT_REACH + 1> sum{};
-        for (const FitTable& one : fits)
-            for (size_t i = 0; i < sum.size(); ++i) sum[i] += one[i][0];
-        int bestD = 0;
+        // The lag, with the turns as they are: of the last FIT_KEEP pairs, those that tried both the driver's lag and
+        // another, the pictures more right with the other, added up - each table kept by the lags it tried, not let go
+        // as the lag is taken (let go so, the lag went to and fro between 4 and 5 every pair or two on the real game, 72
+        // and 65 times in two records - the pictures of a pair fit one lag or the next as the game shows its pairs, 36%
+        // of them right at the best -, and no pair was begun early while the lags measured differed from it).
+        fits.emplace_back(lag, table);
+        if (fits.size() > size_t(FIT_KEEP)) fits.pop_front();
+        const auto score = [&](const std::pair<int, FitTable>& one, int l) {
+            const int i = l - one.first + FIT_REACH;
+            return i >= 0 && i <= 2 * FIT_REACH ? one.second[size_t(i)][0] : -1;
+        };
+        int bestD = 0, bestMore = 0;
         for (int d = -FIT_REACH; d <= FIT_REACH; ++d) {
-            const int s = sum[size_t(d + FIT_REACH)], b = sum[size_t(bestD + FIT_REACH)];
-            if (s > b || (s == b && std::abs(d) < std::abs(bestD))) bestD = d;
+            if (d == 0 || lag + d < 0) continue;
+            int more = 0;
+            for (const auto& one : fits)
+                if (const int s = score(one, lag + d), here = score(one, lag); s >= 0 && here >= 0) more += s - here;
+            if (more > bestMore || (more == bestMore && more > 0 && std::abs(d) < std::abs(bestD))) bestD = d, bestMore = more;
         }
-        if (bestD == 0 || sum[size_t(bestD + FIT_REACH)] < sum[size_t(FIT_REACH)] + FIT_MARGIN) return;
+        if (bestD == 0 || bestMore < FIT_MARGIN) return;
         note(at, "the lag taken from the pictures: " + std::to_string(lag + bestD) + " frames (was " + std::to_string(lag) + ")");
         lag += bestD;
-        fits.clear(); // (the tables were of the lag before)
     }
 
     // The picture `seen` (pair colours `c`) of the frame g of the game shows the pair where the engine had it (`in`: the

@@ -43,6 +43,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1549,6 +1550,10 @@ static void testNoticeCeiling() {
     const Follower::Hold& h = f.holding[1];
     check(h.begun == 1 && h.read == 720 && h.taken == 0 && h.budget == 0 && h.sends == 0 && h.slack == f.slack && h.at >= f.tracker.side[1].noticeSince,
           "the notice held back is not kept with what its ceiling was made of: begun " + std::to_string(h.begun) + ", read " + std::to_string(h.read) + ", slack " + std::to_string(h.slack));
+    // (read otherwise for a frame, a light over it, while it is held back: still the one held back, begun once)
+    Reading flicker = lit;
+    flicker.side[1].notice = 700;
+    f.step(flicker, at++);
     for (int k = 0; k < f.noticeLong; ++k) f.step(lit, at++);
     check(f.notice[1] == 720 && f.held == 1 && f.holding[1].begun == 1, "a notice of more than can have been sent is not taken when it stays");
     Reading few = coming;
@@ -2559,7 +2564,8 @@ static void testDriver() {
         narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
         std::atomic<int> before{0}, after{0};
         DriveCounts n;
-        driveRound(107, n, {.lag = 5, .given = std::make_unique<CountedX3>(narrow, &before), .later = std::make_unique<CountedX3>(narrow, &after), .laterAt = 1200});
+        // (4000 frames: 2P's chains, however long, leave the AI given later pairs to choose)
+        driveRound(107, n, {.lag = 5, .frames = 4000, .given = std::make_unique<CountedX3>(narrow, &before), .later = std::make_unique<CountedX3>(narrow, &after), .laterAt = 1200});
         check(before > 0 && after >= 10 && n.hits * 10 >= n.locks * 9,
               "the AI given while the AI plays does not play (" + std::to_string(after.load()) + " choices; the one before " + std::to_string(before.load()) +
                   "), or pairs are not brought where the AI chose (" + std::to_string(n.hits) + " of " + std::to_string(n.locks) + ")");
@@ -4019,9 +4025,9 @@ static void testOnePictureOff() {
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
     DriveCounts n, plain;
-    // (eight rounds: a pair begun early is moved in its first frames, which draw no such picture - 41 or 42 in six rounds,
-    //  45 to 56 in eight)
-    for (const uint64_t seed : {120, 121, 122, 123, 124, 125, 126, 127})
+    // (twelve rounds: a pair begun early is moved in its first frames, which draw no such picture - 41 or 42 in six rounds,
+    //  45 to 56 in eight; 32 to 36 in eight with the pairs begun by the window too)
+    for (const uint64_t seed : {120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131})
         for (const int glitch : {4, 0}) {
             auto a = ai::makeAgent("x3", narrow);
             Driver::prepare(a.get());
@@ -5468,6 +5474,40 @@ static void testEarlyBegin() {
     std::cout << "pairs begun early: " << counts(on) << "; not early: " << counts(off) << "\n";
 }
 
+// A pair the engine does not foresee - garbage on its way or falling first, the other side's chain running - is begun
+// early by the window of the next pairs going away from where it stood (Driver::windowDue), the own side still: in
+// rounds drawn of X3 against X3, the pairs begun so are begun as their first button reaches them, few taken again from
+// the screen, none left alone, as many where the AI chose.
+static void testBegunByTheWindow() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    std::vector<std::pair<int64_t, std::string>> notes;
+    for (const uint64_t seed : {130, 131, 132, 133, 134, 135}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .frames = 6000, .notes = &notes, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true});
+    }
+    // (the pairs begun by the window, and those of them begun again as the screen showed them: they came another frame)
+    std::set<std::pair<int64_t, int>> byWindow;
+    long window = 0, again = 0;
+    int round = 0;
+    int64_t last = 0;
+    for (const auto& [at, line] : notes) {
+        if (at < last - 1000) ++round; // (the next round drawn: its clock begins again)
+        last = at;
+        int pair = 0;
+        if (std::sscanf(line.c_str(), "2P pair %d", &pair) != 1) continue;
+        if (line.find(" begun early by the window:") != std::string::npos) ++window, byWindow.insert({round, pair});
+        else if ((line.find(" begun: seen in frame") != std::string::npos || line.find(" begun (seen late)") != std::string::npos) && byWindow.count({round, pair})) ++again;
+    }
+    const std::string counts = std::to_string(window) + " pairs begun by the window, " + std::to_string(again) + " of them begun again from the screen; " + std::to_string(n.early) +
+                               " of " + std::to_string(n.appeared.size()) + " begun before they appeared, " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
+                               " where the AI chose, " + std::to_string(n.leftAlone) + " left alone, " + std::to_string(n.downAtSpawn) + " took the down button of the pair before";
+    check(window >= 10 && again * 5 <= window && n.leftAlone == 0 && n.downAtSpawn == 0 && n.hits * 100 >= n.locks * 98, "pairs begun by the window: " + counts);
+    std::cout << "pairs begun by the window: " << counts << "\n";
+}
+
 // A frame of the pad lost as the pair of 2P comes to rest on the ground (a machine under load): it may be the down button
 // that was to lock it. After its engine has locked the pair the driver holds the down button two frames more, also when
 // the screen shows the pair lying (let go as the screen showed it lying, a pair whose down button was lost lay unlocked
@@ -6095,6 +6135,7 @@ int main(int argc, char** argv) {
         testAimKeptAtLock();
         testPairStartCounted();
         testEarlyBegin();
+        testBegunByTheWindow();
         testKicksShownLate();
         testLiftsShownLate();
         testKeepsLow();
