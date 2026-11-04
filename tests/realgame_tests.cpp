@@ -975,17 +975,28 @@ static void testPairsNeverLeft() {
     second.side[1].point[SPAWN_X][23] = 5;
     for (int f = 0; f < 3; ++f) t.step(second, at++);
     check(t.side[1].pairs == 2 && t.side[1].inHand, "a pair after one put out of sight, where pairs appear as that one did, is not seen");
-    // It comes to rest in the first column. The window moves on to 4 1 / 3 3 and the next pair appears: 4 1 for the
-    // window read before, but of another axis on the screen (3: as if the window had been read wrong).
-    Reading rest = window(empty, {2, 2}, {4, 1});
-    rest.side[1].point[0][0] = rest.side[1].point[0][1] = 5, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 3;
-    for (int f = 0; f < 30; ++f) t.step(rest, at++);
-    for (int f = 0; f < 6; ++f) t.step(window(rest, {4, 1}, {3, 3}), at++);
-    Reading other = window(rest, {4, 1}, {3, 3});
-    other.side[1].point[SPAWN_X][23] = 3;
-    for (int f = 0; f < 3; ++f) t.step(other, at++);
-    check(t.side[1].pairs == 3 && t.side[1].inHand && t.side[1].colors.axis == 3,
-          "a pair of other colours than learnt, where pairs appear after the window moved on, is not seen as the pair that came");
+    // It comes to rest in the first column. The window moves on to 4 1 / 3 3 and the next pair appears: 2 2 for the
+    // window read before, but of another axis on the screen (3). Taken as the pair that came either way: with the
+    // colours learnt for sure from the window standing (on the real game a red mark drawn above the third column was
+    // read as the axis of a pair the window had shown for 21 readings), with those seen when the pair was learnt as the
+    // window may have been moving (as if it had been read wrong).
+    for (const bool sure : {true, false}) {
+        Tracker k = t;
+        Reading rest = window(empty, {2, 2}, {4, 1});
+        rest.side[1].point[0][0] = rest.side[1].point[0][1] = 5, rest.side[1].point[0][2] = rest.side[1].point[0][3] = 3;
+        for (int f = 0; f < 30; ++f) k.step(rest, at + f);
+        if (!sure) k.knownOf[1][2] = 2;
+        for (int f = 0; f < 6; ++f) k.step(window(rest, {4, 1}, {3, 3}), at + 30 + f);
+        Reading other = window(rest, {4, 1}, {3, 3});
+        other.side[1].point[SPAWN_X][23] = 3;
+        for (int f = 0; f < 3; ++f) k.step(other, at + 36 + f);
+        const Pair c = k.side[1].colors;
+        check(k.side[1].pairs == 3 && k.side[1].inHand && c.axis == (sure ? 2 : 3),
+              std::string("a pair of other colours than learnt, where pairs appear after the window moved on, is not taken as it should be (learnt ") +
+                  (sure ? "for sure" : "as the window may have been moving") + "; " + std::to_string(k.side[1].pairs) + " pairs, axis " + std::to_string(int(c.axis)) + ")");
+        if (sure) check(k.knows(1, 2) && k.pairOf(1, 2).axis == 2 && k.pairOf(1, 2).child == 2, "a pair learnt for sure from the window standing is learnt again from one picture of it");
+    }
+    at += 40;
     // (3) As (1), the window not read (a light over it): the pair in hand, not seen in many clear readings in a row over
     // the field it appeared over with nothing above it, has been put out of sight. (In a record of the real game a pair
     // of 1P put so was let go only by a picture read with a piece missing, and the next one seen.)

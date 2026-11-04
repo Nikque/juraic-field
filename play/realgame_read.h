@@ -1393,8 +1393,16 @@ private:
                                             (any.childHidden || any.colors.child == pairOf(s, comes).axis) && (shownAlike(s, comes) || !otherLearnt);
                         // (shown alike by both windows standing, the pair is as learnt: it is the picture of it that was
                         //  read wrong - on the real game right pairs were learnt again so)
+                        // (nor a pair learnt for sure from the window standing, which shows it more readings than it
+                        //  takes to learn it otherwise from the window, windowOver - every pair learnt so, as it is
+                        //  learnt only after the window has stood pairGap frames -, the other side's window not having
+                        //  shown it otherwise: a picture of the pair as it appears is one reading, and on the real game
+                        //  the red mark drawn above the third column was read as its axis, a pair the window had shown
+                        //  for 21 readings, the other window not yet, learnt again so; in 37 records this was the one
+                        //  pair learnt again here. Two windows showing it otherwise, the picture tells which.)
+                        const bool stoodLong = learnt(s, comes) && knownOf[s][size_t(comes)] == 1 && strength(s, comes) > windowOver && !otherLearnt;
                         if (!numbered && !turned && nextOne) t.dealt = std::max(t.dealt, comes + 2);
-                        else if (!turned && !(nextOne && numbered) && !shownAlike(s, comes)) learn(s, comes, {any.colors.axis, child});
+                        else if (!turned && !(nextOne && numbered) && !shownAlike(s, comes) && !stoodLong) learn(s, comes, {any.colors.axis, child});
                     }
                     if (!after) ++doubts;
                     newPair(s, any, resting, field, t.strayAt, false);
