@@ -2000,7 +2000,7 @@ struct DriveCounts {
 struct PairStart {
     int64_t begunAt = -1; // the frame of the clock the driver began its last pair in,
     int begunFor = -1;    // ... that pair's number (Driver::begunPair),
-    int64_t firstAt = -1; // ... and the frame it first began that pair in (begun early and taken again from the screen)
+    int64_t firstAt = -1; // ... and the frame it first began that pair in (begun early, or as it appeared, and taken again from the screen)
     int64_t appearedAt = -1, firstBegunAt = -1; // the current pair's appearance and first start (a later restart keeps it)
     int appearedFor = -1;                       // ... its number
     bool leftOver = false;                      // the frame takes buttons sent before the pair that appeared last was begun
@@ -2020,7 +2020,7 @@ struct PairStart {
     // when it is of that pair: one of the next number is the driver's count gone wrong.)
     void take(int64_t from) {
         if (appearedFor < 0) return;
-        if (firstBegunAt < 0 && begunFor == appearedFor && begunAt >= appearedAt) firstBegunAt = begunAt;
+        if (firstBegunAt < 0 && begunFor == appearedFor && firstAt >= appearedAt) firstBegunAt = firstAt;
         leftOver = firstBegunAt < 0 || from < firstBegunAt;
     }
     // ... `buttons`: true when they are the pair before's down button (once for a pair).
@@ -5687,6 +5687,12 @@ static void testPairStartCounted() {
     other.begin(90, 4), other.appear(106, 5), other.begin(107, 6);
     other.take(107);
     check(other.downCarried(BTN_DOWN), "a down button sent for another pair than the one that appeared, begun after it appeared, is not its own");
+    // (timed: the driver drives the pad more than once in a frame of the round, so that it may begin the pair as it appears
+    //  and take it again from the screen before a frame takes the pad: what it sent from the first start is its own)
+    PairStart twice;
+    twice.begin(90, 4), twice.appear(106, 5), twice.begin(106, 5), twice.begin(107, 5);
+    twice.take(106);
+    check(!twice.downCarried(BTN_DOWN), "begun as it appeared and again before a frame took the pad, the down button sent from the first start is its own");
     std::cout << "the pair before's down button carried on: counted from the frame the pair that appears was begun\n";
 }
 
