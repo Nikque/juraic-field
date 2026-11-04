@@ -1757,6 +1757,28 @@ static void testNoticeReadLate() {
     std::cout << "the notice read late after the chain's next pair is not held back: " << counts << "\n";
 }
 
+// Settings laid over those of the AI of the mode (overlayParams): none laid, the AI's as they are; one laid, that one
+// changed and no other; one that is no setting of the AI, false and none laid.
+static void testParamsOverlay() {
+    const auto same = [](const ai::Params& a, const ai::Params& b, const ai::ParamItem* except) {
+        for (const ai::ParamItem& item : ai::PARAM_ITEMS)
+            if (&item != except && a.*item.member != b.*item.member) return false;
+        return true;
+    };
+    const ai::Params base;
+    ai::Params p = base;
+    std::string error;
+    check(overlayParams(p, "", error) && same(p, base, nullptr), "no settings laid over the AI's change them");
+    const ai::ParamItem& first = ai::PARAM_ITEMS[0];
+    const int value = base.*first.member + 1;
+    check(overlayParams(p, std::string(first.name) + "=" + std::to_string(value), error) && p.*first.member == value && same(p, base, &first),
+          "a setting laid over the AI's is not taken alone");
+    ai::Params q = base;
+    check(!overlayParams(q, "noSuchSetting=1," + std::string(first.name) + "=" + std::to_string(value), error) && same(q, base, nullptr) && !error.empty(),
+          "a setting that is none of the AI's is laid, or the others with it");
+    std::cout << "settings laid over the AI's of the mode: as given, none for a setting the AI has not\n";
+}
+
 // An agent that chooses the first placement it may, counting its choices.
 struct FirstAgent : ai::PlacementAgent {
     int choices = 0;
@@ -2094,6 +2116,8 @@ public:
             setGate(driver, [stalled](int64_t, uint8_t b) { return stalled ? uint8_t(0) : b; });
             const int corrected = driver.corrected;
             const uint8_t out = driver.tick(follow, now);
+            check(driver.seenAsTracker(follow.tracker) && follow.seen[0].asTracker(follow.tracker.side[0]) && follow.seen[1].asTracker(follow.tracker.side[1]),
+                  "the driver or Follower took other frames of a side from the events than the tracker has");
             if (!woken) pace.filledAt(time(at)), ++fills;
             ++drives;
             sent.push_back({at, at + how.input + spread(how.inputSpread), now, out, false});
@@ -2351,6 +2375,8 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             } else {
                 follow.step(read(canvas.picture(), l), clock);
                 sent[size_t(clock - first)] = d.tick(follow, clock);
+                check(d.seenAsTracker(follow.tracker) && follow.seen[0].asTracker(follow.tracker.side[0]) && follow.seen[1].asTracker(follow.tracker.side[1]),
+                      "the driver or Follower took other frames of a side from the events than the tracker has");
                 if (d.played != played) played = d.played, target = -1, ps.begin(clock, d.begunPair());
                 if (d.target() >= 0) target = d.target();
             }
@@ -2464,7 +2490,11 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         } else {
             const int correctedNow = d.corrected;
             sent[size_t(clock - first)] = d.tick(follow, clock);
+            check(d.seenAsTracker(follow.tracker) && follow.seen[0].asTracker(follow.tracker.side[0]) && follow.seen[1].asTracker(follow.tracker.side[1]),
+                  "the driver or Follower took other frames of a side from the events than the tracker has");
             if (how.twiceOneIn && twicer.below(uint64_t(how.twiceOneIn)) == 0) sent[size_t(clock - first)] = d.tick(follow, clock);
+            check(d.seenAsTracker(follow.tracker) && follow.seen[0].asTracker(follow.tracker.side[0]) && follow.seen[1].asTracker(follow.tracker.side[1]),
+                  "the driver or Follower took other frames of a side from the events than the tracker has");
             if (clock - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
         }
@@ -6285,6 +6315,7 @@ int main(int argc, char** argv) {
         testNoticeCeiling();
         testNoticeReadLate();
         testNoticeAfterNextPair();
+        testParamsOverlay();
         testUnknownPairsUnknown();
         testOtherSideAtItsFrame();
         testPace();

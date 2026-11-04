@@ -187,6 +187,9 @@ public:
     // Follower.
     int toldPair() const { return lockedPair; }
     juraic::Placement toldPlacement() const { return lockedPlacement; }
+    // What the driver has taken of the own side from the tracker's events (SideSeen, taken as each call begins), as
+    // SideTrack has it (the tests check it after each call).
+    bool seenAsTracker(const Tracker& t) const { return seen.asTracker(t.side[me]); }
     // The buttons `b` with the two turns the other way round (as they go to the pad when turnsSwapped).
     static uint8_t otherTurns(uint8_t b) { return swapTurns(b); }
     const juraic::GameField& begunField() const { return startOwn.field; }
@@ -211,6 +214,7 @@ public:
 private:
     uint8_t drive(const Follower& f, int64_t now) {
         const Tracker& t = f.tracker;
+        takeEvents(t);
         if (nextAgent && !active) {
             if (agent) std::thread([before = std::move(agent)]() mutable { before.reset(); }).detach();
             agent = std::move(nextAgent);
@@ -257,6 +261,12 @@ private:
         return press(now, held);
     }
 
+    // The own side as its events tell it (SideSeen): the frame its last pair appeared in, seen late or not, the frame its
+    // window last moved on, the frame the window last went away from where it stood.
+    SideSeen seen;
+    void takeEvents(const Tracker& t) { seen.take(t, me); }
+    // The window has moved on since the pair in play was begun (or since its move then, for a pair begun early: takePair).
+    bool movedSinceBegun() const { return seen.movedAt > shiftBegun; }
     // (Tracker counts the pairs of a round from 0 only as a new round begins.)
     void beginRound(const Tracker& t) {
         following = untilLocked = false;
@@ -282,15 +292,15 @@ private:
         // (a new pair seen since the last call - not Tracker::spawned, which tells of the last reading only: the thread of
         //  the play on Windows reads the pictures that came and then drives once: in rounds drawn so, with pairs that came
         //  later than foreseen, pairs were begun from the screen 145 times read so and 165 times read one by one)
-        const bool spawned = side.spawnedAt != spawnTaken;
-        spawnTaken = side.spawnedAt;
+        const bool spawned = seen.appearedAt != spawnTaken;
+        spawnTaken = seen.appearedAt;
         // (a pair begun early: the window moving on as it appears tells no other pair has come; the screen showing it
         //  appear in another frame than the engine foresaw - garbage it knows nothing of fell first -, it is taken from it.
         //  Seen late within BLIND_SLACK frames after that frame - moved as it appeared, first seen aside -, it is the one
         //  begun: taken from the screen again, 19 pairs of a play test of the real game lost what was done for them.)
-        if (earlyFor >= 0 && side.shiftedAt > shiftBegun && !earlyShifted) shiftBegun = side.shiftedAt, earlyShifted = true;
+        if (earlyFor >= 0 && movedSinceBegun() && !earlyShifted) shiftBegun = seen.movedAt, earlyShifted = true;
         if (earlyFor >= 0 && side.pairs == earlyFor && spawned) {
-            const bool off = side.late ? side.spawnedAt < earlyAt || side.spawnedAt - earlyAt > BLIND_SLACK : side.spawnedAt != earlyAt;
+            const bool off = seen.late ? seen.appearedAt < earlyAt || seen.appearedAt - earlyAt > BLIND_SLACK : seen.appearedAt != earlyAt;
             earlyFor = -1, blindFor = -1;
             if (off) shots.clear(), begin(f, side);
         } else if (side.pairs > pairsSeen) {
@@ -301,8 +311,8 @@ private:
             // (the screen shows the pair begun unseen: taken from it if it came at another time than foreseen, or the
             //  engine has put it already)
             blindFor = -1;
-            if (!active || std::abs(side.spawnedAt - blindAt) > BLIND_SLACK) begin(f, side);
-        } else if (blindFor >= 0 && ((side.unseen > 0 && counted >= blindFor) || side.shiftedAt > shiftBegun)) {
+            if (!active || std::abs(seen.appearedAt - blindAt) > BLIND_SLACK) begin(f, side);
+        } else if (blindFor >= 0 && ((side.unseen > 0 && counted >= blindFor) || movedSinceBegun())) {
             // (the window tells the pair begun unseen has been put, the screen never showing it: the next one may be
             //  begun unseen too - kept waiting for the screen to show this one, the next pair under the same light, 80
             //  frames long, was left alone 11 times in a round of 34 pairs drawn so. The window moving on again tells
@@ -356,7 +366,7 @@ private:
         // over have gone, nor for pieces in the air with a pair put at rest: a chain Follower did not reckon (held
         // so, the button went on to the next pair, 5 times in the records).
         const SideModel& m = f.model[me];
-        if (following && side.pairs == pairsSeen && side.clear && side.shiftedAt <= side.spawnedAt + t.pairGap && contains(side.resting, side.under)) {
+        if (following && side.pairs == pairsSeen && side.clear && !seen.movedForNext(t.pairGap) && contains(side.resting, side.under)) {
             const bool put = m.followed == pairsSeen - 1;
             const bool air = colouredAbove(t.last.side[me], side.resting) > 0;
             if (air && (put ? m.chains == 0 && side.resting == side.under : !m.lying)) {
@@ -381,7 +391,7 @@ private:
             //  to the next pair in a round drawn with words over the field. Not for a move of the window before the pair
             //  was begun: for a pair begun unseen that move was its own coming, and let go so it fell by itself.)
             const int64_t comes = appeared(t);
-            if (comes >= 0 && side.shiftedAt > shiftBegun && now + lag >= comes) return press(now, held = sendable(now, tapToEnd(now, 0)));
+            if (comes >= 0 && movedSinceBegun() && now + lag >= comes) return press(now, held = sendable(now, tapToEnd(now, 0)));
             return press(now, held = sendable(now, tapToEnd(now, juraic::BTN_DOWN)));
         }
         untilLocked = false;
@@ -431,8 +441,8 @@ private:
     int64_t putNext = 0;        // ... and the frame of the game it played next then
     juraic::Placement putPlacement{}; // ... and where it had put it (told to Follower)
     int64_t unclearAt = -1000000; // the last frame of the clock the own side was read unclear (earlyDue)
-    int64_t shiftBegun = -1; // the window's last move on (SideTrack::shiftedAt) as the pair in play was begun
-    int64_t spawnTaken = -1; // SideTrack::spawnedAt as the last call found it (takePair)
+    int64_t shiftBegun = -1; // the window's last move on (Seen::movedAt) as the pair in play was begun
+    int64_t spawnTaken = -1; // Seen::appearedAt as the last call found it (takePair)
     int64_t checked = -1;
     int64_t shownAt = -1;       // the last clear picture of the pair in play that showed it where the engine had it (correct)
     int64_t doubtAt = -1;       // the last clear picture of the pair in play showed it otherwise than the engine (correct)
@@ -692,10 +702,10 @@ private:
         learnPairs(t);
         carefulDown(false);
         // (seen late, it was in play already in the frame of the picture: it is taken as appearing in that frame)
-        next = side.spawnedAt + (side.late ? 0 : 1);
+        next = seen.appearedAt + (seen.late ? 0 : 1);
         // (the frames from the picture to now have passed: at least the frames the picture is behind)
-        start(f, t.frame + lag, "2P pair " + std::to_string(side.pairs) + " begun" + (side.late ? " (seen late)" : "") + ": seen in frame " +
-                                    std::to_string(side.spawnedAt) + ", the engine from frame " + std::to_string(next) + ", lag " + std::to_string(lag));
+        start(f, t.frame + lag, "2P pair " + std::to_string(side.pairs) + " begun" + (seen.late ? " (seen late)" : "") + ": seen in frame " +
+                                    std::to_string(seen.appearedAt) + ", the engine from frame " + std::to_string(next) + ", lag " + std::to_string(lag));
         begunAt = active ? t.frame : -1;
     }
     // The frame of the picture the pair in play was begun from, as the screen showed it (-1: not begun so). That picture
@@ -723,10 +733,10 @@ private:
         const SideTrack& side = t.side[me];
         if (pairsSeen == 0) {
             if (!t.fromStart || side.pairs > 0 || side.unseen > 0) return -1;
-            return t.roundStart >= 0 ? t.roundStart + t.timing.firstSpawn : side.shiftedAt >= 0 ? side.shiftedAt + 1 : -1;
+            return t.roundStart >= 0 ? t.roundStart + t.timing.firstSpawn : seen.movedAt >= 0 ? seen.movedAt + 1 : -1;
         }
-        if (!following || own.phase == juraic::Phase::Control || side.shiftedAt <= side.spawnedAt + t.pairGap) return -1;
-        const int64_t shown = side.shiftedAt + 1;
+        if (!following || own.phase == juraic::Phase::Control || !seen.movedForNext(t.pairGap)) return -1;
+        const int64_t shown = seen.movedAt + 1;
         return own.phase == juraic::Phase::Next && own.wait <= 2 ? std::clamp(next + own.wait - 2, shown, shown + 1) : shown;
     }
     // The next pair has come and the screen does not show it: BLIND_AFTER frames after it appeared, the screen of the own
@@ -739,9 +749,8 @@ private:
     // the window moving on after it was taken for no pair: no pair was begun to the end of the round.)
     bool blindDue(const Follower& f, int64_t now) const {
         const Tracker& t = f.tracker;
-        const SideTrack& side = t.side[me];
         const int64_t appears = appeared(t);
-        return blindFor < 0 && (pairsSeen == 0 || side.shiftedAt > shiftBegun) && appears >= 0 && now >= appears + BLIND_AFTER;
+        return blindFor < 0 && (pairsSeen == 0 || movedSinceBegun()) && appears >= 0 && now >= appears + BLIND_AFTER;
     }
     // The next pair, begun unseen, of the colours learnt: the engine goes on from where it stopped (a chain it still ran
     // run to its end at once), the pair appearing in the frame it came; the screen puts it right when it shows it.
@@ -847,9 +856,9 @@ private:
         if (!early || pairsSeen == 0 || blindFor >= 0 || earlyFor >= 0 || !following) return false;
         if (side.pairs != pairsSeen || side.unseen != 0 || side.loose != 0 || !t.still(me) || side.words.any) return false;
         if (m.followed != pairsSeen - 1 && !(m.lying && m.index == pairsSeen - 1)) return false;
-        if (windowOddFor < WINDOW_AWAY || side.asStood || side.awayFrom <= side.spawnedAt + t.pairGap || !settled()) return false;
+        if (windowOddFor < WINDOW_AWAY || side.asStood || !seen.awayForNext(t.pairGap) || !settled()) return false;
         // (not long after: the screen shows the pair then, or the window tells it came unseen)
-        const int64_t first = side.awayFrom + WINDOW_SLIDE + 1 + WINDOW_SPARE, at = now + std::min(lag, measuredLag());
+        const int64_t first = seen.awayAt + WINDOW_SLIDE + 1 + WINDOW_SPARE, at = now + std::min(lag, measuredLag());
         return at >= first && at <= first + 2;
     }
     void beginByWindow(const Follower& f, int64_t now) {
@@ -870,7 +879,7 @@ private:
             if (!Follower::fits(side.resting, engineShown)) return;
             own.field = Follower::withGarbage(side.resting, own.field, rules.maxGarbagePerDrop / juraic::W, guessed);
         }
-        const int64_t appears = side.awayFrom + WINDOW_SLIDE;
+        const int64_t appears = seen.awayAt + WINDOW_SLIDE;
         pairsSeen = side.pairs + 1;
         fitLater(f); // (as beginEarly)
         fitted = std::make_unique<Fitted>(toFit(pairsSeen - 1));
@@ -882,7 +891,7 @@ private:
         own.wait = 1;
         next = appears + 1;
         earlyFor = pairsSeen, earlyAt = appears, earlyShifted = false;
-        start(f, std::max(now + lag, next), "2P pair " + std::to_string(pairsSeen) + " begun early by the window: it went away in frame " + std::to_string(side.awayFrom) +
+        start(f, std::max(now + lag, next), "2P pair " + std::to_string(pairsSeen) + " begun early by the window: it went away in frame " + std::to_string(seen.awayAt) +
                                                 ", the pair to appear in frame " + std::to_string(appears) + ", lag " + std::to_string(lag));
     }
     // (REASONS) In the first frame the next pair would be begun early (its first button reaching the frame the engine
@@ -948,7 +957,7 @@ private:
     // The pair in play begun (begin, beginBlind, beginEarly) with the engine as it is set, noted so (`line`): the frames
     // of the game before `at` have passed - the agent decides them, the game took what the pad held.
     void start(const Follower& f, int64_t at, const std::string& line) {
-        startOwn = own, startNext = next, shiftBegun = f.tracker.side[me].shiftedAt, putAim = -1, sentFor = false;
+        startOwn = own, startNext = next, shiftBegun = seen.movedAt, putAim = -1, sentFor = false;
         past.clear();
         checked = shownAt = doubtAt = begunAt = -1;
         active = true, following = false, untilLocked = false;
@@ -1063,7 +1072,7 @@ private:
     // The pair in play was begun before the screen showed it (early, or unseen), and the screen has not shown it yet.
     bool unshown() const { return pairsSeen > 0 && (earlyFor == pairsSeen || blindFor == pairsSeen); }
     // The window of the next pairs is read as it last stood still, and has not moved on since the pair in play was begun.
-    bool windowWaits(const SideTrack& side) const { return side.shiftedAt <= shiftBegun && side.nextRead[0] && side.nextRead[1] && windowOddFor == 0; }
+    bool windowWaits(const SideTrack& side) const { return !movedSinceBegun() && side.nextRead[0] && side.nextRead[1] && windowOddFor == 0; }
     // The game has stopped: the engine has put a pair the screen has not shown (begun early, or unseen) and foresaw the next
     // one BLIND_SLACK frames ago, the window still stands as it stood when the pair was begun - it moves on only after the
     // pair is put -, the own side is not read, and the other side, read, has not changed for STOP_FRAMES frames (on the
@@ -1115,7 +1124,7 @@ private:
         if (againFor != pairsSeen || !unshown()) return;
         if (earlyFor == pairsSeen && !earlyShifted) return; // (the window moving on as the pair begun early appears: takePair)
         const bool moving = (!side.nextRead[0] && !side.nextRead[1]) || windowOddFor >= 2;
-        if (!moving && side.shiftedAt <= shiftBegun) return;
+        if (!moving && !movedSinceBegun()) return;
         own = putOwn, next = putNext, lockedPair = pairsSeen - 1, lockedPlacement = putPlacement;
         againFor = -1;
         stop(), following = true, untilLocked = false;
@@ -1559,5 +1568,15 @@ private:
         steer(f);
     }
 };
+
+// Settings laid over those the AI that plays 2P is made with (as the settings of 2P's AI are given to
+// tools/realgame_strength.cpp, P2PARAMS: name=value,...; "" lays none): false, with the setting not read in `error`,
+// when one is not a setting of the AI - then none is laid.
+inline bool overlayParams(juraic::ai::Params& p, const std::string& settings, std::string& error) {
+    std::string lines(settings);
+    std::replace(lines.begin(), lines.end(), ',', '\n');
+    std::istringstream in(lines);
+    return juraic::ai::loadParams(in, p, error);
+}
 
 } // namespace play::realgame

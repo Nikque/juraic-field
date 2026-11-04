@@ -84,6 +84,9 @@ struct RealGameMode {
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
+    // Settings laid over those of the AI that plays 2P (realgame::overlayParams: name=value,...); "": the AI's as a match
+    // against it has them.
+    std::string aiSettings;
 
     RealGameMode() = default;
     RealGameMode(const RealGameMode&) = delete;

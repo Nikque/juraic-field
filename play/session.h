@@ -11,6 +11,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -200,6 +201,8 @@ struct Versus {
     AiLog seatLog[2];       // the AI of each seat as the replay names it, with the seed of its round
     bool notesKept = true;  // the round kept last has its AI's notes (keepNotes)
     int64_t logged[2][5]{}; // what the AI of each seat had counted of its thinking when a round was judged last (App::judgeThinking)
+    // When set: given the settings of the AI of a seat as they are made (seat), before the AI is made with them.
+    std::function<void(int seat, ai::Params&)> adjust;
 
     // name = one of ai/agents.h, or empty for a person. live: the match is played at the speed of
     // the screen (a self-test plays its frames as fast as they come).
@@ -245,6 +248,7 @@ struct Versus {
         // self-test: there the buttons must not depend on the machine.)
         // (begun later than 200 ms before the pair, a choice has less: what is left 20 ms before the pair)
         if (live) params.thinkBudget = s.aiLead > 0 ? std::min(s.aiBudget, s.aiLead * 1000 / 60 - 20) : s.aiBudget;
+        if (adjust) adjust(i, params);
         agent[i] = name.empty() ? nullptr : ai::makeAgent(name, params);
         // (for the replay: what the AI needs to make its choices again, replay.h)
         seatLog[i] = AiLog{name, 0, params.beamWidth, params.beamDepth, params.beamQueues, params.thinkAhead, {}};

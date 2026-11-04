@@ -58,6 +58,7 @@ struct SideModel {
 class Follower {
 public:
     Tracker tracker;
+    SideSeen seen[2];           // what each side's events have told (taken as each reading is in)
     juraic::Rules rules;        // those of the real game
     SideModel model[2];
     int notice[2] = {};         // the notice taken (Tracker's, unless more than the chains reckoned can have sent)
@@ -114,6 +115,7 @@ public:
     void step(const Reading& r, int64_t at) {
         const Before previous[2] = {before(tracker.side[0]), before(tracker.side[1])};
         tracker.step(r, at);
+        seen[0].take(tracker, 0), seen[1].take(tracker, 1);
         if (tracker.rounds != round) {
             round = tracker.rounds;
             for (SideModel& m : model) m = SideModel{};
@@ -328,7 +330,7 @@ private:
         // is counted. (Taken as lying so, on the real game, the down button was let go: a turn on its way lifted one
         // pair into the air, and another, turned out of the 13th row, lay 28 frames before it locked.)
         const bool whole = t.inHand && t.pair.seen && !t.pair.childHidden && !t.pair.axisHidden;
-        const bool coming = t.shiftedAt > t.spawnedAt + tracker.pairGap;
+        const bool coming = seen[s].movedForNext(tracker.pairGap);
         m.inAir = more == 1 && contains(t.resting, t.under) && (whole || (!coming && colouredAbove(tracker.last.side[s], t.resting) > 0)) ? m.inAir + 1 : 0;
         if ((more == 2 || more == 1) && contains(t.resting, t.under)) {
             const bool was = m.lying && m.index == t.pairs - 1;

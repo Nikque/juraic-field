@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -1012,8 +1013,49 @@ public:
         if (best >= alignRun && ties == 1) shift = to, ++aligns;
     }
 
+    // What changed for each side, reading after reading, in the order it was read - what the driver takes, rather than
+    // the frames SideTrack keeps (their meaning is this class's own, and changed with it): a round began; a pair appeared
+    // (the frame it was seen first, the pairs counted then, seen late), or was taken again so; the window moved on - or
+    // its move was taken back - (the frame it stood moved on, as SideTrack::shiftedAt tells it); the window went away from
+    // where it stood (SideTrack::awayFrom). `told`: the events of the side since the tracker was made; the last
+    // EVENTS_KEPT of them are kept, the first of `events` being number told - size (from 0).
+    struct Event {
+        enum Kind : uint8_t { ROUND, APPEARED, MOVED, AWAY } kind = ROUND;
+        int64_t frame = -1;
+        int pairs = 0;
+        bool late = false;
+    };
+    static constexpr size_t EVENTS_KEPT = 256;
+    std::deque<Event> events[2];
+    uint64_t told[2] = {};
+    // ... of this tracker as it was made or reset (made anew: the events counted from 0 again)
+    static inline uint64_t made = 0;
+    uint64_t id = ++made;
+
     // One picture, of the frame `at` (frames counted by the clock: a frame that was not taken is a number left out).
     void step(const Reading& r, int64_t at) {
+        struct Was {
+            int64_t spawnedAt, shiftedAt, awayFrom;
+            bool late;
+        };
+        const Was was[2] = {{side[0].spawnedAt, side[0].shiftedAt, side[0].awayFrom, side[0].late}, {side[1].spawnedAt, side[1].shiftedAt, side[1].awayFrom, side[1].late}};
+        const int roundsWere = rounds;
+        read(r, at);
+        for (int s = 0; s < 2; ++s) {
+            const SideTrack& t = side[s];
+            if (rounds != roundsWere) tell(s, {Event::ROUND, at});
+            if (t.spawnedAt != was[s].spawnedAt || t.late != was[s].late) tell(s, {Event::APPEARED, t.spawnedAt, t.pairs, t.late});
+            if (t.shiftedAt != was[s].shiftedAt) tell(s, {Event::MOVED, t.shiftedAt});
+            if (t.awayFrom != was[s].awayFrom) tell(s, {Event::AWAY, t.awayFrom});
+        }
+    }
+
+private:
+    void tell(int s, const Event& e) {
+        events[s].push_back(e), ++told[s];
+        if (events[s].size() > EVENTS_KEPT) events[s].pop_front();
+    }
+    void read(const Reading& r, int64_t at) {
         last = r;
         frame = at;
         spawned[0] = spawned[1] = late[0] = late[1] = false;
@@ -1536,6 +1578,38 @@ private:
         // The first pair of a round is seen in its frame firstSpawn (game/player.h startPlayer).
         if (index == 0 && roundStart < 0) roundStart = at - timing.firstSpawn;
     }
+};
+
+// What a side's events (Tracker::Event) have told, taken in their order (take): the frame the last pair appeared in and
+// whether it was seen late, the frame the window last moved on (or its move was taken back to), the frame it last went
+// away from where it stood. What the driver and Follower keep of them, rather than reading SideTrack's frames, whose
+// meaning is the tracker's own.
+struct SideSeen {
+    int64_t appearedAt = -1, movedAt = -1, awayAt = -1;
+    bool late = false;
+    // The events of side s since the last take, in their order (a tracker made anew: from its first).
+    void take(const Tracker& t, int s) {
+        if (t.id != of) *this = SideSeen{}, of = t.id;
+        const std::deque<Tracker::Event>& events = t.events[s];
+        const uint64_t kept = t.told[s] - events.size();
+        for (uint64_t i = std::max(taken, kept); i < t.told[s]; ++i) {
+            const Tracker::Event& e = events[size_t(i - kept)];
+            if (e.kind == Tracker::Event::APPEARED) appearedAt = e.frame, late = e.late;
+            else if (e.kind == Tracker::Event::MOVED) movedAt = e.frame;
+            else if (e.kind == Tracker::Event::AWAY) awayAt = e.frame;
+        }
+        taken = t.told[s];
+    }
+    // ... as SideTrack has them (always, the events taken to the last: the tests check it)
+    bool asTracker(const SideTrack& s) const { return appearedAt == s.spawnedAt && late == s.late && movedAt == s.shiftedAt && awayAt == s.awayFrom; }
+    // The window has moved on since the last pair appeared, more than `gap` frames after (Tracker::pairGap: then it moved
+    // on for the next pair, not as the last one appeared).
+    bool movedForNext(int gap) const { return movedAt > appearedAt + gap; }
+    // ... and gone away from where it stood so.
+    bool awayForNext(int gap) const { return awayAt > appearedAt + gap; }
+
+private:
+    uint64_t of = 0, taken = 0; // (the tracker taken from, by Tracker::id, and how many of the side's events)
 };
 
 // What the AI of seat `me` is shown in the frame in which its new pair was seen (Tracker::spawned[me]): the own side

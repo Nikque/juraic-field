@@ -767,6 +767,14 @@ struct App {
     void startRealGameAI() {
         RealGameMode& m = realGame;
         Versus made;
+        // (with the settings the mode lays over the AI's: none unless it has some)
+        ai::Params tried;
+        std::string wrong;
+        if (!realgame::overlayParams(tried, m.aiSettings, wrong)) return say(L"実機モードの AI の設定が読めません: " + std::wstring(wrong.begin(), wrong.end()));
+        made.adjust = [&m](int, ai::Params& p) {
+            std::string unread;
+            realgame::overlayParams(p, m.aiSettings, unread);
+        };
         made.seat(1, aiOfLevel(m.level, m.style), settings);
         if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(made.agent[1].get())) x3->noting = false; // (no replay keeps its notes)
         if (m.playing) return m.replaceAgent(std::move(made.agent[1]));
@@ -1134,6 +1142,20 @@ struct App {
     // The screen before it: the own name, the port a room opened waits on, a room opened (this machine waits for a call
     // on that port) or entered (the address of the machine that waits). A text is typed after Enter on its row (the port:
     // its digits), and ended with Enter or Esc.
+    // ... a text typed is ended (Enter or Esc).
+    void endLobbyEdit() {
+        lobbyEditing = false;
+        if (netName.empty()) netName = L"Player";
+        if (lobbyIndex == 1) {
+            // (a port from 1 to 65535; otherwise the one before is kept)
+            const int port = netPortText.empty() || netPortText.size() > 5 ? 0 : std::stoi(netPortText);
+            if (port >= 1 && port <= 65535) netPort = port;
+            else say(L"ポートは 1 から 65535 までの数で入れてください（" + std::to_wstring(netPort) + L" のままです）");
+        }
+        forgetKeys();
+        saveAll();
+        audio.play(SND_SELECT);
+    }
     void updateLobby() {
         if (pressed(VK_F1)) showAddress = !showAddress;
         if (lobbyEditing) {
@@ -1148,19 +1170,7 @@ struct App {
                 const bool fits = lobbyIndex == 0 ? c >= 32 && c != 127 : lobbyIndex == 1 ? c >= L'0' && c <= L'9' : c > 32 && c < 127;
                 if (fits && text.size() < most) text += c;
             }
-            if (pressed(VK_RETURN) | pressed(VK_ESCAPE)) {
-                lobbyEditing = false;
-                if (netName.empty()) netName = L"Player";
-                if (lobbyIndex == 1) {
-                    // (a port from 1 to 65535; otherwise the one before is kept)
-                    const int port = netPortText.empty() || netPortText.size() > 5 ? 0 : std::stoi(netPortText);
-                    if (port >= 1 && port <= 65535) netPort = port;
-                    else say(L"ポートは 1 から 65535 までの数で入れてください（" + std::to_wstring(netPort) + L" のままです）");
-                }
-                forgetKeys();
-                saveAll();
-                audio.play(SND_SELECT);
-            }
+            if (pressed(VK_RETURN) | pressed(VK_ESCAPE)) endLobbyEdit();
             return;
         }
         const int count = 6;
@@ -2048,6 +2058,30 @@ struct App {
             selfNav = selfNavWas = 0;
             if (!good) result = 14;
             say(good ? L"a direction held down: the steps are as the rule says" : L"a direction held down: a count is not what the rule says");
+        }
+        if (frames == -4) {
+            // The screen before a match over a network (updateLobby): on the row of the port, its text begun (OK), its digits
+            // rubbed out and others typed - a letter among them, not taken -, ended: the port taken; more than 65535, and
+            // 0, typed so: the one before kept. Result 17 when it is not so. The picture: the screen as it opens, the port
+            // as it was.
+            const int was = netPort;
+            const auto type = [&](const std::wstring& text) {
+                lobbyIndex = 1, lobbyEditing = false;
+                selfNav = 1u << NAV_OK, updateLobby(), selfNavWas = selfNav;
+                selfNav = 0, typed = std::wstring(6, wchar_t(8)) + text, updateLobby(), typed.clear(), selfNavWas = 0;
+                if (lobbyEditing) endLobbyEdit();
+            };
+            type(L"12a34");
+            bool good = netPort == 1234;
+            type(L"70000");
+            good = good && netPort == 1234;
+            type(L"0");
+            good = good && netPort == 1234;
+            type(L"65535");
+            good = good && netPort == 65535 && !lobbyEditing;
+            netPort = was, lobbyIndex = 0, message.clear();
+            if (!good) result = 17;
+            say(good ? L"the port of the lobby: taken as typed, from 1 to 65535" : L"the port of the lobby: a port typed is not taken as it should be");
         }
 #ifdef _WIN32
         if (frames == -7) {
