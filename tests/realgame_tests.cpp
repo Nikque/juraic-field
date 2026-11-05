@@ -1929,6 +1929,9 @@ static void testPace() {
 
 struct DriveCounts {
     long locks = 0, hits = 0, corrected = 0, lagRight = 0, lagRounds = 0;
+    // Pictures that put the engine's pair right while Tracker had not counted the pair the driver plays (begun early or
+    // unseen): its pair in play then the one before.
+    long staleCorrected = 0;
     // Pairs locked elsewhere than the AI chose with garbage fallen on 2P since the pair before, and of them those with no
     // clear picture of 2P since it fell (the engine of the driver knows of no garbage, and the screen showed none of it).
     long garbageMisses = 0, unseenGarbageMisses = 0;
@@ -2355,6 +2358,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     const auto driven = [&](int64_t now, int correctedNow, uint8_t) {
         if (now - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
         if (now - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
+        if (d.corrected > correctedNow && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen < d.begunPair()) ++n.staleCorrected;
         if (d.played != played) {
             played = d.played, target = -1, ps.begin(now, d.begunPair());
             const GameField &begun = d.begunField(), &game = r.player[1].field;
@@ -2513,6 +2517,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
                   "the driver or Follower took other frames of a side from the events than the tracker has");
             if (clock - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
+            if (d.corrected > correctedNow && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen < d.begunPair()) ++n.staleCorrected;
         }
         if (!how.timed.on && d.played != played) {
             played = d.played, target = -1, ps.begin(clock, d.begunPair());
@@ -2705,6 +2710,27 @@ static void testTimedRounds() {
         check(n.locks >= 40 && n.hits * 100 >= n.locks * c.most, std::string("in time, ") + c.name + ": pairs where the AI chose " + std::to_string(n.hits) + " of " + std::to_string(n.locks));
     }
     std::cout << "rounds in time: pictures twice, out of order, left out, the play late, the pad shaky, kicks, a stop - none left alone; no picture for long, the pad let go\n";
+}
+
+// Rounds in time, pairs begun early that appear a frame sooner than the engine foresaw and turn or move at once (not
+// drawn then): until Tracker sees such a pair appear, its pair in play is the one before, at rest where it was put. No
+// picture puts the engine's pair right so (put right so, the engine had the pair where the one before lies, its target
+// column, and it went down a column short with nothing but the down button pressed).
+static void testPutRightOfThePairInHand() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    TimedRun base;
+    base.on = true;
+    DriveCounts n;
+    for (const uint64_t seed : {129, 149}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .timed = base});
+    }
+    check(n.staleCorrected == 0 && n.leftAlone == 0, "in time, pictures of the pair before put the engine's pair right " + std::to_string(n.staleCorrected) + " times (" +
+                                                         std::to_string(n.corrected) + " put right, " + std::to_string(n.leftAlone) + " left alone)");
+    std::cout << "rounds in time: no picture of the pair before puts the engine's pair right (" << n.corrected << " put right, " << n.hits << " of " << n.locks
+              << " where the AI chose)\n";
 }
 
 // An agent that chooses the first placement it may, and notes how many frames before its pair appears it chose (the
@@ -6386,6 +6412,7 @@ int main(int argc, char** argv) {
         testPausedRound();
         testPausedBeforeAppearing();
         testTimedRounds();
+        testPutRightOfThePairInHand();
         testSecondChoiceInAirOnThreads();
         testPicturesTakenTogether();
         testAimKeptAtLock();

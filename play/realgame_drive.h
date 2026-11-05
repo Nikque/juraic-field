@@ -1513,6 +1513,11 @@ private:
         const Tracker& t = f.tracker;
         const SideTrack& side = t.side[me];
         if (!side.pair.seen || !side.clear || t.frame <= checked) return;
+        // (nor while Tracker has not counted the pair the engine plays - begun early or unseen -: its pair in play is the
+        //  one before, at rest where it was put. In rounds drawn in time, a pair begun early appeared a frame sooner than
+        //  the engine foresaw and turned at once, not drawn then, and one picture of the pair before put it right there:
+        //  in its target column, it went down a column short with only the down button pressed.)
+        if (side.pairs + side.unseen < pairsSeen) return;
         checked = t.frame;
         const size_t i = pastIndex(t.frame);
         if (i == past.size() || past[i].state.phase != juraic::Phase::Control) {
