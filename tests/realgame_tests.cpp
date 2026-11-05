@@ -2477,8 +2477,13 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         else follow.step(read(canvas.picture(), l), clock);
         if (follow.tracker.side[1].clear) clearAt = clock;
         // (the pair seen as it is about to appear, or in play already when seen late)
-        if (follow.tracker.spawned[1])
-            ++n.spawnsSeen, n.miscounted += follow.tracker.side[1].pairs != r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
+        // (... or one that appeared and locked at once - on a full column - before a picture of it was read: the pair it
+        //  is, seen once the round has gone on)
+        if (follow.tracker.spawned[1]) {
+            const int counted = follow.tracker.side[1].pairs, given = r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
+            const bool lockedAtOnce = r.player[1].phase != Phase::Control && counted == r.player[1].nextPair && ps.appearedFor == counted && ps.appearedAt >= clock - 3;
+            ++n.spawnsSeen, n.miscounted += counted != given && !lockedAtOnce;
+        }
         if (const int k = follow.model[1].followed; k != foundBefore) {
             foundBefore = k;
             if (k >= 0 && k < int(putAsChosen.size()) && putAsChosen[size_t(k)] >= 0)

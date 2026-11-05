@@ -335,8 +335,13 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how, int* re
         else follow.step(read(canvas.picture(), l), clock);
         if (follow.tracker.side[1].clear) clearAt = clock;
         // (the pair seen as it is about to appear, or in play already when seen late)
-        if (follow.tracker.spawned[1])
-            ++n.spawnsSeen, n.miscounted += follow.tracker.side[1].pairs != r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
+        // (... or one that appeared and locked at once - on a full column - before a picture of it was read: the pair it
+        //  is, seen once the round has gone on)
+        if (follow.tracker.spawned[1]) {
+            const int counted = follow.tracker.side[1].pairs, given = r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
+            const bool lockedAtOnce = r.player[1].phase != Phase::Control && counted == r.player[1].nextPair && ps.appearedFor == counted && ps.appearedAt >= clock - 3;
+            ++n.spawnsSeen, n.miscounted += counted != given && !lockedAtOnce;
+        }
         if (glitchDrawn) {
             const SideTrack& s1 = follow.tracker.side[1];
             n.glitchesRead += s1.pair.seen && s1.clear && s1.pair.at.x == glitchAt.x && s1.pair.at.y == glitchAt.y && s1.pair.at.dir == glitchAt.dir;
