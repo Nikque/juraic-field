@@ -279,8 +279,26 @@ private:
         whyFor = lightFor = lightChecked = -1;
         found.clear();
         agent->startRound(me, seed++);
+        if constexpr (REASONS) noteThinking(t.frame);
         stop();
         shots.clear(), fitted.reset(); // (a pair of the round before is not fitted: its pictures may be cut short)
+    }
+    // (REASONS) The AI's thinking since the last round began, as X3Pace counts it - its choices, the searches the clock
+    // stopped or made narrower to end in time (Params::thinkBudget: a machine busy with other work), the choices whose
+    // plans knew two pairs only, the second choices made and those the clock left poor -, noted as the next round begins
+    // (startRound has ended any search: the counts are not written while they are read).
+    std::array<int64_t, 6> thoughtBefore{};
+    void noteThinking(int64_t at) {
+        const auto* pace = dynamic_cast<const juraic::ai::X3Pace*>(agent.get());
+        if (!pace) return;
+        const std::array<int64_t, 6> now{pace->thinkCount, pace->cutSearches, pace->narrowSearches, pace->shortPlans, pace->againMade, pace->againPoor};
+        if (now[0] < thoughtBefore[0]) thoughtBefore = {}; // (another AI took over: counted from its first choice)
+        std::array<int64_t, 6> d{};
+        for (size_t i = 0; i < now.size(); ++i) d[i] = now[i] - thoughtBefore[i];
+        thoughtBefore = now;
+        if (d[0] == 0) return;
+        note(at, "2P the AI's thinking in the round before: " + std::to_string(d[0]) + " choices, " + std::to_string(d[1]) + " searches stopped by the clock, " + std::to_string(d[2]) +
+                     " made narrower, " + std::to_string(d[3]) + " choices with two pairs known, second choices " + std::to_string(d[4]) + " made and " + std::to_string(d[5]) + " poor");
     }
     // A pair seen, or one the window tells has come (the pair begun unseen let go): begun.
     void takePair(const Follower& f) {

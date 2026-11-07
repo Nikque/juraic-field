@@ -32,6 +32,9 @@ struct SideModel {
     int left = 0;
     int64_t leftTill = -1;
     int downMost = 0;        // the most points the down key can have added since the last chain of this side (Follower::downMost)
+    // A pair came to rest unfound, and the next pair appeared over fewer pieces than it and those before it left: a chain
+    // ran that was not followed. What it sent is not known until the frame `unfollowedTill` (Follower::ceiling).
+    int64_t unfollowedTill = -1;
     // The pair in play lying where the pieces at rest are the field it appeared over and it: where it would be locked.
     // It may still move; it is locked when the pieces change otherwise (its chain, garbage) or the next pair appears.
     bool lying = false;
@@ -98,11 +101,11 @@ public:
     void tell(int s, int pair, juraic::Placement p) { told[s] = {pair, p}; }
 
     // The most the notice of side s can show from the chains reckoned; -1: not known (a pair of the other side came to
-    // rest and its placement was not found).
+    // rest and its placement was not found, or a chain of it was not followed a while ago: SideModel::unfollowedTill).
     int ceiling(int s) const {
         const SideTrack& o = tracker.side[1 - s];
         const SideModel& m = model[1 - s];
-        const bool reckoned = m.known && (m.followed == o.pairs - 1 || m.lying || (o.inHand && o.resting == o.under));
+        const bool reckoned = m.known && (m.followed == o.pairs - 1 || m.lying || (o.inHand && o.resting == o.under)) && tracker.frame >= m.unfollowedTill;
         return reckoned ? reckonedMost(s) : -1;
     }
     // ... as far as the chains reckoned tell, whether or not a pair of the other side came to rest unfound
@@ -134,6 +137,12 @@ public:
                     outOfSight(s, previous[s], at);
                 if (m.lying) lock(s, at);
                 const bool putUnseen = m.known && m.followed < t.pairs - 2 && unseen(s, previous[s], at);
+                // (pairs come to rest unfound, and the new pair appears over fewer pieces than they and those before them
+                //  left: a chain ran that was not followed - what it sent comes to the other side's notice as it ends, or
+                //  soon after the new pair appears, and is not known: on the real game the 73 a chain of 1P sent back over
+                //  what it offset, held back as more than reckoned, was shown to the AI 100 frames late)
+                if (const int unfound = t.pairs - 2 - m.followed; m.known && unfound > 0 && shown(t.under).f.count() < shown(m.core.field).f.count() + 2 * unfound)
+                    m.unfollowedTill = at + noticeLong;
                 // A new pair: the pieces it appears over, against the game (only garbage may have come above them).
                 if (m.known && m.followed == t.pairs - 2) {
                     ++checks;
@@ -153,6 +162,13 @@ public:
                 if (garbage && putUnseen)
                     for (int x = 0; x < juraic::W; ++x)
                         if ((twelveHigh(t.under) >> x & 1) && was.f.get(x, 12) == juraic::EMPTY) m.unsure |= uint8_t(1u << x);
+                // (a pair of the round before it, and it appears over no piece at all, or with the words of an all clear
+                //  standing over the field - the game shows them until the next chain takes the bonus, garbage fallen
+                //  under them or not -: the bonus goes with the next chain, so too when the chain that cleared the field
+                //  was not followed. On the real game the 31 a chain of one sent after such an all clear, garbage fallen
+                //  since, was held back as more than reckoned, and fell on the other side before its AI was shown it.)
+                const bool bare = m.core.field.f.empty() && std::all_of(m.core.field.row14.begin(), m.core.field.row14.end(), [](juraic::Cell c) { return c == juraic::EMPTY; });
+                if (m.known && t.pairs >= 2 && t.clear && (bare || t.words.any)) m.core.scoring.allClear = true;
                 m.known = true;
                 // (its chain has ended: what it sent is in the notice of the other side, or soon - the notice of the real
                 //  game settled after the next pair had appeared, 42 frames after once, and the notice was held back)
@@ -625,13 +641,16 @@ private:
     }
 
     // The notice of side s: Tracker's (read the same for a few frames), unless more than can have been sent. (Less is
-    // always taken: garbage falls, chains offset it.)
+    // taken - garbage falls, chains offset it - once the side has been read clear for Tracker::noticeFrames frames:
+    // under a light over 2P on the real game, the garbage of 1P's chain flying in, its notice read 0 for three frames
+    // with 32 on its way, and taken so, the 37 read after it was held back as a rise of more than reckoned.)
     void takeNotice(int s, int64_t at) {
         const SideTrack& t = tracker.side[s];
         if (t.notice == notice[s]) {
             holding[s].on = false;
             return;
         }
+        if (t.notice < notice[s] && at - t.unclearAt < tracker.noticeFrames) return;
         const int most = ceiling(s);
         const bool take = most < 0 || t.notice <= most;
         if (!take && (!holding[s].on || holding[s].read != t.notice)) {

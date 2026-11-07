@@ -1724,6 +1724,164 @@ static void testNoticeAfterNextPair() {
     std::cout << "the notice a chain was reckoned to send is taken a while after its next pair appears\n";
 }
 
+// A chain of 1P not followed (Follower): its pair came to rest where no placement shows it, and the next pair appeared
+// over fewer pieces than were there before it - what the chain sent is not known, and the notice of 2P is taken at once
+// for noticeLong frames after that pair appeared. (Held back as more than reckoned, the 73 a chain of 1P sent back over
+// what it offset was shown to the AI 100 frames late on the real game.) Then the most is known again.
+static void testNoticeAfterUnfollowedChain() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {2, 3}, side.next[1] = {4, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    int64_t at = 10;
+    for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+    Reading first = empty;
+    first.side[0].next[0] = {4, 2}, first.side[0].next[1] = {1, 5};
+    first.side[0].point[SPAWN_X][23] = 2;
+    for (int k = 0; k < 5; ++k) f.step(first, at++);
+    Reading landed = first;
+    landed.side[0].point[SPAWN_X][23] = EMPTY;
+    landed.side[0].point[0][0] = landed.side[0].point[0][1] = 2, landed.side[0].point[0][2] = landed.side[0].point[0][3] = 3;
+    for (int k = 0; k < 6; ++k) f.step(landed, at++);
+    Reading second = landed;
+    second.side[0].next[0] = {1, 5}, second.side[0].next[1] = {3, 3};
+    second.side[0].point[SPAWN_X][23] = 4;
+    f.step(second, at++);
+    check(f.tracker.side[0].pairs == 2 && f.model[0].followed == 0, "the second pair of 1P is not seen after the first found put");
+    for (int k = 0; k < 20; ++k) f.step(second, at++);
+    // (the second pair lands where no picture shows it, and pieces go: a chain the screen did not show begin)
+    Reading gone = second;
+    gone.side[0].point[SPAWN_X][23] = EMPTY;
+    gone.side[0].point[0][0] = gone.side[0].point[0][1] = 3, gone.side[0].point[0][2] = gone.side[0].point[0][3] = EMPTY;
+    for (int k = 0; k < 40; ++k) f.step(gone, at++);
+    Reading third = gone;
+    third.side[0].next[0] = {3, 3}, third.side[0].next[1] = {2, 5};
+    third.side[0].point[SPAWN_X][23] = 1;
+    for (int k = 0; k < 3; ++k) f.step(third, at++);
+    check(f.tracker.side[0].pairs == 3 && f.model[0].known && f.model[0].followed == 0, "the third pair of 1P is not seen, or the pair before it was taken as found");
+    check(f.ceiling(1) < 0, "the most the notice of 2P can show is taken as known after a chain of 1P not followed");
+    Reading sentBack = third;
+    sentBack.side[1].notice = 73;
+    for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(sentBack, at++);
+    check(f.notice[1] == 73 && f.holding[1].begun == 0, "the notice a chain of 1P not followed brought is held back");
+    for (int k = 0; k < f.noticeLong; ++k) f.step(sentBack, at++);
+    check(f.ceiling(1) >= 0, "the most the notice of 2P can show is not known again long after the pair appeared");
+    check(!f.model[0].core.scoring.allClear, "an all clear is taken where pieces were left");
+    std::cout << "the notice after a chain not followed is taken at once for a while\n";
+}
+
+// An all clear of 1P by a chain not followed (Follower): the next pair appears over no piece at all - the bonus waits for
+// the next chain, and what that chain sends is reckoned with it. (Not known so, the 31 a chain of one of 1P sent after
+// an all clear on the real game was held back as more than reckoned, and fell on 2P before the AI was shown it.) 2P
+// keeps a piece: both fields empty, a round begins.
+static void testAllClearUnfollowed() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {2, 3}, side.next[1] = {4, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    int64_t at = 10;
+    for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+    Reading first = empty;
+    first.side[0].next[0] = {4, 2}, first.side[0].next[1] = {1, 5};
+    first.side[0].point[SPAWN_X][23] = 2;
+    first.side[1].point[5][0] = first.side[1].point[5][1] = 3; // (a piece of 2P)
+    for (int k = 0; k < 5; ++k) f.step(first, at++);
+    Reading landed = first;
+    landed.side[0].point[SPAWN_X][23] = EMPTY;
+    landed.side[0].point[0][0] = landed.side[0].point[0][1] = 2, landed.side[0].point[0][2] = landed.side[0].point[0][3] = 3;
+    for (int k = 0; k < 6; ++k) f.step(landed, at++);
+    Reading second = landed;
+    second.side[0].next[0] = {1, 5}, second.side[0].next[1] = {3, 3};
+    second.side[0].point[SPAWN_X][23] = 4;
+    f.step(second, at++);
+    check(f.tracker.side[0].pairs == 2 && f.model[0].followed == 0 && !f.model[0].core.scoring.allClear, "the second pair of 1P is not seen after the first found put");
+    for (int k = 0; k < 20; ++k) f.step(second, at++);
+    // (the second pair lands where no picture shows it, and every piece goes)
+    Reading cleared = second;
+    cleared.side[0].point[SPAWN_X][23] = EMPTY;
+    for (int k = 0; k < 4; ++k) cleared.side[0].point[0][k] = EMPTY;
+    const int rounds = f.tracker.rounds;
+    for (int k = 0; k < 40; ++k) f.step(cleared, at++);
+    check(f.tracker.rounds == rounds, "a round begins as the field of 1P is cleared");
+    Follower g = f; // (for the words, below)
+    int64_t later = at;
+    Reading third = cleared;
+    third.side[0].next[0] = {3, 3}, third.side[0].next[1] = {2, 5};
+    third.side[0].point[SPAWN_X][23] = 1;
+    for (int k = 0; k < 3; ++k) f.step(third, at++);
+    check(f.tracker.side[0].pairs == 3 && f.model[0].followed == 0, "the third pair of 1P is not seen, or the pair before it was taken as found");
+    check(f.model[0].core.scoring.allClear, "the all clear of 1P, by a chain not followed, is not kept for its next chain");
+    // (... and with the words of the all clear standing over the field, a row of garbage fallen under them)
+    const auto withWords = [](Reading r) {
+        for (int k = 16; k <= 20; ++k)
+            for (int x = 0; x < W; ++x)
+                if (const char w = WORDS[k - 16][x]; w != '.') r.side[0].point[x][k] = w == 'g' ? GARBAGE : Cell(w - '0');
+        return r;
+    };
+    const Reading worded = withWords(cleared);
+    for (int k = 0; k < 80; ++k) g.step(worded, later++);
+    check(g.tracker.side[0].words.any, "the words of the all clear of 1P are not taken for the words");
+    Reading fallen = worded;
+    for (int x = 0; x < W; ++x) fallen.side[0].point[x][0] = fallen.side[0].point[x][1] = GARBAGE;
+    for (int k = 0; k < 20; ++k) g.step(fallen, later++);
+    Reading thirdUnder = fallen;
+    thirdUnder.side[0].next[0] = {3, 3}, thirdUnder.side[0].next[1] = {2, 5};
+    thirdUnder.side[0].point[SPAWN_X][23] = 1;
+    for (int k = 0; k < 3; ++k) g.step(thirdUnder, later++);
+    check(g.tracker.side[0].pairs == 3 && g.tracker.side[0].words.any && g.model[0].core.field.f.count() == W, "the third pair of 1P over the garbage, under the words, is not seen");
+    check(g.model[0].core.scoring.allClear, "the all clear of 1P, its words standing over garbage fallen since, is not kept for its next chain");
+    std::cout << "an all clear by a chain not followed is kept for the next chain\n";
+}
+
+// A notice read lower while the side is not read clear (Follower): kept as it was until the side has been read clear
+// for Tracker::noticeFrames frames, and then taken. (Under a light over 2P on the real game - the garbage of 1P's
+// chain flying in - its notice read 0 for three frames with 32 on its way; taken so, the 37 read after it was held back
+// as a rise of more than reckoned, and the AI was shown 1 to 3 coming for 90 frames.)
+static void testNoticeDropUnclear() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {2, 3}, side.next[1] = {4, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Follower f;
+    int64_t at = 10;
+    for (int k = 0; k < f.tracker.roundGap + 5; ++k) f.step(empty, at++);
+    Reading first = empty;
+    first.side[0].next[0] = {4, 2}, first.side[0].next[1] = {1, 5};
+    first.side[0].point[SPAWN_X][23] = 2;
+    for (int k = 0; k < 5; ++k) f.step(first, at++);
+    f.model[1].budget = 6; // (as a chain of 1P reckoned to send 6 would leave it)
+    Reading six = first;
+    six.side[1].notice = 6;
+    for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(six, at++);
+    check(f.notice[1] == 6, "the notice a chain of 1P was reckoned to send is not taken");
+    Reading lit = six;
+    lit.side[1].notice = 0;
+    lit.side[1].point[4][9] = UNSURE, lit.side[1].unsure = 1;
+    for (int k = 0; k < f.tracker.noticeFrames + 5; ++k) f.step(lit, at++);
+    check(!f.tracker.side[1].clear && f.tracker.side[1].notice == 0 && f.notice[1] == 6, "a notice read lower under a light is taken");
+    // (one clear reading among them: not yet)
+    Reading dark = six;
+    dark.side[1].notice = 0;
+    f.step(dark, at++);
+    f.step(lit, at++);
+    f.step(dark, at++);
+    check(f.notice[1] == 6, "a notice read lower is taken with the side read clear for one frame only");
+    for (int k = 0; k < f.tracker.noticeFrames; ++k) f.step(dark, at++);
+    check(f.notice[1] == 0, "a notice read lower with the side read clear is not taken");
+    std::cout << "a notice read lower is taken only with the side read clear\n";
+}
+
 // The notice in rounds drawn of X3 against X3 (Follower), that of 2P read 40 frames late: no notice the game showed is
 // held back - the points of the down key, which the screen does not tell, are allowed for (Follower::downMost; without,
 // a chain of one sent 6 where 2 were reckoned), and what a chain was reckoned to send is allowed for a while after its
@@ -6363,6 +6521,9 @@ int main(int argc, char** argv) {
         testNoticeCeiling();
         testNoticeReadLate();
         testNoticeAfterNextPair();
+        testNoticeAfterUnfollowedChain();
+        testAllClearUnfollowed();
+        testNoticeDropUnclear();
         testParamsOverlay();
         testUnknownPairsUnknown();
         testOtherSideAtItsFrame();
