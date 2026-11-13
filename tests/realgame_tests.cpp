@@ -5530,6 +5530,173 @@ static void testFirstWindowSlidingAsMoved() {
     std::cout << "a window read on its way as moved on before the first pair: the first pair is counted as the first\n";
 }
 
+// The round taken to begin in the reading in which the windows begin to slide as the first pair comes (the fields empty for
+// roundGap frames only then): the first two pairs are those the windows showed standing in the reading before. (Not learnt
+// so on the real game, the first pair of 2P, its child above the screen as it appeared, was known to neither side, and the
+// AI waited for its colours as it fell by itself where it appeared.)
+static void testFirstWindowAsRoundTaken() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = side.next[1] = {2, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    const auto is = [](const Tracker& t, int i, Pair p) { return t.knows(1, i) && t.pairOf(1, i).axis == p.axis && t.pairOf(1, i).child == p.child; };
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    // (pairs 0 and 1: 2 2; pair 2: 3 3)
+    run(empty, t.roundGap);
+    check(t.rounds == 0, "the round is taken to begin before the fields were empty for roundGap frames");
+    Reading sliding = empty;
+    for (SideRead& side : sliding.side) side.nextRead[0] = side.nextRead[1] = false;
+    run(sliding, 5);
+    check(t.rounds == 1 && is(t, 0, {2, 2}) && is(t, 1, {2, 2}), "the round taken as the windows began to slide: the first pairs are not those they showed standing just before");
+    Reading moved = empty;
+    for (SideRead& side : moved.side) side.next[0] = {2, 2}, side.next[1] = {3, 3};
+    run(moved, 1);
+    Reading first = moved;
+    first.side[1].point[SPAWN_X][23] = 2; // (the axis half a cell up where pairs appear, its child above the screen)
+    run(first, 1);
+    check(t.side[1].pairs == 1 && t.side[1].unseen == 0 && t.side[1].colors.axis == 2 && t.side[1].colors.child == 2,
+          "the first pair, after a window learnt as the round was taken, is not counted as the first of its colours: " + std::to_string(t.side[1].pairs) + "+" +
+              std::to_string(t.side[1].unseen));
+    run(first, 4);
+    check(is(t, 1, {2, 2}) && is(t, 2, {3, 3}), "the pairs after the first are not learnt from the window that moved on as it came");
+    std::cout << "the round taken as the windows began to slide: the first pairs are those they showed standing just before\n";
+}
+
+// A pair no window showed (the windows not read on the round's screen), its child above the screen as it appears: once a
+// picture shows both its pieces, its colours are learnt from it, and the AI plays it. (On the real game the first pairs of
+// two rounds were known to neither window: the AI waited for their colours, and they fell by themselves where they
+// appeared.)
+static void testUnshownPairLearntFromItself() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.nextRead[0] = side.nextRead[1] = false;
+    }
+    Follower f;
+    Driver d;
+    std::vector<int> waits;
+    d.agent = std::make_unique<EarlyAgent>(&waits); // (the first placement: the first column, the child up)
+    d.lag = 5, d.takeLag = false;
+    int64_t at = 50000;
+    for (int k = 0; k < 40; ++k, ++at) f.step(empty, at), d.tick(f, at);
+    // (pair 0: 5 3, its axis half a cell up where pairs appear, its child above the screen)
+    Reading first = empty;
+    first.side[1].point[SPAWN_X][23] = 5;
+    for (int k = 0; k < 2; ++k, ++at) f.step(first, at), d.tick(f, at);
+    check(f.tracker.side[1].pairs == 1 && !f.tracker.knows(1, 0) && d.target() < 0, "the first pair, of colours no window showed, is not taken as unknown");
+    // A cell lower, both pieces showing.
+    Reading lower = empty;
+    lower.side[1].point[SPAWN_X][21] = lower.side[1].point[SPAWN_X][22] = 5, lower.side[1].point[SPAWN_X][23] = 3;
+    for (int k = 0; k < 6; ++k, ++at) f.step(lower, at), d.tick(f, at);
+    check(f.tracker.knows(1, 0) && f.tracker.pairOf(1, 0).axis == 5 && f.tracker.pairOf(1, 0).child == 3, "the colours of a pair no window showed are not learnt from it once both pieces show");
+    check(d.target() >= 0 && !waits.empty(), "the AI waits on for a pair no window showed once both its pieces show");
+    std::cout << "a pair no window showed, both pieces shown as it falls: its colours learnt from it, and the AI plays it\n";
+}
+
+// Three pairs alike after a pair of other colours: the pair in hand is put, the window - two pairs alike - slides and
+// stands as it stood, and the next pair goes down at once as it appears, the reading of that frame missing: it is first
+// seen in the air a cell below where pairs appear, both pieces showing, as the window stands again. It is the pair that
+// came. (On the real game a pair begun early by the window so was not counted, and the pairs of 2P were numbered a place
+// behind to the end of the round.)
+static void testAlikeAgainSeenBelow() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {1, 5}, side.next[1] = {2, 2};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    run(empty, t.roundGap + 5);
+    // (pair 0: 1 5; pairs 1, 2 and 3: 2 2)
+    Reading base = empty;
+    for (SideRead& side : base.side) side.next[0] = side.next[1] = {2, 2};
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 1;
+    run(first, t.pairGap + 3);
+    check(t.side[1].pairs == 1, "the pair before three alike is not counted");
+    Reading put = base;
+    for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 1 : 5;
+    run(put, 20);
+    // The window slides as pair 1 comes, and stands as it stood.
+    Reading sliding = put;
+    sliding.side[1].nextRead[0] = sliding.side[1].nextRead[1] = false;
+    run(sliding, 6), run(put, 1);
+    // Pair 1 went down at once: first seen a cell below where pairs appear, then lower.
+    Reading below = put;
+    for (int k = 20; k < 24; ++k) below.side[1].point[SPAWN_X][k] = 2;
+    run(below, 2);
+    Reading lower = put;
+    for (int k = 18; k < 22; ++k) lower.side[1].point[SPAWN_X][k] = 2;
+    run(lower, 2);
+    check(t.side[1].pairs == 2 && t.side[1].unseen == 0, "a pair first seen in the air below where pairs appear, as a window of two pairs alike stood again as it stood, is not taken: " +
+                                                              std::to_string(t.side[1].pairs) + "+" + std::to_string(t.side[1].unseen));
+    std::cout << "a pair first seen below where pairs appear as a window of two pairs alike stands again: taken\n";
+}
+
+// A pair put unseen under a light as the window moved on to two pairs alike; the window then slides and stands as it stood,
+// and the pair after the one put unseen is seen where pairs appear, of other colours than that one: the window moved on
+// once since, not twice. (On the real game the colours of the pair seen and the window's slide were each taken for a move,
+// and the pairs of 1P were numbered a place ahead.)
+static void testAlikeMovedOnceAfterUnseen() {
+    Reading empty;
+    for (SideRead& side : empty.side) {
+        for (auto& column : side.point)
+            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
+        side.next[0] = {1, 5}, side.next[1] = {3, 4};
+        side.nextRead[0] = side.nextRead[1] = true;
+    }
+    Tracker t;
+    int64_t at = 50000;
+    const auto run = [&](const Reading& r, int frames) {
+        for (int k = 0; k < frames; ++k) t.step(r, at++);
+    };
+    run(empty, t.roundGap + 5);
+    // (pair 0: 1 5; pair 1: 3 4; pairs 2, 3 and 4: 1 2)
+    Reading base = empty;
+    for (SideRead& side : base.side) side.next[0] = {3, 4}, side.next[1] = {1, 2};
+    Reading first = base;
+    first.side[1].point[SPAWN_X][23] = 1;
+    run(first, t.pairGap + 3);
+    Reading put = base;
+    for (int k = 0; k < 4; ++k) put.side[1].point[0][k] = k < 2 ? 1 : 5;
+    run(put, 20);
+    // Pair 1 comes under a light over the field and is put unseen; the window moves on to the pairs alike.
+    Reading alike = put;
+    for (SideRead& side : alike.side) side.next[0] = side.next[1] = {1, 2};
+    Reading lit = alike;
+    lit.side[1].unsure = 4;
+    run(lit, 30);
+    Reading put1 = alike;
+    put1.side[1].point[1][0] = put1.side[1].point[1][1] = 3, put1.side[1].point[1][2] = put1.side[1].point[1][3] = 4;
+    run(put1, 40);
+    check(t.side[1].pairs == 1 && t.side[1].dealt == 2, "pair 1, put unseen, is not counted as given before the window moves on again");
+    // Pair 2 comes: the window slides and stands as it stood, and the pair is seen where pairs appear.
+    Reading sliding = put1;
+    sliding.side[1].nextRead[0] = sliding.side[1].nextRead[1] = false;
+    run(sliding, 6), run(put1, 1);
+    Reading next = put1;
+    next.side[1].point[SPAWN_X][23] = 1;
+    run(next, 10);
+    check(t.side[1].pairs == 3 && t.side[1].unseen == 0 && t.side[1].dealt == 3 && t.side[1].inHand,
+          "the pair after one put unseen, seen as the window of two pairs alike stood again, is counted with two moves of the window: " + std::to_string(t.side[1].pairs) + "+" +
+              std::to_string(t.side[1].unseen) + ", " + std::to_string(t.side[1].dealt) + " given");
+    check(t.side[1].colors.axis == 1 && t.side[1].colors.child == 2, "the pair in hand is not the one after the pair put unseen");
+    std::cout << "a pair put unseen, then the window of two pairs alike slid and the next pair seen: the window moved on once\n";
+}
+
 // Three pairs alike in a row, the first of them put unseen under a light: the window, two pairs alike, slides on as the
 // next pair comes and stands as it stood, and that pair is seen where pairs appear. It is the pair after the one put
 // unseen - the window moved on long before for that one -, not that one. (On the real game it was taken for the pair put
@@ -6615,6 +6782,10 @@ int main(int argc, char** argv) {
         testSlidingAsAnotherWindow();
         testThreeAlikeOneUnseen();
         testFirstWindowSlidingAsMoved();
+        testFirstWindowAsRoundTaken();
+        testUnshownPairLearntFromItself();
+        testAlikeAgainSeenBelow();
+        testAlikeMovedOnceAfterUnseen();
         testAlikeWindowMovedUnseen();
         testSecondPlaceLitAsAlike();
         testMovedAsItAppearsChildHidden();
