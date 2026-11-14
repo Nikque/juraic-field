@@ -2073,9 +2073,12 @@ static void testPace() {
     // (shown near the middle between two frames: of the frame after the last one followed)
     check(p.take(101, 101 * F + F * 6 / 10, 102 * F) == 102 && p.next == 1, "a picture shown later, of the same frame to the nearest, is not of the frame after");
     check(p.take(104, 104 * F, 104 * F) == 104 && p.missing == 1, "a frame left out is not counted");
-    check(p.due() == 104 * F + PlayPace::FILL_AFTER, "no drive is due when no picture comes");
+    // (a frame and three quarters after the last picture was shown: after the buttons of a picture are set, before the
+    //  game reads the pad again)
+    const int64_t due = 104 * F + F + F * 3 / 4;
+    check(p.due() == due, "no drive is due when no picture comes");
     p.filledAt(p.due());
-    check(p.due() == 104 * F + PlayPace::FILL_AFTER + F && !p.stalled(105 * F + PlayPace::FILL_AFTER), "the next drive with no picture is not a frame after");
+    check(p.due() == due + F && !p.stalled(due + F), "the next drive with no picture is not a frame after");
     check(p.stalled(104 * F + (PlayPace::STALL_FRAMES + 1) * F), "no picture for long, the pad still holds what it held");
     p.filledAt(104 * F + (PlayPace::STALL_FRAMES + 1) * F);
     check(p.stalls == 1 && p.take(120, 120 * F, 120 * F) == 120 && !p.stalled(120 * F + F), "a picture after a stall leaves the pad holding nothing");
@@ -2103,6 +2106,8 @@ struct DriveCounts {
     long turnsFound = 0; // rounds that ended with the driver turning the other way round (the pad turns so)
     long downAtSpawn = 0; // pairs of 2P that took the down button in the frame they appeared (sent before they were seen)
     long leftAlone = 0;   // times a pair of 2P in the air took no button for 10 frames in a row (left to fall by itself)
+    std::vector<int64_t> aloneAt; // ... and the frames of the clock it had taken none for 10 frames in
+    std::vector<int64_t> missAt;  // the frames of the clock pairs of 2P were put in elsewhere than the AI chose
     long control = 0;     // frames a pair of 2P was in play (Phase::Control)
     long spawnsSeen = 0, miscounted = 0; // new pairs of 2P the screen showed (Tracker), and those of them counted otherwise than the round gave them
     std::vector<int64_t> appeared; // the frames of the clock pairs of 2P appeared in
@@ -2127,6 +2132,10 @@ struct DriveCounts {
     // pauseFor: the round stopped so, the pairs in play then locked with a placement chosen before, and of them those
     // locked there
     long pauses = 0, pausedLocks = 0, pausedHits = 0;
+    // lateSpawn: the pairs made to come later, those of them locked with a placement chosen, and of them those locked there;
+    // unseenAloft: the pairs kept out of sight so
+    long lateSpawns = 0, lateLocks = 0, lateHits = 0, aloft = 0;
+    long aloftAlone = 0; // ... and of leftAlone, the times such a pair took no button for 10 frames while out of sight
     // Pairs of 2P turned quickly by buttons sent for them, locked, of them where the AI chose, and of the others those
     // the round was lost with (the last pair locked)
     long quickLocks = 0, quickHits = 0, quickLost = 0;
@@ -2205,10 +2214,13 @@ struct PairStart {
 // last one followed not followed) - both false as the mode was before them. takeSpread: each frame of the round takes the
 // pad as it stood up to that much before the frame begins (never before the frame before took it): the game reading the
 // pad at times of its own, the buttons still in the order they were set (inputSpread lets a button set later reach the
-// round before one set sooner).
+// round before one set sooner). drift: each frame of the round is that much of a frame longer than a frame of the clock
+// (the real game's frames go round the clock's once in six minutes: 1 / 22500; a negative `comes`, the time the capture
+// gives for a picture being later than the picture comes in, as on the real game).
 struct TimedRun {
     bool on = false;
     double phase = -1; // (-1: from the seed, in [0, 1))
+    double drift = 0;
     double shown = 0.55, shownSpread = 0.005;
     double comes = 0.1, comesSpread = 0.1;
     double read = 0.12, readSpread = 0.08;
@@ -2218,11 +2230,22 @@ struct TimedRun {
     double slow = 1.5;
     bool fill = true, filter = true;
     double takeSpread = 0;
-    double sendAfter = -1; // PlayPace::sendAfter, in frames (-1: at once)
+    double sendAfter = -2; // PlayPace::sendAfter, in frames (-1: at once; -2: as PlayPace has it)
 };
 // (Driver::gate where the driver has one)
 template <class D, class G> static void setGate(D& d, G&& g) {
     if constexpr (requires { d.gate = g; }) d.gate = g;
+}
+// The frame the pad is driven as when its buttons are set at `setAt`: as the pictures count it (PlayPace::frameSet, where
+// the pace has it; never a frame before `last`, the one driven before), else the frame of the clock.
+template <class P> static int64_t drivenFrame(const P& pace, int64_t setAt, int64_t last) {
+    if constexpr (requires { pace.frameSet(setAt); }) return std::max(last, pace.frameSet(setAt) >= 0 ? pace.frameSet(setAt) : frameAt(setAt));
+    else return frameAt(setAt);
+}
+// (PlayPace::behind where the pace has it)
+template <class P> static bool behindNow(const P& pace, int64_t time, int64_t driven) {
+    if constexpr (requires { pace.behind(time, driven); }) return pace.behind(time, driven);
+    else return false;
 }
 // The pictures and the pad of one round so (driveRound): picture() as each frame of the round is drawn, run() to the
 // beginning of the next one, taken() the buttons that frame takes.
@@ -2233,10 +2256,10 @@ public:
     TimedPipe(const TimedRun& how, uint64_t seed, Follower& f, Driver& d, int64_t start)
         : pace(how.fill), how(how), rng(seed, 21), follow(f), driver(d), start(start) {
         phase = how.phase >= 0 ? how.phase : double(rng.below(1000)) / 1000.0;
-        if (how.sendAfter >= 0) pace.sendAfter = time(how.sendAfter);
+        if (how.sendAfter > -2) pace.sendAfter = how.sendAfter >= 0 ? time(how.sendAfter) : -1;
     }
     // The time (in frames of the clock) frame f of the round begins at.
-    double begins(int f) const { return double(start) + phase + double(f); }
+    double begins(int f) const { return double(start) + phase + double(f) * (1.0 + how.drift); }
     // The reading of the picture of frame f of the round.
     void picture(const Reading& r, int f) {
         ++pictures;
@@ -2282,19 +2305,24 @@ public:
             }
             double at = next + how.drive + spread(how.driveSpread);
             if (how.slowOneIn && rng.below(uint64_t(how.slowOneIn)) == 0) at += how.slow;
-            if (woken && how.sendAfter >= 0) at = frames(pace.sendAt(time(at)));
-            const int64_t now = frameAt(time(at));
-            const bool stalled = how.fill && pace.stalled(time(at));
-            setGate(driver, [stalled](int64_t, uint8_t b) { return stalled ? uint8_t(0) : b; });
-            const int corrected = driver.corrected;
-            const uint8_t out = driver.tick(follow, now);
-            check(driver.seenAsTracker(follow.tracker) && follow.seen[0].asTracker(follow.tracker.side[0]) && follow.seen[1].asTracker(follow.tracker.side[1]),
-                  "the driver or Follower took other frames of a side from the events than the tracker has");
+            const auto driveAt = [&](double setAt) {
+                const int64_t now = drivenLast = drivenFrame(pace, time(setAt), drivenLast);
+                const bool stalled = how.fill && pace.stalled(time(setAt));
+                setGate(driver, [stalled](int64_t, uint8_t b) { return stalled ? uint8_t(0) : b; });
+                const int corrected = driver.corrected;
+                const uint8_t out = driver.tick(follow, now);
+                check(driver.seenAsTracker(follow.tracker) && follow.seen[0].asTracker(follow.tracker.side[0]) && follow.seen[1].asTracker(follow.tracker.side[1]),
+                      "the driver or Follower took other frames of a side from the events than the tracker has");
+                ++drives;
+                sent.push_back({setAt, setAt + how.input + spread(how.inputSpread), now, out, false});
+                tick(now, corrected, out);
+            };
+            // (the picture before the one that came left out, the frame the round takes next not driven: PlayPace::behind)
+            if (woken && behindNow(pace, time(at), drivenLast)) driveAt(at), ++fills, at += how.drive;
+            if (woken) at = std::max(at, frames(pace.sendAt(time(at))));
             if (!woken) pace.filledAt(time(at)), ++fills;
-            ++drives;
-            sent.push_back({at, at + how.input + spread(how.inputSpread), now, out, false});
+            driveAt(at);
             playFree = at;
-            tick(now, corrected, out);
         }
     }
     // The buttons frame f of the round takes (those last sent that have reached it), and the frame of the clock they were
@@ -2340,6 +2368,7 @@ private:
     std::deque<Coming> coming, ready;
     std::deque<Sent> sent;
     double captureFree = 0, playFree = 0;
+    int64_t drivenLast = -1; // (the frame the pad was last driven as)
     double takenAt = 0; // (the time the last frame of the round took the pad)
     uint8_t lastTaken = 0;
     double spread(double most) { return most > 0 ? most * double(rng.below(1000)) / 1000.0 : 0.0; }
@@ -2434,7 +2463,20 @@ struct DriveScenario {
     bool early = true; // Driver::early
     int misreadAfterSpawn = 0; // one pair of 2P in that many drawn a column aside, in the 13th row, in the picture after the driver began it
     int hideAppearing = 0;     // the pairs of 2P not drawn as they appear, nor in that many frames after (the first picture shows them moved)
+    // One pair of 2P in lateEvery appears that many frames later than the frames of the game tell (the wait for it that much
+    // longer from two frames before it): the round takes the buttons meanwhile, and what they ask of the pair to come is done
+    // as it appears (Rules::preInput).
+    int lateSpawn = 0, lateEvery = 2;
+    // pauseFor: in the last so many frames of each stop the light is gone (the screen read clear, the round still standing
+    // and taking no button: the real game took none for ten frames after its pictures were clear again).
+    int pauseClear = 0;
+    // litAsAppears: a pair lit as it appears that no picture has shown is not drawn for that many frames after the light,
+    // and takes no down button meanwhile (above the screen, falling by itself: turned up into the 13th row on the real
+    // game, both pieces out of sight).
+    int unseenAloft = 0;
     TimedRun timed = {};       // on: the pictures and the pad in time (lag, shaky, skipOneIn, twiceOneIn, batchAtSpawn and loseAtGround not used)
+    // Called after each frame of the clock: the frame, 2P of the round after it, the buttons it took (-1: the round stopped).
+    std::function<void(int64_t, const Player&, int)> each = nullptr;
 };
 // Such a round from `seed`, counted into n.
 static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
@@ -2508,6 +2550,9 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     std::deque<PairControl> recent; // the pair of 2P as each of the last frames began
     int turnedAt = -100;            // the frame of the round the pair of 2P last turned in
     int pauseLeft = 0, inPlay = 0;  // pauseFor: frames the round stays stopped; frames the pair of 2P has been in play
+    int lateFor = -1;               // lateSpawn: the pair (as spawns numbers it once it has appeared) made to come later
+    int aloftFor = 0;               // unseenAloft: frames left in which the pair of 2P takes no down button
+    int64_t aloftEndedAt = -100;    // ... and the frame of the clock the last such pair took it again in, or was put
     bool pausedPair = false;        // ... the pair in play was in play as the round stopped,
     int pausedTarget = -1;          // ... and the placement the AI had chosen for it then
     std::vector<int> putAsChosen;   // by the number of each pair of 2P locked: its placement when the AI chose it, else -1
@@ -2539,7 +2584,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             // (the round stopped: drawn as it stands, the light over it; the driver's clock goes on)
             draw(canvas, l, r, false, noise, how.quietLanding, words);
             const SideLayout& s = l.side[1];
-            canvas.fill(s.left + s.cellWidth, s.bottom - 12 * s.cellHeight, s.left + 4 * s.cellWidth, s.bottom - 9 * s.cellHeight, LIGHT);
+            if (pauseLeft > how.pauseClear) canvas.fill(s.left + s.cellWidth, s.bottom - 12 * s.cellHeight, s.left + 4 * s.cellWidth, s.bottom - 9 * s.cellHeight, LIGHT);
             if (how.timed.on) {
                 pipe.picture(read(canvas.picture(), l), f);
                 pipe.run(f + 1, driven);
@@ -2554,6 +2599,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
                 if (d.target() >= 0) target = d.target();
             }
             if (--pauseLeft == 0 && how.pauseLit) litFor = how.pauseLit;
+            if (how.each) how.each(clock, r.player[1], -1);
             continue;
         }
         if (!words && how.wordsFrom >= 0 && f >= how.wordsFrom) {
@@ -2614,7 +2660,12 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             // (a light over the field of 2P: nothing of it is read in this picture)
             const SideLayout& s = l.side[1];
             canvas.fill(s.left, s.bottom - 2 * s.cellHeight, s.left + s.cellWidth, s.bottom - s.cellHeight, LIGHT);
-            if (litFor > 0 && --litFor == 0) litEndedAt = clock;
+            if (litFor > 0 && --litFor == 0) {
+                litEndedAt = clock;
+                // (unseenAloft: from the next picture on - a pair the screen has not shown, Tracker not having counted it)
+                if (how.unseenAloft && r.player[1].phase == Phase::Control && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen < spawns)
+                    aloftFor = how.unseenAloft, hideFor = std::max(hideFor, how.unseenAloft), ++n.aloft;
+            }
         }
         // (... and once it has gone, the pair unseen: a piece of its colour drawn once where pairs appear - 1 -, half a
         //  cell lower - 2 -, a cell lower - 3 - or in the column beside - 4 -, as a piece of a chain falling past, three
@@ -2722,8 +2773,17 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         alone = r.player[1].phase == Phase::Control && buttons[1] == 0 ? alone + 1 : 0;
         n.firstIdle += spawns == 1 && r.player[1].phase == Phase::Control && buttons[1] == 0;
         if (alone == 10) ++n.leftAlone;
+        if (alone == 10) n.aloneAt.push_back(clock), n.aloftAlone += aloftFor > 0 || clock - aloftEndedAt <= 10;
         n.control += r.player[1].phase == Phase::Control;
+        // (unseenAloft: the pair out of sight takes no down button)
+        if (aloftFor > 0) {
+            if (r.player[1].phase == Phase::Control) buttons[1] = uint8_t(buttons[1] & ~BTN_DOWN), --aloftFor;
+            else aloftFor = 0;
+            if (aloftFor == 0) aloftEndedAt = clock;
+        }
         r.step(buttons, e);
+        if (how.each) how.each(clock, r.player[1], buttons[1]);
+        if (e[1].locked && lateFor == spawns) n.lateLocks += target >= 0, n.lateHits += target >= 0 && placementId(r.player[1].pair.placement()) == target;
         if (how.turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = how.turnShownLate;
         if (how.crowdedLate && e[1].control.rotated && r.player[1].phase == Phase::Control) {
             if (r.player[1].pair.x != columnBefore || f - lastTurn <= 3) {
@@ -2751,6 +2811,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         if (e[1].locked && target >= 0) {
             const bool hit = placementId(r.player[1].pair.placement()) == target;
             n.locks += 1, n.hits += hit;
+            if (!hit) n.missAt.push_back(clock);
             n.garbageMisses += !hit && garbageAt > lockedAt, n.unseenGarbageMisses += !hit && garbageAt > lockedAt && clearAt <= garbageAt;
         }
         if (e[1].locked) putAsChosen.push_back(target >= 0 && placementId(r.player[1].pair.placement()) == target ? target : -1);
@@ -2797,6 +2858,9 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             pauseLeft = how.pauseFor, ++n.pauses, pausedPair = true, pausedTarget = target;
         if (how.pauseFor && how.pauseBefore && r.player[1].phase == Phase::Next && r.player[1].wait == 2 && (spawns + 1) % how.pauseEvery == 0)
             pauseLeft = how.pauseFor, ++n.pauses;
+        // (lateSpawn: once for the pair, numbered spawns + 1 as it appears)
+        if (how.lateSpawn && r.player[1].phase == Phase::Next && r.player[1].wait == 2 && spawns > 0 && (spawns + 1) % how.lateEvery == 0 && lateFor != spawns + 1)
+            r.player[1].wait += how.lateSpawn, lateFor = spawns + 1, ++n.lateSpawns;
     }
     n.corrected += d.corrected;
     n.quickLost += quickMissed && r.state != RoundState::Playing && r.state != RoundState::Won1;
@@ -6204,8 +6268,9 @@ static void testPicturesTakenTogether() {
                                      .batchAtSpawn = together});
             }
         }
-        long taken = 0; // pairs begun from the screen (seen, or begun before and taken again from it)
-        for (const auto& [at, line] : notes) taken += line.find(" begun: seen in frame") != std::string::npos;
+        long taken = 0; // pairs begun from the screen (seen, or begun before and taken again from it or set to the frame it showed them appear in)
+        for (const auto& [at, line] : notes)
+            taken += line.find(" begun: seen in frame") != std::string::npos || line.find(" set to the frame it appeared in") != std::string::npos;
         const std::string counts = std::string(together ? "read together" : "read one by one") + ": " + std::to_string(n.leftAlone) + " pairs left alone, " +
                                    std::to_string(n.downAtSpawn) + " took the down button as they appeared, " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
                                    " where the AI chose, " + std::to_string(taken) + " pairs begun as seen";
@@ -6679,6 +6744,146 @@ static void testPicture(const std::string& folder) {
     std::cout << "a picture saved and read again is the same\n";
 }
 
+// The pad is driven as the frame of the game that reads its buttons, counted as the pictures count: the frame of the
+// last picture followed, one on for each time the game has read the pad since that picture was shown (just after each
+// frame of 1/60 s from it) - not as the frame of the clock it is driven in, which is cut at another point of a frame than
+// the pictures' and goes a frame off them as their time goes round it. The buttons for a picture are set away from where
+// the game reads them, and those of a frame with no picture after the time a picture's would have been set and before
+// the game reads the pad again. (PlayPace::frameSet; a pace without it drives as the clock.)
+static void testDrivenAsThePicturesCount() {
+    PlayPace p;
+    const int64_t F = PlayPace::FRAME;
+    // (the time the capture gives for a picture, 0.4 frames after the clock's frame 200 began, is later than the picture
+    //  comes in: in the clock's frame 199)
+    const int64_t shown = 200 * F + F * 4 / 10, came = 199 * F + F * 9 / 10;
+    check(p.take(200, shown, came) == 200, "a picture is not followed as the frame it was shown in");
+    check(drivenFrame(p, came + F / 10, -1) == 200 && drivenFrame(p, shown, -1) == 200,
+          "buttons set before the picture followed last is shown are not driven as its frame: the game reads them as it shows it");
+    check(drivenFrame(p, shown + F * 3 / 20, -1) == 201 && drivenFrame(p, shown + F, -1) == 201 && drivenFrame(p, shown + F + F * 3 / 20, -1) == 202,
+          "buttons set after the game has read the pad are not driven as the frame after");
+    // (the buttons of a picture: set after the game has read the pad for the picture's frame, and well before it reads
+    //  it again - not within a fifth of a frame of either)
+    const int64_t set = p.sendAt(came + F / 10);
+    check(set - shown >= F / 5 && shown + F - set >= F / 2 && drivenFrame(p, set, -1) == 201, "the buttons of a picture are set near where the game reads the pad");
+    // (no picture in the next frame: driven after the buttons of its picture would have been set, a fifth of a frame or
+    //  more before the game reads the pad again, as the frame after)
+    const int64_t due = p.due();
+    check(due > set + F && shown + 2 * F - due >= F / 5, "a frame with no picture is driven before a picture's buttons would be set, or as the game reads the pad");
+    p.filledAt(due);
+    check(drivenFrame(p, due, 201) == 202, "a drive with no picture is not driven as the frame after the last one");
+    check(p.due() == due + F, "the frame after one with no picture is not driven a frame later");
+    // (the picture of that frame comes in after all: its buttons, set at once, are of the same frame)
+    const int64_t late = due + F / 20;
+    check(p.take(201, shown + F, late) == 201 && drivenFrame(p, p.sendAt(late), 202) == 202, "a picture that comes in after its frame was driven with none is driven as another frame");
+    check(p.take(203, shown + 3 * F, shown + 3 * F - F / 2) == 203 && drivenFrame(p, p.sendAt(shown + 3 * F - F / 2), 202) == 204,
+          "a frame left out between two pictures is left out of the frames driven");
+    std::cout << "the pad driven as the frames of the game that read its buttons, counted as the pictures count\n";
+}
+
+// Rounds in time whose frames go round the clock's (TimedRun::drift), the time the capture gives for a picture later than
+// the picture comes in, as on the real game: the lag the pictures of the pairs fit stays that of the pad as the pictures'
+// time passes the points the frames of the clock are cut at. (Driven as the frame of the clock, the buttons reached the
+// round a frame sooner or later as the driver counted them from there on, and the lag was taken anew some pairs later: on
+// the real game five pairs of a round went elsewhere than the AI chose between two such changes.)
+static void testFramesGoingRoundTheClock() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    long well = 0, otherwise = 0;
+    for (const uint64_t seed : {130, 131, 132}) {
+        std::vector<std::pair<int64_t, std::string>> notes;
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        DriveScenario how{.lag = 3, .frames = 4000, .given = std::move(a), .quietLanding = true};
+        how.notes = &notes;
+        how.timed.on = true, how.timed.phase = 0.45, how.timed.drift = 1.0 / 3000, how.timed.comes = -0.5, how.timed.dropOneIn = 0;
+        driveRound(seed, n, std::move(how));
+        // (the pairs whose pictures fitted a lag well - eight pictures or more, four in five of them right: the lag they
+        //  fitted is that of the pad throughout)
+        for (const auto& [at, line] : notes) {
+            int lag = 0, pair = 0, right = 0, shots = 0;
+            if (std::sscanf(line.c_str(), "lag measured: %d frames (pictures of pair %d: %d of %d right", &lag, &pair, &right, &shots) != 4) continue;
+            if (shots >= 8 && right * 5 >= shots * 4) ++well, otherwise += lag != 3;
+        }
+    }
+    const std::string counts = std::to_string(otherwise) + " of " + std::to_string(well) + " pairs whose pictures fitted a lag well fitted another than the pad's, " +
+                               std::to_string(n.leftAlone) + " pairs left alone, " + std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose";
+    check(n.locks >= 60 && well >= 5 && otherwise == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 95, "the frames of the round going round the clock's: " + counts);
+    std::cout << "the frames of the round going round the clock's: " << counts << "\n";
+}
+
+// A pair the driver began before it appeared comes a frame or two later than the frames of the game tell, over the field
+// it was begun over (in the records of the real game nine in ten of the pairs that came at another frame than foreseen):
+// the buttons sent for its first frames reach the round before it appears, and what they ask is done as it appears
+// (Rules::preInput). The engine is set to the frame the screen shows it appear in, with what the pad held before; the
+// placement chosen stands. (Begun again from the screen, the engine knew nothing of a turn the round had done as the
+// pair appeared and sent it once more: six pairs of a record of the real game went down turned once too often.)
+static void testPairLaterThanForeseen() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    std::vector<std::pair<int64_t, std::string>> notes;
+    for (const uint64_t seed : {140, 141, 142, 143, 144, 145})
+        for (const int late : {1, 2}) {
+            std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+            Driver::prepare(a.get());
+            DriveScenario how{.lag = 5, .given = std::move(a), .hidden = 3, .movedHidden = 1, .quietLanding = true};
+            how.notes = &notes, how.lateSpawn = late;
+            driveRound(seed, n, std::move(how));
+        }
+    long set = 0;
+    for (const auto& [at, line] : notes) set += line.find(" set to the frame it appeared in") != std::string::npos;
+    const std::string counts = std::to_string(n.lateSpawns) + " pairs later than foreseen, " + std::to_string(set) + " set to the frame they appeared in, " +
+                               std::to_string(n.lateHits) + " of " + std::to_string(n.lateLocks) + " of them where the AI chose, " + std::to_string(n.hits) + " of " +
+                               std::to_string(n.locks) + " in all, " + std::to_string(n.leftAlone) + " left alone";
+    check(n.lateSpawns >= 60 && set * 2 >= n.lateSpawns && n.leftAlone == 0 && n.lateHits * 100 >= n.lateLocks * 97 && n.hits * 100 >= n.locks * 97,
+          "pairs that come later than foreseen: " + counts);
+    std::cout << "pairs that come later than foreseen: " << counts << "\n";
+}
+
+// The round stops with a pair of 2P a few frames in play, turns and moves for it still on their way, and stands still for
+// some frames more after its pictures are clear again, taking no button (on the real game for ten frames): the pair, in
+// the air long after the engine put it, is not held down before it is taken up again, and once a turn or a move has been
+// sent for it then, the down button waits for a picture that shows them taken - one that shows them lost has the pair
+// taken up once more, and they are sent again. (Held down as the screen was read again, the pair of the real game lost
+// the turn sent as it was taken up and went down as it was.)
+static void testStillAfterTheStop() {
+    DriveCounts n;
+    for (const uint64_t seed : {120, 121, 122, 123, 124, 125})
+        driveRound(seed, n, {.lag = 5, .frames = 9000, .pauseFor = 200, .pauseEvery = 3, .pauseAfter = 5, .pauseClear = 11});
+    const std::string counts = std::to_string(n.pauses) + " stops, " + std::to_string(n.leftAlone) + " pairs left alone, " + std::to_string(n.downAtSpawn) +
+                               " took the down button as they appeared; " + std::to_string(n.pausedHits) + " of " + std::to_string(n.pausedLocks) +
+                               " pairs in play as it stopped where the AI had chosen before, " + std::to_string(n.hits) + " of " + std::to_string(n.locks) +
+                               " in all where the AI chose";
+    check(n.pauses >= 30 && n.leftAlone == 0 && n.downAtSpawn == 0 && n.pausedLocks + 2 >= n.pauses && n.pausedHits * 100 >= n.pausedLocks * 95,
+          "the round still for a while after a stop: " + counts);
+    std::cout << "the round still for a while after a stop: " << counts << "\n";
+}
+
+// A pair begun unseen, under a light, is out of sight for a while after the light and takes no down button meanwhile
+// (turned up into the 13th row, both pieces above the screen), the engine having put it: the pieces at rest are still those
+// it was begun over, and the down button is held on until the screen shows it come to rest. (Let go as a clear picture
+// showed nothing above the pieces at rest, the pair of the real game came down by itself for 30 frames.)
+static void testUnseenPairOutOfSight() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {150, 151, 152, 153}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        DriveScenario how{.lag = 5, .given = std::move(a), .quietLanding = true, .litAsAppears = 20};
+        how.unseenAloft = 30;
+        driveRound(seed, n, std::move(how));
+    }
+    // (left alone otherwise: a pair lit as it appears that the window does not tell of either is not begun unseen - 2 of
+    //  some 130 pairs lit so in these rounds)
+    const std::string counts = std::to_string(n.aloft) + " pairs out of sight after a light, " + std::to_string(n.aloftAlone) + " of them left alone (" +
+                               std::to_string(n.leftAlone) + " pairs in all), " + std::to_string(n.downAtSpawn) + " took the down button as they appeared, " +
+                               std::to_string(n.hits) + " of " + std::to_string(n.locks) + " where the AI chose";
+    check(n.aloft >= 12 && n.aloftAlone == 0 && n.leftAlone <= 2 && n.downAtSpawn == 0 && n.hits * 100 >= n.locks * 97, "pairs begun unseen and out of sight after the light: " + counts);
+    std::cout << "pairs begun unseen and out of sight after the light: " << counts << "\n";
+}
+
 int main(int argc, char** argv) {
     try {
         testTableText();
@@ -6739,6 +6944,11 @@ int main(int argc, char** argv) {
         testDownLostAtLock();
         testPausedRound();
         testPausedBeforeAppearing();
+        testDrivenAsThePicturesCount();
+        testFramesGoingRoundTheClock();
+        testPairLaterThanForeseen();
+        testStillAfterTheStop();
+        testUnseenPairOutOfSight();
         testTimedRounds();
         testPutRightOfThePairInHand();
         testSecondChoiceInAirOnThreads();

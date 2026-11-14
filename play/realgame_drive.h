@@ -248,7 +248,12 @@ private:
         if (!active && overdue(f)) resume(f, now);
         if (!active) return holdDown(f, now);
         knowColours(t);
+        const int rightBefore = corrected;
         correct(f);
+        // (put right from a picture: the turns and moves from there are those to be shown taken)
+        if (corrected != rightBefore) retakeTapAt = -1;
+        confirmRetaken(f, now);
+        if (!active) return holdDown(f, now);
         const int64_t at = now + lag;
         // (frames of the game whose buttons were sent before: they took what was held. A frame the clock went past without
         //  a call - the thread of the play a frame late - had the agent's buttons chosen for it and not sent: the way to
@@ -320,7 +325,10 @@ private:
         if (earlyFor >= 0 && side.pairs == earlyFor && spawned) {
             const bool off = seen.late ? seen.appearedAt < earlyAt || seen.appearedAt - earlyAt > BLIND_SLACK : seen.appearedAt != earlyAt;
             earlyFor = -1, blindFor = -1;
-            if (off) shots.clear(), begin(f, side);
+            if (off) {
+                shots.clear();
+                if (!retime(f, side)) begin(f, side);
+            }
         } else if (side.pairs > pairsSeen) {
             if constexpr (REASONS) noteNotEarly(t, side.pairs);
             pairsSeen = side.pairs, blindFor = -1, earlyFor = -1;
@@ -365,11 +373,23 @@ private:
         //  shows the pieces at rest otherwise than the field it was begun over: a pair begun by the window on a field nearly
         //  full was put by the engine in two frames, the round stopped two frames before the pair appeared, a clear
         //  picture then showed nothing above the pieces at rest, and the pair, lit as the game went on, fell by itself, in
-        //  a round drawn so)
-        const bool restingAsBegun = earlyFor == pairsSeen && Follower::shown(side.resting) == Follower::shown(startOwn.field);
+        //  a round drawn so.
+        //  So too a pair begun unseen, while the pieces at rest are those it was begun over: turned up into the 13th row
+        //  on a field nearly full, both its pieces were above the screen for some frames - nothing above the pieces at
+        //  rest -, and let go then, the pair of the real game came down by itself for 30 frames.
+        //  The pieces at rest are those it was begun over when no column has a piece of a colour above that field's - garbage
+        //  that fell before the pair is not the pair put - and one piece at most is not there yet - the last piece of the
+        //  pair before, read at rest a little later: taken as put for either, 10 pairs of 39 out of sight after a light
+        //  took no button for 10 frames, in rounds drawn so.)
+        const bool restingAsBegun = unshown() && restsAsBegun(side);
         const bool unseenInAir = unshown() && !(side.clear && side.loose == 0 && !restingAsBegun);
         // (the game stopped: it takes no button, and the down button held on went on to the pair as it appeared)
         if (stoppedFor == pairsSeen) return press(now, held = sendable(now, tapToEnd(now, 0)));
+        // (a clear picture shows the pair in the air long after the engine put it: the game stood still, and the pair is
+        //  taken up again from the next such picture (overdue). Nothing is pressed for it before that: held down as the
+        //  screen was read again, the real game, which took no button for ten frames more, took the down button as it
+        //  went on - the pair went down as it was, in three frames.)
+        if (shownInAir(f) && t.frame - lockedAt > RESUME_AFTER) return press(now, held = sendable(now, tapToEnd(now, 0)));
         // A pair read as lying can lift again while earlier buttons arrive. Resume its down button when a clear
         // picture shows it in the air; one such pair was left for 10 frames after a light of 80 frames.
         const bool heldBefore = untilLocked;
@@ -413,6 +433,20 @@ private:
             if (comes >= 0 && movedSinceBegun() && now + lag >= comes) return press(now, held = sendable(now, tapToEnd(now, 0)));
             return press(now, held = sendable(now, tapToEnd(now, juraic::BTN_DOWN)));
         }
+        if constexpr (REASONS)
+            if (untilLocked) {
+                int rest[juraic::W], begun[juraic::W];
+                Follower::shown(side.resting).heights(rest), Follower::shown(startOwn.field).heights(begun);
+                std::string columns;
+                for (int x = 0; x < juraic::W; ++x) columns += " " + std::to_string(rest[x]) + "/" + std::to_string(begun[x]);
+                note(t.frame, "2P pair " + std::to_string(pairsSeen) + " let go (columns at rest / begun over:" + columns + "): " +
+                                  (side.pairs == pairsSeen || unseenInAir ? std::string("it lies, or the next pair is foreseen")
+                                                                          : "the screen counts " + std::to_string(side.pairs) + " pairs and " + std::to_string(side.unseen) +
+                                                                                " unseen, and the pair is not one the screen has yet to show in the air (begun unseen " +
+                                                                                std::to_string(blindFor) + ", early " + std::to_string(earlyFor) + ", clear " +
+                                                                                std::to_string(int(side.clear)) + ", loose " + std::to_string(side.loose) + ", at rest as begun " +
+                                                                                std::to_string(int(restingAsBegun)) + ")"));
+            }
         untilLocked = false;
         return press(now, held = sendable(now, tapToEnd(now, 0)));
     }
@@ -727,6 +761,70 @@ private:
                                     std::to_string(seen.appearedAt) + ", the engine from frame " + std::to_string(next) + ", lag " + std::to_string(lag));
         begunAt = active ? t.frame : -1;
     }
+    // What the buttons asked of the pair to come while it had not appeared (Rules::preInput: a turn pressed, a move pressed
+    // or held to its repeat, up to Timing::preFrames frames before a pair can be moved, is done in its first frame), kept
+    // in `p`, which waits for its pair, to appear in the frame `first`: the frames before it played with what the pad held
+    // for them, as the game took it. (Begun with none of it, a pair begun early that appeared later than foreseen had the
+    // turn sent for its first frame taken by the game before it appeared, and done as it appeared: the engine, begun
+    // again from the screen, knew of no turn, sent it once more, and the pair went down turned once too often - six pairs
+    // of a record of the real game.)
+    void remembered(juraic::Player& p, int64_t first, const juraic::Timing& timing) const {
+        if (!rules.preInput || p.phase != juraic::Phase::Next) return;
+        const int frames = timing.preFrames + timing.repeatDelay;
+        juraic::Player q = p;
+        q.turnQueued = q.sideQueued = q.turnAge = q.sideAge = q.sideHeld = 0;
+        q.buttons = givenAt(first - frames - 1 - lag);
+        q.wait = frames + 1;
+        for (int64_t g = first - frames; g < first; ++g) {
+            juraic::Incoming nobody;
+            juraic::advancePlayer(q, nobody, givenAt(g - lag), tsumo, rules, timing, 0);
+        }
+        if (q.phase == juraic::Phase::Next && q.wait == 1) p = q;
+    }
+    // A pair begun early that the screen shows appear in another frame than the engine foresaw, over the field it was begun
+    // over, at most RETIME_EARLY frames sooner or RETIME_LATE later: the engine is set to the frame it appeared in - what
+    // the pad held before that frame asked of it as the game took it (remembered), the frames since played with the
+    // buttons that went out for them -, and the placement chosen for it stands: its way there is planned again from where
+    // the engine has the pair now. False: not so, and the pair is begun from the screen (begin). (Begun from the screen,
+    // the AI chose again while the pair fell - on the real game the placement of 172 pairs of 176 taken so was gone for
+    // some frames, the pair held down meanwhile, and its last move came as it lay. In four records of the real game 418
+    // of 487 such pairs appeared one frame sooner or later than foreseen, and 24 more two frames later: a frame the game
+    // did not go on in, or the frames counted one off. Later than that, the game may have stood still for some frames and
+    // taken none of the buttons sent meanwhile: what the pad held then tells nothing of what it remembers - set so, pairs
+    // of rounds drawn with a stop of three frames before a pair appears went elsewhere than the AI chose 23 times in 307,
+    // begun from the screen 3 times in 300.)
+    static constexpr int RETIME_EARLY = 2, RETIME_LATE = 2;
+    bool retime(const Follower& f, const SideTrack& side) {
+        const Tracker& t = f.tracker;
+        const int64_t first = seen.appearedAt + (seen.late ? 0 : 1);
+        const int64_t foreseen = earlyAt, off = seen.appearedAt - foreseen;
+        if (!placer() || againFor == pairsSeen || startNext != earlyAt + 1 || startOwn.phase != juraic::Phase::Next) return false;
+        if (off < -RETIME_EARLY || off > RETIME_LATE || first >= t.frame + lag) return false;
+        if (!(Follower::shown(startOwn.field) == Follower::shown(side.under))) return false;
+        own = startOwn;
+        own.wait = 1;
+        next = first;
+        remembered(own, next, t.timing);
+        startOwn = own, startNext = next, shiftBegun = seen.movedAt, putAim = -1;
+        earlyAt = next - 1; // (the picture of that frame shows it as it appears: correct)
+        past.clear();
+        checked = shownAt = doubtAt = -1;
+        begunAt = seen.late ? -1 : t.frame;
+        active = true, following = false, untilLocked = false;
+        note(t.frame, "2P pair " + std::to_string(side.pairs) + " set to the frame it appeared in" + (seen.late ? " (seen late)" : "") + ": seen in frame " +
+                          std::to_string(seen.appearedAt) + ", foreseen in frame " + std::to_string(foreseen) + ", the engine from frame " + std::to_string(next) +
+                          " with what the pad held, lag " + std::to_string(lag));
+        while (active && next < t.frame + lag) {
+            const uint8_t took = givenAt(next - lag);
+            juraic::Incoming nobody;
+            juraic::advancePlayer(own, nobody, took, tsumo, rules, t.timing, t.roundFrame(next));
+            past.push_back({next, own, took});
+            ++next;
+            if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) lockEngine(t.frame);
+        }
+        if (active) steer(f);
+        return true;
+    }
     // The frame of the picture the pair in play was begun from, as the screen showed it (-1: not begun so). That picture
     // shows it where the engine has it: one picture after it that shows the pair in the 13th row puts nothing right until
     // a second one shows it alike (correct). (Put right for one picture, pairs read upside down in the 13th row a column
@@ -976,7 +1074,7 @@ private:
     // The pair in play begun (begin, beginBlind, beginEarly) with the engine as it is set, noted so (`line`): the frames
     // of the game before `at` have passed - the agent decides them, the game took what the pad held.
     void start(const Follower& f, int64_t at, const std::string& line) {
-        startOwn = own, startNext = next, shiftBegun = seen.movedAt, putAim = -1, sentFor = false;
+        startOwn = own, startNext = next, shiftBegun = seen.movedAt, putAim = -1, sentFor = false, retaking = false;
         past.clear();
         checked = shownAt = doubtAt = begunAt = -1;
         active = true, following = false, untilLocked = false;
@@ -1001,7 +1099,14 @@ private:
             note(next, "2P pair " + std::to_string(pairsSeen) + " choice renewed: the field or known pairs changed");
         // (a tap the agent lets go before its end - its way planned again, a picture put right - is held to its end: one
         //  that went out for a frame as a pair was put right was lost by a frame of the game under load now and then)
-        if (send) held = sendable(next - lag, tapToEnd(next - lag, wanted)), sentFor = true;
+        // (retaking: the down button of a pair taken up again waits, once a turn or a move went out for it, for a picture
+        //  that shows them taken - confirmRetaken)
+        uint8_t out = wanted;
+        if (send && retaking) {
+            if (wanted & (TAP_KINDS[0] | TAP_KINDS[1])) retakeTapAt = next - lag;
+            if (retakeTapAt >= 0) out = uint8_t(out & ~juraic::BTN_DOWN);
+        }
+        if (send) held = sendable(next - lag, tapToEnd(next - lag, out)), sentFor = true;
         // (a frame whose buttons went out before took what the pad held lag frames before it: a pair begun early and
         //  taken again from the screen, as it was held now, had its first move played twice, a column too far)
         const uint8_t took = send ? held : givenAt(next - lag);
@@ -1088,11 +1193,29 @@ private:
         //  pair comes only after the window has moved on - the game stopped two frames before a pair appeared, the engine
         //  went on and foresaw the next pair, and the pair, lit as the game went on, fell by itself in rounds drawn so)
         if (unshown() && windowWaits(f.tracker.side[me])) return false;
+        // (nor for a pair the screen has not shown while a clear picture shows the pieces at rest as it was begun over:
+        //  put, its pieces would be at rest in that picture, and the next pair comes 13 frames after that at the soonest
+        //  - the window not read whole for a few pictures, a pair out of sight after a light was let go as the engine
+        //  foresaw the next one, and took no button for 10 frames, in rounds drawn so)
+        if (unshown() && f.tracker.side[me].clear && f.tracker.side[me].loose == 0 && restsAsBegun(f.tracker.side[me])) return false;
         // (nor while a clear picture shows pieces of a colour in the air above the pieces at rest: the game stopped for
         //  120 frames with the pair on a full column in the 13th row, the engine went on and had it put, and let go so
         //  the pair lay 10 frames and more before it locked, in a round drawn in time)
         if (airShown) return false;
         return following && own.phase == juraic::Phase::Next && own.wait <= 2;
+    }
+    // The pieces at rest are those the pair in play was begun over (holdDown): no piece of a colour above that field's in
+    // any column, one piece at most not there yet.
+    bool restsAsBegun(const SideTrack& side) const {
+        const juraic::GameField rest = Follower::shown(side.resting), begun = Follower::shown(startOwn.field);
+        int high[juraic::W], was[juraic::W], fewer = 0;
+        bool put = false;
+        rest.heights(high), begun.heights(was);
+        for (int x = 0; x < juraic::W; ++x) {
+            for (int y = was[x]; y < high[x]; ++y) put = put || rest.f.get(x, y) != juraic::GARBAGE;
+            fewer += std::max(0, was[x] - high[x]);
+        }
+        return !put && fewer <= 1;
     }
     // The pair in play was begun before the screen showed it (early, or unseen), and the screen has not shown it yet.
     bool unshown() const { return pairsSeen > 0 && (earlyFor == pairsSeen || blindFor == pairsSeen); }
@@ -1182,10 +1305,16 @@ private:
     // agent chose for it is planned again from there (held down where it was, the pair went down elsewhere than the AI
     // chose, 6 of 24 pairs in rounds drawn so).
     void resume(const Follower& f, int64_t now) {
+        const std::string line = "2P pair " + std::to_string(pairsSeen) + " taken up again: the engine put it in frame " + std::to_string(lockedAt) + ", the picture shows " +
+                                 controlText(f.tracker.side[me].pair.at);
+        if (takeUp(f, now, line)) retaking = active, retakes = 0, retakeTapAt = -1, retakeUnseen = 0;
+    }
+    // The engine takes the pair in play from the last picture, on the field it has, the placement chosen for it kept.
+    bool takeUp(const Follower& f, int64_t now, const std::string& line) {
         const Tracker& t = f.tracker;
         size_t i = past.size();
         while (i > 0 && past[i - 1].state.phase != juraic::Phase::Control) --i;
-        if (i == 0) return;
+        if (i == 0) return false;
         juraic::Player again = past[i - 1].state;
         const juraic::PairControl& seen = t.side[me].pair.at;
         juraic::PairControl& p = again.pair;
@@ -1201,8 +1330,49 @@ private:
             tellHeld();
             placing->resume(o);
         }
-        start(f, now + lag, "2P pair " + std::to_string(pairsSeen) + " taken up again: the engine put it in frame " + std::to_string(lockedAt) + ", the picture shows " +
-                                controlText(seen));
+        start(f, now + lag, line);
+        return true;
+    }
+    // A pair taken up again (resume): the game that stood still may not take buttons yet as its pictures are read again
+    // - on the real game it took none for ten frames after the screen was clear, the turn sent as the pair was taken up
+    // was lost, and the down button then took the pair down as it was. Once a turn or a move has been sent for it, the
+    // down button waits until a picture of the frame the last of them reached the game in, or after, shows the pair in
+    // the column and turned the way the engine has it there: the game takes buttons. A picture that shows it otherwise -
+    // they were lost - has the pair taken up once more from that picture, and they are sent again (RETAKES times at
+    // most). With no turn or move to send, the down button goes out at once: lost or taken, the pair goes down where it
+    // is. Not waited for through more than RETAKE_UNSEEN frames in a row with no clear picture of the pair.
+    static constexpr int RETAKES = 6, RETAKE_SHOWN = 2, RETAKE_UNSEEN = 12;
+    bool retaking = false;        // the pair in play was taken up again, and the game is not known to take buttons yet
+    int retakes = 0;              // ... the times it was taken up once more
+    int64_t retakeTapAt = -1;     // ... the frame of the pad the last turn or move for it went out in (-1: none yet)
+    int retakeUnseen = 0;         // ... the calls in a row with no clear picture of it
+    void confirmRetaken(const Follower& f, int64_t now) {
+        if (!retaking || !active) return;
+        const Tracker& t = f.tracker;
+        const SideTrack& side = t.side[me];
+        if (retakeTapAt < 0) return;
+        const bool pictured = side.clear && side.pair.seen && side.inHand && side.pairs == pairsSeen;
+        retakeUnseen = pictured ? 0 : retakeUnseen + 1;
+        if (retakeUnseen > RETAKE_UNSEEN) retaking = false;
+        if (!pictured || t.frame < retakeTapAt + lag + RETAKE_SHOWN) return;
+        const size_t i = pastIndex(t.frame);
+        if (i == past.size() || past[i].state.phase != juraic::Phase::Control) return;
+        const juraic::PairControl& had = past[i].state.pair;
+        const juraic::PairControl& seen = side.pair.at;
+        const juraic::Pair c = past[i].state.colors;
+        const auto as = [&](const juraic::PairControl& p) { return p.x == had.x && p.dir == had.dir; };
+        if (as(seen) || (c.axis == c.child && seen.childY() < juraic::ROW_14 && as(swappedAxis(seen)))) {
+            retaking = false;
+            return;
+        }
+        if (++retakes > RETAKES) {
+            retaking = false;
+            return;
+        }
+        const int tries = retakes;
+        if (takeUp(f, now, "2P pair " + std::to_string(pairsSeen) + " taken up once more: the picture shows " + controlText(seen) + ", the engine had " + controlText(had) +
+                               " - the buttons sent for it were not taken"))
+            retaking = active, retakes = tries, retakeTapAt = -1, retakeUnseen = 0;
     }
 
     void steer(const Follower& f) {

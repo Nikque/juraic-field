@@ -76,7 +76,7 @@ static ai::Params forTwo(ai::Params p, const char* name = "P2PARAMS") {
     return p;
 }
 // TIMED=name=value,...: the pictures and the pad in time (TimedRun of tests/realgame_tests.cpp; "on" alone with its
-// defaults): phase shown shownSpread comes comesSpread read readSpread drive driveSpread input inputSpread dropOneIn
+// defaults): phase drift shown shownSpread comes comesSpread read readSpread drive driveSpread input inputSpread dropOneIn
 // twiceOneIn backOneIn stallEvery stallFor slowOneIn slow fill filter takeSpread sendAfter.
 static TimedRun timedRun() {
     TimedRun t;
@@ -90,7 +90,7 @@ static TimedRun timedRun() {
         const size_t eq = item.find('=');
         const std::string k = item.substr(0, eq);
         const double v = eq == std::string::npos ? 1.0 : std::atof(item.c_str() + eq + 1);
-        double* d = k == "phase" ? &t.phase : k == "shown" ? &t.shown : k == "shownSpread" ? &t.shownSpread : k == "comes" ? &t.comes : k == "comesSpread" ? &t.comesSpread
+        double* d = k == "phase" ? &t.phase : k == "drift" ? &t.drift : k == "shown" ? &t.shown : k == "shownSpread" ? &t.shownSpread : k == "comes" ? &t.comes : k == "comesSpread" ? &t.comesSpread
                   : k == "read" ? &t.read : k == "readSpread" ? &t.readSpread : k == "drive" ? &t.drive : k == "driveSpread" ? &t.driveSpread : k == "input" ? &t.input
                   : k == "inputSpread" ? &t.inputSpread : k == "slow" ? &t.slow : k == "takeSpread" ? &t.takeSpread : k == "sendAfter" ? &t.sendAfter : nullptr;
         int* i = k == "dropOneIn" ? &t.dropOneIn : k == "twiceOneIn" ? &t.twiceOneIn : k == "backOneIn" ? &t.backOneIn : k == "stallEvery" ? &t.stallEvery

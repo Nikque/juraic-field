@@ -130,12 +130,12 @@ struct RealGameMode {
     }
 
     // ---- the play ----
-    // The frames from a button of the pad to the picture of the real game that shows it taken, which the AI begins with
-    // (Driver::lag): measured on the real game, 6. The way of the two turns it begins with
+    // The frames from the picture followed as a button of the pad is set to the picture of the real game that shows it
+    // taken, which the AI begins with (Driver::lag): 4 in the records of the real game. The way of the two turns it begins with
     // (Driver::turnsSwapped): the other way round, B sent for a turn to the right - so the real game turned its pair in
     // all six of its records through the virtual pad. The driver then takes the lag and the way of the turns
     // that fit the pictures (Driver::fit).
-    int lag = 6;
+    int lag = 4;
     bool turnsSwapped = true;
     VirtualPad pad;
     realgame::Driver driver;
@@ -227,7 +227,7 @@ struct RealGameMode {
     // The press asked for, or while the AI plays the buttons for the frame `now` of the clock (clockFrame): on the thread
     // of the play after the pictures that came, or in a frame none came in (playLoop: `why` as RECORD_SENT has it), while
     // reading; otherwise each frame of this program.
-    void drive(int64_t now, uint8_t why = 0, int64_t setAt = 0) {
+    void drive(int64_t now, uint8_t why = 0) {
         const Hold hold(state);
         realgame::PadRecord held{now, 0, 0, 0};
         realgame::SentRecord sent{0, 0, why};
@@ -240,9 +240,6 @@ struct RealGameMode {
             holdNothing = why == 3 || why == 4;
             held.buttons = driver.tick(follow, now);
             sent.driven = clockTime();
-            // (not sooner than setAt: a millisecond's sleeps, then the rest waited out)
-            while (clockTime() < setAt - realgame::TIME_SECOND / 1000) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            while (clockTime() < setAt) std::this_thread::yield();
             pad.press(held.buttons);
             sent.set = clockTime();
             held.by = 1;
@@ -316,7 +313,7 @@ struct RealGameMode {
         pace.reset(), nextDue = -1, menuFor = 0, holdNothing = false, told = {};
         // (with DEBUG_PARTS, PlayPace::sendAfter from JURAIC_SEND_AFTER_US - microseconds after a picture was shown -, for
         //  trying it on the real game)
-        pace.sendAfter = -1;
+        pace.sendAfter = realgame::PlayPace::SEND_AFTER;
         wchar_t after[32];
         if (DEBUG_PARTS && GetEnvironmentVariableW(L"JURAIC_SEND_AFTER_US", after, 32) > 0) pace.sendAfter = _wtoll(after) * 10;
         // (the pad of 2P is there from the menus on: the real game gives it the row of 2P)
@@ -471,6 +468,7 @@ private:
         //  themselves came in each frame)
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
         timeBeginPeriod(1);
+        int64_t drivenLast = -1; // the frame the pad was last driven as
         for (;;) {
             std::deque<Taken> now;
             {
@@ -490,21 +488,35 @@ private:
                 if (playerStop) break;
                 now.swap(taken);
             }
-            const Hold hold(state);
-            followTaken(now);
-            const int64_t t = clockTime();
             uint8_t why = 1;
-            if (now.empty()) {
-                if (pace.due() < 0 || t < pace.due()) continue;
-                pace.filledAt(t);
-                why = pace.stalled(t) ? 3 : 2;
-            } else {
-                lastPicture = realgame::frameAt(t);
+            int64_t setAt = 0;
+            {
+                const Hold hold(state);
+                followTaken(now);
+                const int64_t t = clockTime();
+                if (now.empty()) {
+                    if (pace.due() < 0 || t < pace.due()) continue;
+                    pace.filledAt(t);
+                    why = pace.stalled(t) ? 3 : 2;
+                } else {
+                    lastPicture = realgame::frameAt(t);
+                }
+                if (menuFor >= MENU_HOLD) why = 4;
+                // (the picture before this one left out, the frame the game reads next not driven yet: driven at once,
+                //  PlayPace::behind)
+                if (why == 1 && pace.behind(t, drivenLast)) drivenLast = pace.frameSet(t), drive(drivenLast, 2);
+                setAt = why == 1 ? pace.sendAt(t) : t;
             }
-            if (menuFor >= MENU_HOLD) why = 4;
-            // (PlayPace::sendAfter: the buttons decided for the frame they are set in, and set then)
-            const int64_t setAt = why == 1 ? pace.sendAt(t) : t;
-            drive(realgame::frameAt(setAt), why, setAt);
+            // (PlayPace::sendAfter: the buttons are set no sooner than setAt - a millisecond's sleeps, then the rest waited
+            //  out, the state not held meanwhile: the thread that draws reads it each frame)
+            while (clockTime() < setAt - realgame::TIME_SECOND / 1000) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            while (clockTime() < setAt) std::this_thread::yield();
+            const Hold hold(state);
+            // (driven as the frame of the game that reads the buttons set now, PlayPace::frameSet; never a frame before the
+            //  last one driven: a picture that came in after the frames with none were driven)
+            const int64_t at = clockTime(), as = pace.frameSet(at);
+            drivenLast = std::max(drivenLast, as >= 0 ? as : realgame::frameAt(at));
+            drive(drivenLast, why);
             nextDue = pace.due();
         }
         timeEndPeriod(1);
