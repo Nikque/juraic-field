@@ -337,7 +337,13 @@ private:
             // (the screen shows the pair begun unseen: taken from it if it came at another time than foreseen, or the
             //  engine has put it already)
             blindFor = -1;
-            if (!active || std::abs(seen.appearedAt - blindAt) > BLIND_SLACK) begin(f, side);
+            // (seen late over the field it was begun over - lit as it appeared -: the frame it is first seen in is not
+            //  the frame it appeared in, the engine has done for it what was sent, and the pictures put it right where
+            //  they show it otherwise. Begun from the screen then, the AI chose again and a turn sent under the light
+            //  was sent once more: a pair of a record of the real game, seen ten frames after it appeared, went down
+            //  turned once too often.)
+            const bool lateOverSame = seen.late && active && Follower::shown(startOwn.field) == Follower::shown(side.under);
+            if (!active || (!lateOverSame && std::abs(seen.appearedAt - blindAt) > BLIND_SLACK)) begin(f, side);
         } else if (blindFor >= 0 && ((side.unseen > 0 && counted >= blindFor) || movedSinceBegun())) {
             // (the window tells the pair begun unseen has been put, the screen never showing it: the next one may be
             //  begun unseen too - kept waiting for the screen to show this one, the next pair under the same light, 80
@@ -787,13 +793,12 @@ private:
     // buttons that went out for them -, and the placement chosen for it stands: its way there is planned again from where
     // the engine has the pair now. False: not so, and the pair is begun from the screen (begin). (Begun from the screen,
     // the AI chose again while the pair fell - on the real game the placement of 172 pairs of 176 taken so was gone for
-    // some frames, the pair held down meanwhile, and its last move came as it lay. In four records of the real game 418
-    // of 487 such pairs appeared one frame sooner or later than foreseen, and 24 more two frames later: a frame the game
-    // did not go on in, or the frames counted one off. Later than that, the game may have stood still for some frames and
-    // taken none of the buttons sent meanwhile: what the pad held then tells nothing of what it remembers - set so, pairs
-    // of rounds drawn with a stop of three frames before a pair appears went elsewhere than the AI chose 23 times in 307,
-    // begun from the screen 3 times in 300.)
-    static constexpr int RETIME_EARLY = 2, RETIME_LATE = 2;
+    // some frames, the pair held down meanwhile, and its last move came as it lay. In a record of the real game driven
+    // so, 69 pairs seen a frame sooner or one or two later than foreseen were set to that frame and all went where the
+    // AI chose; of 14 seen three to nine frames later, begun from the screen then, 6 went elsewhere - the turn sent
+    // before they appeared done as they appeared, and sent once more. Later than RETIME_LATE the pair is begun from the
+    // screen: the game stood still, or garbage the engine knows nothing of fell first.)
+    static constexpr int RETIME_EARLY = 2, RETIME_LATE = 10;
     bool retime(const Follower& f, const SideTrack& side) {
         const Tracker& t = f.tracker;
         const int64_t first = seen.appearedAt + (seen.late ? 0 : 1);

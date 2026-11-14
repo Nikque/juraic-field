@@ -6250,8 +6250,9 @@ static void testSecondChoiceInAirOnThreads() {
 // The picture that first shows a new pair of 2P is read together with the next one before the driver is called (as the
 // thread of the play on Windows does when it is woken late): the driver takes the pair as seen all the same - a pair
 // begun early or unseen is taken from the screen when it appeared at another frame than the engine foresaw (missed so,
-// it stayed taken as not shown). With garbage before the pairs lit as they appear, and with the round stopped for 3 frames
-// two frames before every other pair appears (the pairs come later than foreseen).
+// it stayed taken as not shown). With garbage before the pairs lit as they appear, and with every other pair coming 3
+// frames later than the frames of the game tell (the round taking the buttons meanwhile, as the real game does: a pair
+// that comes later than foreseen has done the turn sent before it appeared).
 static void testPicturesTakenTogether() {
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
@@ -6264,8 +6265,7 @@ static void testPicturesTakenTogether() {
                 std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
                 Driver::prepare(a.get());
                 driveRound(seed, n, {.lag = 5, .notes = &notes, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true,
-                                     .litAsAppears = stops ? 0 : 30, .garbageAsLit = stops ? 0 : 6, .pauseFor = stops ? 3 : 0, .pauseEvery = 2, .pauseBefore = stops,
-                                     .batchAtSpawn = together});
+                                     .litAsAppears = stops ? 0 : 30, .garbageAsLit = stops ? 0 : 6, .batchAtSpawn = together, .lateSpawn = stops ? 3 : 0});
             }
         }
         long taken = 0; // pairs begun from the screen (seen, or begun before and taken again from it or set to the frame it showed them appear in)
@@ -6812,8 +6812,9 @@ static void testFramesGoingRoundTheClock() {
     std::cout << "the frames of the round going round the clock's: " << counts << "\n";
 }
 
-// A pair the driver began before it appeared comes a frame or two later than the frames of the game tell, over the field
-// it was begun over (in the records of the real game nine in ten of the pairs that came at another frame than foreseen):
+// A pair the driver began before it appeared comes one to six frames later than the frames of the game tell, over the
+// field it was begun over (in the records of the real game nine in ten of the pairs that came at another frame than
+// foreseen came a frame or two off, the others three to nine frames later):
 // the buttons sent for its first frames reach the round before it appears, and what they ask is done as it appears
 // (Rules::preInput). The engine is set to the frame the screen shows it appear in, with what the pad held before; the
 // placement chosen stands. (Begun again from the screen, the engine knew nothing of a turn the round had done as the
@@ -6823,8 +6824,8 @@ static void testPairLaterThanForeseen() {
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
     DriveCounts n;
     std::vector<std::pair<int64_t, std::string>> notes;
-    for (const uint64_t seed : {140, 141, 142, 143, 144, 145})
-        for (const int late : {1, 2}) {
+    for (const uint64_t seed : {140, 141, 142, 143})
+        for (const int late : {1, 2, 4, 6}) {
             std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
             Driver::prepare(a.get());
             DriveScenario how{.lag = 5, .given = std::move(a), .hidden = 3, .movedHidden = 1, .quietLanding = true};
