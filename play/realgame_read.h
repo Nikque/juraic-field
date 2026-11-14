@@ -856,10 +856,15 @@ struct SideTrack {
 // The real game as its records show it where they differ from the frame tables of game/timing.h: no turn is taken for 4
 // to 7 frames after a quick turn (of the pairs that turned quickly and were turned again 4 frames after, none was turned
 // - with Timing::quickTurnLock 3 the engine turned them, and 4 of 25 such pairs went where the engine locked them, 12 of 25
-// with 4 to 7 -, and two turned 8 frames after were). The longest of them is taken.
+// with 4 to 7 -, and two turned 8 frames after were). The longest of them is taken. And the fall is counted on while a
+// pair lies (Timing::fallOnGround): a pair that loses its ground steps down sooner than one that begins to fall then.
+// And a quick turn whose first press reached the game before the pair appeared leaves the axis where it is
+// (Timing::queuedTurnBelow).
 inline juraic::Timing realGameTiming() {
     juraic::Timing t;
     t.quickTurnLock = 7;
+    t.fallOnGround = 1;
+    t.queuedTurnBelow = 1;
     return t;
 }
 
@@ -1152,6 +1157,9 @@ private:
             //  before it, and the pairs after it a place out)
             moveOn(s, t.pairs - t.standAt, t.stillAt);
         }
+        // (Two pairs alike in it, away from where it stood for a few readings and standing there again, is not taken as
+        //  moved on to a third pair alike: on the real game its window reads so at other times too - taken so, the
+        //  pairs of two records were counted up to five too many in a round, and 30 pairs and more learnt otherwise.)
         learnStand(s);
     }
     static bool whole(const SideTrack& t) { return t.nextRead[0] && t.nextRead[1]; }
@@ -1165,7 +1173,18 @@ private:
     int moveOf(int s) const {
         const SideTrack& t = side[s];
         if (same(t.next[0], t.stand[0]) && same(t.next[1], t.stand[1])) return 0;
-        if (same(t.next[0], t.stand[1]) && !(same(t.stand[0], t.stand[1]) && frame - t.standFrom < pairGap)) return 1;
+        if (same(t.next[0], t.stand[1]) && !(same(t.stand[0], t.stand[1]) && frame - t.standFrom < pairGap)) {
+            // (two pairs alike in it and a third alike after them, as the pairs learnt tell - the other side's window
+            //  showed them -, read with a pair alike first and the pair after the third second: it has moved on by two,
+            //  once to the third pair alike, which the pairs it shows did not tell. Taken as one move, a pair of 1P
+            //  hidden as it appeared, the second of three alike, was not counted on a record of the real game, and the
+            //  pairs of 1P were numbered a place behind for the rest of the round.)
+            const int third = t.standAt + 2;
+            if (same(t.stand[0], t.stand[1]) && knows(s, third) && same(t.next[0], pairOf(s, third)) && !same(t.next[1], pairOf(s, third)) && knows(s, third + 1) &&
+                same(t.next[1], pairOf(s, third + 1)))
+                return 2;
+            return 1;
+        }
         if (same(t.next[0], t.stand[0])) return 0;
         for (int k = 2; k <= windowAhead; ++k) {
             const int index = t.standAt + k;

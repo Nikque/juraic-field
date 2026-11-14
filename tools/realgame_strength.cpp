@@ -134,6 +134,9 @@ static void driveMatch(uint64_t seed, DriveCounts& n, DriveScenario how, int* re
     const Rules rules;
     Round r;
     Timing roundTiming;
+    // (the round stands for the real game, which counts the fall on while a pair lies - realGameTiming; TABLEFALL=1: as
+    //  the frame tables of this game, the engine of the mode half a cell off now and then)
+    roundTiming.fallOnGround = std::getenv("TABLEFALL") ? 0 : 1, roundTiming.queuedTurnBelow = 1;
     if (how.quickTurnLock >= 0) roundTiming.quickTurnLock = how.quickTurnLock;
     if (const char* q = std::getenv("QTL")) roundTiming.quickTurnLock = std::atoi(q);
     r.start(rules, seed, 2, roundTiming);
@@ -719,6 +722,7 @@ int main(int argc, char** argv) {
     if (mode == 0 || mode >= 5) {
         const Rules rules;
         Timing timing;
+        timing.fallOnGround = std::getenv("TABLEFALL") ? 0 : 1, timing.queuedTurnBelow = 1; // (as driveMatch)
         if (const char* q = std::getenv("QTL")) timing.quickTurnLock = std::atoi(q);
         Round r;
         r.start(rules, seed, 2, timing);

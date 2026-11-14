@@ -59,6 +59,7 @@ public:
     int played = 0;                           // pairs played
     int corrected = 0;                        // pictures that showed the pair elsewhere than the engine had it
     int explained = 0;                        // ... of the others, those a cell of the 13th or 14th row not sure of explained (explain)
+    long walledHeld = 0;                      // frames a turn was not sent for a pair not shown yet, to come between two columns twelve high (play)
     int replans = 0;                          // ways to the placement planned again from where the engine had the pair (steer)
     bool unsureWays = true; // the AI plans its ways with the cells not sure of (tellUnsure), and a picture can tell them (explain)
     std::vector<int> lags;                    // the lag the pictures of each pair fitted best, the last ones (at most 15)
@@ -74,6 +75,9 @@ public:
     // or 6 frames after it in a fifth of the pictures of those frames of the eighth record (8 frames twice). A picture of
     // the pair turned the way the engine had it up to TURN_LATEST frames before puts nothing right.
     static constexpr int TURN_LATEST = 6, TURN_RUN = 3;
+    // A picture that reads the pair upside down with its axis above the screen puts nothing right up to TURN_ROUND frames
+    // after the engine's pair turned (correct).
+    static constexpr int TURN_ROUND = 10;
     // A turn that changes the column of the pair in its frame (pushed aside from a wall or a higher column, a move with
     // it) is shown later than a move: the column before in the frame of the turn, the column between in the next, the
     // column after in the one after (on the real game, turned so in the 12th row, its child in the hidden 13th row).
@@ -193,6 +197,9 @@ public:
     // The buttons `b` with the two turns the other way round (as they go to the pad when turnsSwapped).
     static uint8_t otherTurns(uint8_t b) { return swapTurns(b); }
     const juraic::GameField& begunField() const { return startOwn.field; }
+    // For tools: the engine's own side as it stands (after the frame engineFrame() - 1 of the game).
+    const juraic::Player& engine() const { return own; }
+    int64_t engineFrame() const { return next; }
 
     // The placement the pair in play is brought to (-1: none); once the engine has put it, the one it was brought to then,
     // until the next pair is begun. (Told only while it was in play, a placement the AI chose again in the call in which
@@ -258,7 +265,8 @@ private:
         // (frames of the game whose buttons were sent before: they took what was held. A frame the clock went past without
         //  a call - the thread of the play a frame late - had the agent's buttons chosen for it and not sent: the way to
         //  the placement is planned again from where the engine has the pair, so that a move chosen for it is not lost)
-        bool same = true;
+        bool same = !highHeld;
+        highHeld = false;
         while (active && next < at) same = play(f, false) && same;
         if (!same && active) steer(f);
         if (active && next == at) play(f, true);
@@ -857,6 +865,10 @@ private:
             if (!t.fromStart || side.pairs > 0 || side.unseen > 0) return -1;
             return t.roundStart >= 0 ? t.roundStart + t.timing.firstSpawn : seen.movedAt >= 0 ? seen.movedAt + 1 : -1;
         }
+        // (Two pairs alike in the window, moved on to a third alike, tell of no move by the pairs shown, and such a pair,
+        //  lit as it appears, is begun only as the screen shows it. The window gone away for a few readings and standing
+        //  again as it stood is not taken for that move: played again so, four records of the real game had one to
+        //  three pairs each begun unseen that had not come - as a round ended, under a long light.)
         if (!following || own.phase == juraic::Phase::Control || !seen.movedForNext(t.pairGap)) return -1;
         const int64_t shown = seen.movedAt + 1;
         return own.phase == juraic::Phase::Next && own.wait <= 2 ? std::clamp(next + own.wait - 2, shown, shown + 1) : shown;
@@ -1080,6 +1092,7 @@ private:
     // of the game before `at` have passed - the agent decides them, the game took what the pad held.
     void start(const Follower& f, int64_t at, const std::string& line) {
         startOwn = own, startNext = next, shiftBegun = seen.movedAt, putAim = -1, sentFor = false, retaking = false;
+        wentHigh = false, stripped = 0;
         past.clear();
         checked = shownAt = doubtAt = begunAt = -1;
         active = true, following = false, untilLocked = false;
@@ -1089,6 +1102,31 @@ private:
         bool same = true;
         while (active && next < at) same = play(f, false) && same;
         if (!same) steer(f);
+    }
+
+    // The engine's pair is in the column and turned the way of the placement chosen for it (none chosen: taken as there).
+    bool overTarget() const {
+        const auto* placing = placer();
+        const int id = placing ? placing->targetPlacement() : -1;
+        if (id < 0) return true;
+        const juraic::Placement want = juraic::placement(id);
+        if (own.pair.x == int(want.x) && own.pair.dir == want.dir) return true;
+        // (a pair of one colour: the same two columns, upright or lying, either way round)
+        if (own.colors.axis != own.colors.child) return false;
+        const bool upright = own.pair.dir == juraic::UP || own.pair.dir == juraic::DOWN, wantUpright = want.dir == juraic::UP || want.dir == juraic::DOWN;
+        if (upright != wantUpright) return false;
+        return upright ? own.pair.x == int(want.x) : std::min(int(own.pair.x), own.pair.childX()) == std::min(int(want.x), want.childX());
+    }
+    bool highHeld = false; // the down button the agent asked for was not sent for a pair that has been in the 13th row (play)
+    bool wentHigh = false; // the engine has had the pair in play in the 13th row since it was begun (start)
+    // Frames in a row in which nothing was sent for a pair in play because a button the agent asked for was held back
+    // (play), and how many there may be; the frames after the one a pair was foreseen in for which its turns wait (play).
+    int stripped = 0;
+    static constexpr int STRIP_MAX = 6, WALLED_WAIT = 6;
+    // Pairs appear between two columns twelve high in `g`: a turn there is a quick turn.
+    static bool walled(const juraic::GameField& g) {
+        const juraic::detail::Cells c(g);
+        return !c.free(juraic::SPAWN_X - 1, juraic::SPAWN_Y) && !c.free(juraic::SPAWN_X + 1, juraic::SPAWN_Y);
     }
 
     // One frame of the game: the agent decides it (its buttons are sent), or it took what was held. False when the
@@ -1111,6 +1149,34 @@ private:
             if (wanted & (TAP_KINDS[0] | TAP_KINDS[1])) retakeTapAt = next - lag;
             if (retakeTapAt >= 0) out = uint8_t(out & ~juraic::BTN_DOWN);
         }
+        // (no turn for a pair begun early that the screen has not shown yet, where pairs come between two columns twelve
+        //  high: a turn that reaches the game before the pair - it appeared a frame or two later than foreseen - begins
+        //  a quick turn that leaves the axis where it is (Timing::queuedTurnBelow), and the way up into the 13th row is
+        //  lost: two pairs of two records of the real game went down where they had appeared. The turns go out once the
+        //  screen has shown the pair, or for the frame WALLED_WAIT + 1 frames after the one it was foreseen in - lit as it
+        //  appears, the screen does not show it for long; the way is planned again then. Not for a pair begun unseen: it
+        //  is begun after the frame it was foreseen in.)
+        // (What is held back here and below leaves no pair without a button for long: at most STRIP_MAX frames in a row
+        //  with nothing sent for a pair in play because of it - held back longer, a pair lit as it appeared took no
+        //  button for ten frames in rounds drawn so.)
+        const bool may = send && stripped < STRIP_MAX;
+        const uint8_t asked = out;
+        if (may && (out & (juraic::BTN_CW | juraic::BTN_CCW)) && earlyFor == pairsSeen && next <= earlyAt + WALLED_WAIT && walled(own.field))
+            out = uint8_t(out & ~(juraic::BTN_CW | juraic::BTN_CCW)), highHeld = true, ++walledHeld;
+        // (no down button for a pair that has been up in the 13th row and is not yet over its column, turned its way:
+        //  aloft, a pair steps down half a cell 13 frames after its last step, and the way over a column twelve high must
+        //  be made before that - a down button taken there, while a second choice was on its way, left one frame for the
+        //  first move on a record of the real game, and the three moves over the column came to nothing. Nor once the
+        //  engine has it a step lower again: where the game's pair is half a cell off the engine's, it may be up there
+        //  still. The way is planned again from where the pair is then: highHeld, drive.)
+        if (own.phase == juraic::Phase::Control && own.pair.y >= 12) wentHigh = true;
+        if (may && (out & juraic::BTN_DOWN) && own.phase == juraic::Phase::Control && wentHigh && !overTarget()) out = uint8_t(out & ~juraic::BTN_DOWN), highHeld = true;
+        // (nor in the two frames after a quick turn: on a record of the real game a down button sent for one frame, in the
+        //  frame after the quick turn, was not taken - the pair stood half a cell above the engine's for twelve frames;
+        //  of 44 others sent for one frame, 43 were taken as the engine had it)
+        if (may && (out & juraic::BTN_DOWN) && own.phase == juraic::Phase::Control && own.pair.quickLock > 0 && own.pair.quickLock + 1 >= f.tracker.timing.quickTurnLock)
+            out = uint8_t(out & ~juraic::BTN_DOWN), highHeld = true;
+        if (send) stripped = own.phase == juraic::Phase::Control && !out && asked ? stripped + 1 : 0;
         if (send) held = sendable(next - lag, tapToEnd(next - lag, out)), sentFor = true;
         // (a frame whose buttons went out before took what the pad held lag frames before it: a pair begun early and
         //  taken again from the screen, as it was held now, had its first move played twice, a column too far)
@@ -1735,6 +1801,19 @@ private:
                 shownAt = t.frame, doubtAt = -1;
                 return;
             }
+        // (a picture read as the pair upside down, its axis above the screen - one piece of the child's colour in the
+        //  twelve rows, the place above it beyond the screen: PairSeen::axisHidden -, while the engine's pair turned up
+        //  to TURN_ROUND frames before: the child on its way round near the top of the screen reads so for some pictures
+        //  in a row. In two records of the real game the engine had the pair where the next pictures showed it - both
+        //  pieces above the screen after a turn in the 13th row; a column aside in the 11th row, the child halfway from
+        //  above to the side -, the pair was put right "in the third column, the 13th row, child down" all the same,
+        //  its way planned again from there, and it went elsewhere than the AI chose.)
+        if (side.pair.axisHidden) {
+            for (size_t k = past.size(); k-- > 1 && past[k].frame > t.frame - TURN_ROUND;)
+                if (past[k].frame <= t.frame + 2 && past[k].state.phase == juraic::Phase::Control && past[k - 1].state.phase == juraic::Phase::Control &&
+                    past[k].state.pair.dir != past[k - 1].state.pair.dir)
+                    return;
+        }
         if ((shownAt >= 0 && t.frame - shownAt <= DOUBT_FRAMES) || (begunAt >= 0 && t.frame - begunAt <= DOUBT_FRAMES && seen.y >= 12)) {
             const bool twice = doubtAt >= 0 && t.frame - doubtAt <= DOUBT_FRAMES && alike(doubt, seen, c, int(t.frame - doubtAt));
             doubtAt = t.frame, doubt = seen;

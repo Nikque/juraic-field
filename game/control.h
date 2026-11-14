@@ -76,7 +76,18 @@ struct Cells {
     }
 };
 
-inline void rotate(PairControl& p, const Cells& c, bool clockwise, const Timing& t, ControlEvents& e) {
+// The count of the fall of a pair that lay, with Timing::fallOnGround: it went on while the pair lay (`fall` a frame),
+// and the steps that came due meanwhile found the ground - what is left of the step due next.
+inline int16_t countedOn(const PairControl& p, int fall) { return int16_t((p.gain + p.groundFrames * fall) % HALF_STEP); }
+
+// With Timing::queuedTurnBelow, the first press of a quick turn that was asked for before the pair appeared is kept in
+// PairControl::quickWindow: for the first QUEUED_MARK frames of the window it stands that much above
+// Timing::quickTurnWindow (stepPair ends the window then and takes no turn for what was left of it).
+constexpr int QUEUED_MARK = 11;
+inline bool queuedFirst(const PairControl& p, const Timing& t) { return p.quickWindow > t.quickTurnWindow; }
+
+// `queued`: the turn was asked for before the pair appeared and is done in its first frame.
+inline void rotate(PairControl& p, const Cells& c, bool clockwise, const Timing& t, int fall, bool queued, ControlEvents& e) {
     const uint8_t next = uint8_t((p.dir + (clockwise ? 1 : 3)) & 3);
     if (p.dir == UP || p.dir == DOWN) {
         // The child goes to the side; pushed away from a wall or a stack; with
@@ -89,8 +100,14 @@ inline void rotate(PairControl& p, const Cells& c, bool clockwise, const Timing&
             p.dir = next;
             e.kicked = true;
         } else if (!p.quickWindow) {
-            p.quickWindow = uint8_t(t.quickTurnWindow);
+            p.quickWindow = uint8_t(t.quickTurnWindow + (queued && t.queuedTurnBelow ? QUEUED_MARK : 0));
             return;
+        } else if (p.dir == UP && queuedFirst(p, t) && c.free(p.x, p.y - 1)) {
+            // Timing::queuedTurnBelow, the first press asked for before the pair appeared: the child goes below
+            // the axis, which stays where it is.
+            p.dir = DOWN;
+            p.gain = int16_t(t.quickTurnGain);
+            e.quickTurned = true;
         } else if (p.dir == UP) {
             if (p.y + 1 >= ROW_14) return; // the axis piece never enters the 14th row
             // Quick turn, child from above to below: the axis rises one cell and
@@ -124,10 +141,11 @@ inline void rotate(PairControl& p, const Cells& c, bool clockwise, const Timing&
         if (!c.free(p.x, p.y - 1)) {
             // Floor kick: the axis is lifted exactly one cell (a pair that was
             // still half a cell above stays half a cell above) and the child
-            // goes below it. The fall restarts from Timing::liftGain.
+            // goes below it. The fall restarts from Timing::liftGain (Timing::fallOnGround: of a
+            // pair that lay, the count goes on as it was).
             if (p.y + 1 >= ROW_14) return;
             p.y = int8_t(p.y + 1);
-            p.gain = int16_t(t.liftGain);
+            p.gain = t.fallOnGround && p.grounded ? countedOn(p, fall) : int16_t(t.liftGain);
             p.grounded = false; // standing on the child afterwards counts as a new landing
             e.kicked = true;
         }
@@ -160,15 +178,26 @@ inline ControlEvents stepPair(PairControl& p, const GameField& field, uint8_t bu
     // The first frame of a pair with pre-input: what was asked for before it
     // appeared is done now, unless the same kind of button is pressed in this very frame.
     const uint8_t queuedSide = pressed & (BTN_LEFT | BTN_RIGHT) ? uint8_t(0) : uint8_t(p.queued & (BTN_LEFT | BTN_RIGHT));
-    if (!(pressed & (BTN_CW | BTN_CCW))) pressed |= uint8_t(p.queued & (BTN_CW | BTN_CCW));
+    const bool queuedTurn = !(pressed & (BTN_CW | BTN_CCW)) && (p.queued & (BTN_CW | BTN_CCW));
+    if (queuedTurn) pressed |= uint8_t(p.queued & (BTN_CW | BTN_CCW));
     p.queued = 0;
 
-    if (p.quickWindow) --p.quickWindow;
+    if (p.quickWindow) {
+        --p.quickWindow;
+        // (a window marked for a first press asked for before the pair appeared - detail::QUEUED_MARK -, the mark run
+        //  out: what a second press does from here on the real game is not known. No turn is taken for the rest of the
+        //  window, so that no way is planned through those frames; a press after it begins a quick turn anew.)
+        if (p.quickWindow == t.quickTurnWindow) {
+            const int rest = t.quickTurnWindow - detail::QUEUED_MARK;
+            p.quickWindow = 0;
+            if (rest > p.quickLock) p.quickLock = uint8_t(rest < 15 ? rest : 15);
+        }
+    }
     if (p.quickLock) {
         --p.quickLock;
     } else {
         const bool cw = pressed & BTN_CW, ccw = pressed & BTN_CCW;
-        if (cw != ccw) detail::rotate(p, c, cw, t, e);
+        if (cw != ccw) detail::rotate(p, c, cw, t, t.fallPerFrame * speedPercent / 100, queuedTurn, e);
     }
 
     int want = (buttons & BTN_LEFT ? -1 : 0) + (buttons & BTN_RIGHT ? 1 : 0);
@@ -228,6 +257,8 @@ inline ControlEvents stepPair(PairControl& p, const GameField& field, uint8_t bu
             if (fallen >= t.lockGain) p.locked = true;
         }
     } else {
+        // (Timing::fallOnGround: the count went on while the pair lay)
+        if (t.fallOnGround && p.grounded) p.gain = detail::countedOn(p, t.fallPerFrame * speedPercent / 100);
         p.grounded = false;
         p.gain = int16_t(p.gain + (down ? t.softDropPerFrame : t.fallPerFrame * speedPercent / 100));
         if (p.gain >= HALF_STEP) {

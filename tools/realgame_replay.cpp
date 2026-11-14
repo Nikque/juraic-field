@@ -115,10 +115,32 @@ void replay(const std::filesystem::path& folder) {
     int64_t shownRead = 0; // the time the picture of the last reading was shown
     bool waiting = false;  // a pad record whose drive waits for the time the pad was set (SETFRAMES)
     uint8_t waitingButtons = 0;
+    // (TRACE=<from>,<to>: for each drive in those frames a line - the frame driven as, the buttons the record has, the
+    //  engine's pair after the frame of the game before engineFrame, the placement it is brought to, the pair as the last
+    //  reading showed it)
+    int64_t traceFrom = 0, traceTo = -1;
+    if (const char* trace = std::getenv("TRACE")) {
+        long long from = 0, to = -1;
+        std::sscanf(trace, "%lld,%lld", &from, &to);
+        traceFrom = from, traceTo = to;
+    }
+    const auto pairText = [](const juraic::PairControl& p) {
+        static const char* ways[] = {"up", "right", "down", "left"};
+        char text[80];
+        std::snprintf(text, sizeof text, "column %d row %d%s child %s%s gain %d", p.x + 1, p.y + 1, p.upper ? " (half up)" : "", ways[p.dir & 3], p.grounded ? " grounded" : "", int(p.gain));
+        return std::string(text);
+    };
     const auto driveAs = [&](int64_t as, uint8_t sent) {
         d.gate = [&d, sent](int64_t, uint8_t) { return d.turnsSwapped ? Driver::otherTurns(sent) : sent; };
         drivenLast = std::max(drivenLast, as);
         d.tick(follow, drivenLast);
+        if (drivenLast >= traceFrom && drivenLast <= traceTo) {
+            const SideTrack& s = follow.tracker.side[1];
+            std::printf("TRACE %lld sent %2d | engine frame %lld %s | target %d | seen %s (reading %lld%s)\n", static_cast<long long>(drivenLast), int(sent),
+                        static_cast<long long>(d.engineFrame()),
+                        d.playing() && d.engine().phase == juraic::Phase::Control ? pairText(d.engine().pair).c_str() : d.playing() ? "no pair yet" : "not playing", d.target(),
+                        s.pair.seen ? pairText(s.pair.at).c_str() : "-", static_cast<long long>(follow.tracker.frame), s.clear ? "" : ", not clear");
+        }
         ++ticks;
         if (follow.tracker.rounds != toldRound) toldRound = follow.tracker.rounds, ours.clear();
         if (d.toldPair() >= 0) ours[d.toldPair()] = juraic::placementId(d.toldPlacement());

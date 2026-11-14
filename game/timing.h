@@ -54,6 +54,30 @@ struct Timing {
     // the landing animation (landFrames) runs from the landing, and what is left of
     // it at the lock is waited for, lockWait frames at least, before nextFrames.
     int lockGain = 438;
+    // The fall goes on being counted while the pair lies: a pair that loses its ground - turned or moved off what it
+    // lay on - steps down when the step it was counting towards comes due, as if it had been falling meanwhile (the
+    // steps that came due while it lay found the ground, and the count went round). (A record of the real game: a
+    // pair lying across two columns for four frames, its child on the higher one, 70/256 gained before it came to
+    // rest there, was turned upright and was half a cell lower two frames after the turn - 70 + 6 x 10 = 130;
+    // counted on only from the turn the step comes six frames after it, and the move sent four frames after the
+    // turn found the column beside it in the way.) A floor kick of a pair that lies leaves that count as it is,
+    // liftGain is for a pair kicked in the air. (Two records: a pair that had lain four frames, 2/256 left of its
+    // last step, kicked, turned on four frames later, was still a row up four frames after that turn and went over
+    // the column beside it - 42 + 8 x 10 = 122; from liftGain it would have stepped down two frames before. Another,
+    // kicked so, had stepped down before its move, which the count begun at 0 would not have had it do.)
+    // 0: the fall is counted on only once the pair has lost its ground (the frame tables above). (An int as every
+    // number here: the struct is compared byte by byte.)
+    int fallOnGround = 0;
+    // A quick turn whose first press was asked for before the pair appeared (preFrames), the second within 10 frames of
+    // its first frame: the child goes below the axis, which stays where it is, when the cell below it is empty. A
+    // second press later in the window: not known - the engine takes no turn until the window is over. (Two
+    // records of the real game, pairs that appeared a frame or two later than the buttons were sent for, between two
+    // columns twelve high, over a column of nine: the first press reached the game before the pair, the second four
+    // frames later, and the pair stood with its axis where it had appeared and its child below - one in nine clear
+    // pictures; the three moves sent for the other, which the engine had a row up, came to nothing. A pair whose first
+    // press came in its first frame went up a row, as the quick turn of the tables has it.) 0: any quick turn with
+    // the child above lifts the axis.
+    int queuedTurnBelow = 0;
     int lockWait = 2;
     int maxLandings = 8;
     // Points of the down key at the end of a drop, beside the point for every row
