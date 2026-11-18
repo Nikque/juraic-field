@@ -1,6 +1,14 @@
 # ビルドとテスト
 
-Visual Studio 2022 などの C++20 コンパイラーと CMake 3.16 以降を使います。x64 では SSE4.1 と POPCNT を使います（PEXT/PDEP は実行時に CPU を判定して使い分けます）。それ以外の CPU 向けに 64bit 演算だけの実装も入っています（`core/field_bits.h`）。盤面ジェネレーターの GUI は Windows（MSVC）だけです。ゲーム本体は Windows では Direct2D・XAudio2 で、Linux では SDL 3 で動きます（下）。ジェネレーターの CLI、AI のツール（`ai_match` など）、盤面コア・ゲーム・AI・通信のテストは GCC と Clang でもビルドできます。macOS では、ゲーム本体はアプリ（`JuraicField.app`）になります。GitHub Actions の `.github/workflows/macos.yml` が、Apple シリコンの Mac でビルドとテストを行います。Android 版は `android/`（Gradle）で作ります。SDL 3 の配布物を展開したフォルダーを `-PsdlSource=` で渡し、SDL の Android 用の部品（Java と Gradle のラッパー）もそこから使います。手順は `.github/workflows/android.yml` にあります。
+Visual Studio 2022 などの C++20 コンパイラーと、CMake 3.16 以降を使います。
+
+- x64 では SSE4.1 と POPCNT を使います。PEXT/PDEP は、実行時に CPU を判定して使い分けます。
+- それ以外の CPU 向けに、64bit 演算だけの実装も入っています（`core/field_bits.h`）。
+- 盤面ジェネレーターの GUI は、Windows（MSVC）だけです。
+- ゲーム本体は、Windows では Direct2D・XAudio2 で、Linux では SDL 3 で動きます。Linux の手順は、Windows の SDL 3 の手順の後にあります。
+- ジェネレーターの CLI、AI のツール（`ai_match` など）、盤面コア・ゲーム・AI・通信のテストは、GCC と Clang でもビルドできます。
+- macOS では、ゲーム本体はアプリ（`JuraicField.app`）になります。GitHub Actions の `.github/workflows/macos.yml` が、Apple シリコンの Mac でビルドとテストを行います。
+- Android 版は `android/`（Gradle）で作ります。SDL 3 の配布版を展開したフォルダーを `-PsdlSource=` で渡し、SDL の Android 用の部品（Java と Gradle のラッパー）もそこから使います。手順は `.github/workflows/android.yml` にあります。
 
 ```powershell
 cmake -S . -B build
@@ -10,9 +18,11 @@ cd build/Release
 .\JuraicField.exe
 ```
 
-性能測定は必ず **Release** で行ってください。ビルドすると、`media/` の絵と曲が exe の隣（`background`・`bgm`）に写されます。
+性能測定は、必ず **Release** で行ってください。ビルドすると、`media/` の絵と曲が exe の隣（`background`・`bgm`）にコピーされます。
 
-Windows では、SDL 3 があると、PlayStation のパッドと Switch の Pro コントローラー・Joy-Con をそれで読みます。これらのパッドは、ほかのソフトに頼まれると独自の形で送るようになり（Pro コントローラーは USB では必ず）、Windows の汎用の読み方では、押していない方向やボタンが押されているように読めてしまうためです。SDL 3 が無くてもビルドはでき、その時はこれらのパッドも汎用の読み方で読みます。SDL 3 は静的ライブラリーとしてビルドし、`CMAKE_PREFIX_PATH` で指します。
+Windows では、SDL 3 があると、PlayStation のパッドと Switch の Pro コントローラー・Joy-Con を SDL 3 で読みます。これらのパッドは、ほかのソフトに頼まれると独自の形で送るようになります（Pro コントローラーは USB では必ず）。すると Windows の汎用の読み方では、押していない方向やボタンが押されているように読めてしまうためです。
+
+SDL 3 が無くてもビルドはでき、その時はこれらのパッドも汎用の読み方で読みます。SDL 3 は静的ライブラリーとしてビルドし、`CMAKE_PREFIX_PATH` で指定します。
 
 ```powershell
 # SDL 3（https://github.com/libsdl-org/SDL/releases の SDL3-3.4.18.tar.gz を展開したフォルダーで）
@@ -24,7 +34,7 @@ cmake --install build --config Release
 cmake -S . -B build -DCMAKE_PREFIX_PATH=C:/sdl3
 ```
 
-Linux では、SDL 3 があればゲーム本体もビルドされます（無ければゲーム本体だけを飛ばします）。SDL 3 は静的ライブラリーとしてビルドしておき、`CMAKE_PREFIX_PATH` で指します。絵・曲・文字の読み込みに使う 1 ファイルのライブラリー（stb_image・stb_truetype・dr_flac・dr_mp3・dr_wav）は `third_party/` に入っています。
+Linux では、SDL 3 があればゲーム本体もビルドされます。無ければ、ゲーム本体だけを飛ばします。SDL 3 は静的ライブラリーとしてビルドしておき、`CMAKE_PREFIX_PATH` で指定します。絵・曲・文字の読み込みに使う 1 ファイルのライブラリー（stb_image・stb_truetype・dr_flac・dr_mp3・dr_wav）は `third_party/` に入っています。
 
 ```bash
 # SDL 3（https://github.com/libsdl-org/SDL/releases の SDL3-3.4.18.tar.gz を展開したフォルダーで）
@@ -38,7 +48,9 @@ ctest --test-dir build --output-on-failure
 ./build/JuraicField
 ```
 
-Ubuntu 22.04 で SDL 3 のビルドに要る開発用パッケージ: `cmake ninja-build pkg-config libasound2-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxkbcommon-dev libwayland-dev libdecor-0-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev libudev-dev`。Linux では、ビルドするとフォント（`media/fonts`）も `fonts` に写されます。
+Ubuntu 22.04 で SDL 3 のビルドに要る開発用パッケージ: `cmake ninja-build pkg-config libasound2-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxkbcommon-dev libwayland-dev libdecor-0-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev libudev-dev`
+
+Linux では、ビルドするとフォント（`media/fonts`）も `fonts` にコピーされます。
 
 | テスト | 内容 |
 | --- | --- |
@@ -88,6 +100,6 @@ python tests/verify_output.py generator.log --allow-extra
 | `media/` | 同梱の絵と曲、その作り方の記録、Linux 版のフォント（`fonts/`） |
 | `third_party/` | Linux 版が使う 1 ファイルのライブラリー（stb・dr_libs）、Windows 版が仮想のパッドに使う ViGEmClient と、そのライセンス |
 | `tests/` | テスト。`tests/reference/v030_engine.h` は照合用に残した v0.3.0 のエンジン |
-| `tools/` | AI どうしの対戦（`ai_match`）、1 人での探索の測定と調整（`ai_toko`・`ai_tune`）、ベンチマーク、到達規則の比較、配布物の作成 |
+| `tools/` | AI どうしの対戦（`ai_match`）、1 人での探索の測定と調整（`ai_toko`・`ai_tune`）、ベンチマーク、到達規則の比較、配布版の作成 |
 | `examples/`・`benchmarks/` | 盤面ジェネレーターの例と、その速度の測定の記録 |
 | `licenses/` | Ama のライセンスと、AI のうち Ama に倣っている所の一覧。Linux 版に入るもの（SDL 3・stb・dr_libs・BIZ UDPゴシック。SDL 3 は Windows 版にも）と、Windows 版に入る ViGEmClient のライセンス |

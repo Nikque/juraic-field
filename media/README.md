@@ -1,11 +1,11 @@
 # media — the pictures and the music that come with Juraic Field
 
 The build copies `background/` and `bgm/` next to `JuraicField.exe`, where the game looks for them. Each place and
-each scene has a folder of its own; a file put into one of them can be chosen on the settings screen
-(表示と音). Without these folders the game runs with plain fields and without music.
+each scene has its own folder, and a file put into one of them can be chosen on the settings screen
+(表示と音). Without these folders, the game runs with plain fields and no music.
 
 The pictures in `background/` and the music in `bgm/` were made for this program. Everything in this folder is
-under the same licence as the program (MIT, see `../LICENSE`).
+under the same licence as the program (MIT; see `../LICENSE`).
 
 ## Pictures (`background/`)
 
@@ -15,9 +15,9 @@ under the same licence as the program (MIT, see `../LICENSE`).
 | `2p/field-2p-juraic.png` | the field of the second player | the author's character Juraic Vaid: the picture `source/juraic-vaid-original.webp`, cut out of its white ground, made dark and put on a dark ground by `tools/make_pictures.py` |
 | `other/stage-grid.png` | the rest of the screen | drawn by calculation: `tools/make_pictures.py` |
 
-`tools/make_pictures.py` draws by calculation and uses no picture-making AI. The one picture it starts from is
-`source/juraic-vaid-original.webp` (1024 x 1536, the character on a white ground); the game and its build do not
-use that file.
+`tools/make_pictures.py` draws by calculation and uses no image-generating AI. The only picture it starts from is
+`source/juraic-vaid-original.webp` (1024 x 1536, the character on a white background). The game and its build do
+not use that file.
 
 ## Music (`bgm/`)
 
@@ -30,23 +30,24 @@ use that file.
 | `toko/ace-solo-1.flac`, `toko/ace-solo-2.flac` | one player | the same |
 | `menu/ace-menu-1.flac`, `menu/ace-menu-2.flac` | the menu and the settings | the same |
 
-Every piece ends where it begins, so the game can repeat it without a break.
+Every piece ends where it begins, so the game can loop it without a gap.
 
-The model card of ACE-Step 1.5 declares the MIT licence and says that the music it generates may be used
-commercially (https://huggingface.co/ACE-Step/acestep-v15-base, read on 2026-10-13; the pieces were generated with
-the "turbo" checkpoint as ComfyUI packages it).
+The model card of ACE-Step 1.5 states the MIT licence and says that the music it generates may be used
+commercially (https://huggingface.co/ACE-Step/acestep-v15-base, read on 2026-10-13). The pieces were generated
+with the "turbo" checkpoint as ComfyUI packages it.
 
 ## Size
 
-`tools/make_music.py` writes `.wav` files. For the repository and the package every piece was packed as FLAC at the
-strongest compression by `tools/lighten.py`, which reads each result back and compares it with its source sample by
-sample (the pieces that were `.flac` already were packed again the same way). The pictures could not be made
-smaller without changing them and are as their tool wrote them. `tools/look_sound.py` shows what a sound file
-holds and where two files differ.
+`tools/make_music.py` writes `.wav` files. For the repository and the package, `tools/lighten.py` compressed every
+piece to FLAC at the highest compression level. It reads each result back and compares it with its source sample
+by sample. The pieces that were already `.flac` were compressed again the same way. The pictures could not be made
+smaller without changing them, so they are as their tool wrote them. `tools/look_sound.py` shows what a sound file
+contains and where two files differ.
 
 ## Tools (`tools/`)
 
-They were run with the Python of a ComfyUI installation (numpy, scipy, Pillow, PyAV); `ace_run.py` needs a running
-ComfyUI with the ACE-Step 1.5 checkpoint. They are kept here as the record of how the files were made; the game
-and its build do not need them. `make_pictures.py` and `make_music.py` write into `background/` and `bgm/` beside
-`tools/`; the files of the package stand one folder further down, by the place or the scene they are for.
+They were run with the Python of a ComfyUI installation (numpy, scipy, Pillow, PyAV). `ace_run.py` needs a running
+ComfyUI with the ACE-Step 1.5 checkpoint. The tools are kept here as the record of how the files were made; the
+game and its build do not need them. `make_pictures.py` and `make_music.py` write into `background/` and `bgm/`
+beside `tools/`. The shipped files are one folder further down, in the folder of the place or the scene they are
+for.
