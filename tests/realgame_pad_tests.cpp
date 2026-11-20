@@ -8,6 +8,7 @@
 //     with JURAIC_REALGAME_DEBUG=1: the record is written, a table in the file LAYOUT_FILE is read, and a picture asked
 //     for (the key S) is kept; in any other no file of a record is made, the file of a table is not read, and nothing
 //     is kept;
+//     a character-select screen sends no confirmation while using keyboard input;
 //  3. reading a window that shows the real game's screen of the players with the row of 2P to take (the colours of its
 //     points): the pad, plugged in as reading begins, presses A, and the record (when one is kept) tells so.
 // Parts 1 and 2 plug a pad of the driver ViGEmBus into this machine, which a running game would see: they run only with
@@ -31,8 +32,9 @@ static void check(bool ok, const char* what) {
 }
 
 // The window made here, painted another grey each time (a window is captured only when it changes, as the real game
-// does every frame), with the points of the real game's screen of the players in their colours when `menuShown`.
-static bool menuShown = false;
+// does every frame), with the colour markers of the requested menu when one is shown.
+using play::realgame::Menu;
+static Menu menuShown = Menu::None;
 static LRESULT CALLBACK paintGrey(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     if (m != WM_PAINT) return DefWindowProcW(w, m, wp, lp);
     PAINTSTRUCT ps;
@@ -41,18 +43,19 @@ static LRESULT CALLBACK paintGrey(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     const HBRUSH b = CreateSolidBrush(RGB(grey, grey, grey));
     FillRect(dc, &ps.rcPaint, b);
     DeleteObject(b);
-    if (menuShown) {
+    if (menuShown != Menu::None) {
         RECT inside;
         GetClientRect(w, &inside);
         const play::realgame::MenuLayout menus = play::realgame::measuredMenus();
-        for (const auto* part : {&menus.players, &menus.waiting})
-            for (const play::realgame::MenuPoint& q : *part) {
-                const int x = int(q.x * float(inside.right)), y = int(q.y * float(inside.bottom));
-                const RECT r{x - 8, y - 8, x + 9, y + 9};
-                const HBRUSH c = CreateSolidBrush(RGB(q.rgb.r, q.rgb.g, q.rgb.b));
-                FillRect(dc, &r, c);
-                DeleteObject(c);
-            }
+        auto points = menuShown == Menu::Characters ? menus.characters : menus.players;
+        if (menuShown == Menu::PlayersWaiting) points.insert(points.end(), menus.waiting.begin(), menus.waiting.end());
+        for (const play::realgame::MenuPoint& q : points) {
+            const int x = int(q.x * float(inside.right)), y = int(q.y * float(inside.bottom));
+            const RECT r{x - 8, y - 8, x + 9, y + 9};
+            const HBRUSH c = CreateSolidBrush(RGB(q.rgb.r, q.rgb.g, q.rgb.b));
+            FillRect(dc, &r, c);
+            DeleteObject(c);
+        }
     }
     EndPaint(w, &ps);
     return 0;
@@ -92,7 +95,8 @@ static void testReading() {
     std::ofstream(folder / play::RealGameMode::LAYOUT_FILE) << "not a table\n";
     {
         play::RealGameMode m;
-        m.padOnReading = false;
+        check(!m.automaticMenuInput(), "the default keyboard input may confirm a menu");
+        m.pad.setWay(play::RealPad::WAY_KEYS_WINDOW);
         std::wstring error;
         const bool started = m.startReading(w, folder, "a window made by the test", error);
         if (!started) std::wprintf(L"the capture did not start: %ls\n", error.c_str());
@@ -127,6 +131,16 @@ static void testReading() {
         m.pump();
         check(pictures - before > 10 && m.framesWithout < 30, "the pictures are not followed on the thread of the play");
         check(open == (JURAIC_REALGAME_DEBUG != 0), JURAIC_REALGAME_DEBUG ? "the record of the reading is not open" : "a record of the reading is open in a build that keeps none");
+        check(m.pad.running(), "the keyboard sender for the test window did not start");
+        menuShown = Menu::Characters;
+        pumpFor(w, 700);
+        {
+            const play::RealGameMode::Hold hold(m.state);
+            check(m.menu == Menu::Characters, "the character-select screen is not recognized");
+            check(m.presser.presses == 0 && m.pad.keys.sent.load() == 0,
+                  "the character-select screen received an automatic keyboard confirmation");
+        }
+        menuShown = Menu::None;
         // (the film of the two windows, from the pictures of the capture: a sheet asked for is written)
         int64_t filmed = 0;
         {
@@ -155,13 +169,15 @@ static void testReading() {
     std::filesystem::remove_all(folder, ignored);
 }
 
-int main() {
+int main(int argc, char** argv) {
     testReading();
+    if (argc == 2 && std::string(argv[1]) == "--reading-only") return failures ? 1 : 0;
     const char* wanted = std::getenv("JURAIC_TEST_VIRTUAL_PAD");
     if (!wanted || std::string(wanted) != "1")
         return failures ? (std::printf("%d FAILED\n", failures), 1) : (std::printf("skipped the pad: set JURAIC_TEST_VIRTUAL_PAD=1 to plug in a virtual pad\n"), 77);
     using Mode = play::RealGameMode;
     Mode m;
+    m.pad.setWay(play::RealPad::WAY_PAD);
     std::wstring error;
     if (!m.pressLater(error)) return failures ? 1 : (std::printf("skipped the pad: the driver ViGEmBus cannot be reached\n"), 77);
     m.stopPress();
@@ -206,7 +222,7 @@ int main() {
 
     // 3. The screen of the players read from a window: the pad presses A.
     {
-        menuShown = true;
+        menuShown = Menu::PlayersWaiting;
         const HWND w = makeWindow();
         wchar_t temp[MAX_PATH];
         GetTempPathW(MAX_PATH, temp);
@@ -214,6 +230,7 @@ int main() {
         std::error_code ignored;
         std::filesystem::remove_all(folder, ignored);
         Mode r;
+        r.pad.setWay(play::RealPad::WAY_PAD);
         std::wstring why;
         check(r.startReading(w, folder, "the screen of the players", why) && r.pad.running(), "reading does not begin with the pad plugged in");
         pumpFor(w, 2000);
@@ -232,7 +249,7 @@ int main() {
               "on the screen of the players with the row of 2P to take, the pad does not press A");
         std::printf("the screen of the players read from a window: the pad pressed A %d times in 2 s\n", presses);
         DestroyWindow(w);
-        menuShown = false;
+        menuShown = Menu::None;
         std::filesystem::remove_all(folder, ignored);
     }
 

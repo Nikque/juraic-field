@@ -2089,6 +2089,12 @@ static void testPace() {
 }
 
 struct DriveCounts {
+#if JURAIC_REALGAME_MEMORY
+    long memoryUses=0,memoryBases=0,nativeSamples=0,nativeCorrections=0;
+#if defined(JURAIC_MEMORY_ROUNDS_ONLY)
+    long nativeSupplied=0,nativeRecoveries=0;
+#endif
+#endif
     long locks = 0, hits = 0, corrected = 0, lagRight = 0, lagRounds = 0;
     // Pictures that put the engine's pair right while Tracker had not counted the pair the driver plays (begun early or
     // unseen): its pair in play then the one before.
@@ -2480,6 +2486,11 @@ struct DriveScenario {
     bool hiddenGarbage = false;
     bool early = true; // Driver::early
     int misreadAfterSpawn = 0; // one pair of 2P in that many drawn a column aside, in the 13th row, in the picture after the driver began it
+#if JURAIC_REALGAME_MEMORY
+    bool memoryFields=false;
+    bool memoryMotion=false;
+    int nativeAfter=0;
+#endif
     int hideAppearing = 0;     // the pairs of 2P not drawn as they appear, nor in that many frames after (the first picture shows them moved)
     // One pair of 2P in lateEvery appears that many frames later than the frames of the game tell (the wait for it that much
     // longer from two frames before it): the round takes the buttons meanwhile, and what they ask of the pair to come is done
@@ -2527,6 +2538,7 @@ struct DriveScenario {
     // mode counts it on as the real game does (Timing::fallOnGround): the game's pair half a cell above the engine's now
     // and then, after it lay on something.
     bool tableFall = false;
+    int seat = 1; // the seat the driver plays: the round's 2P read as that side of the screen
 };
 // Such a round from `seed`, counted into n.
 static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
@@ -2536,6 +2548,11 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             for (SideLayout& d : made.side) d.shownRows = how.shownRows;
         return made;
     }();
+    // (the round's 2P read as the side of the seat played: for seat 0 the picture is read with the two sides of the table
+    //  swapped, so that the pictures and what is read of them are the same whichever the seat)
+    const int me = how.seat;
+    Layout readAs = l;
+    if (me == 0) std::swap(readAs.side[0], readAs.side[1]);
     const Rules rules;
     Round r;
     Timing roundTiming;
@@ -2550,22 +2567,28 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     other->startRound(0, seed);
     Follower follow;
     Driver d;
+    d.me = me;
     d.lag = how.startLag >= 0 ? how.startLag : how.lag, d.rules = rules, d.agent = how.given ? std::move(how.given) : ai::makeAgent("x3", narrow);
     d.notes = how.notes;
     d.takeLag = !how.keepLag;
     d.unsureWays = how.unsureWays;
     d.early = how.early;
+#if JURAIC_REALGAME_MEMORY
+    bool nativePaused=false;
+    if(how.memoryMotion)d.gate=[&](int64_t,uint8_t b){return !nativePaused && (r.player[1].nextPair<how.nativeAfter ||
+        d.begunPair()==r.player[1].moves+1)?b:uint8_t(0);};
+#endif
     int64_t clock = 1000;
     // (timed: frame f of the round begins 1045 + phase + f frames of the clock on, the frames before the round from -45)
     TimedPipe pipe(how.timed, seed, follow, d, 1045);
     for (int f = 0; f < 45; ++f, ++clock) {
         draw(canvas, l, r, true, noise);
         if (how.timed.on) {
-            pipe.picture(read(canvas.picture(), l), f - 45);
+            pipe.picture(read(canvas.picture(), readAs), f - 45);
             pipe.run(f - 44, [&](int64_t, int, uint8_t out) { check(out == 0, "buttons before the round"); });
             continue;
         }
-        follow.step(read(canvas.picture(), l), clock);
+        follow.step(read(canvas.picture(), readAs), clock);
         check(d.tick(follow, clock) == 0, "buttons before the round");
     }
     std::vector<uint8_t> sent(size_t(how.frames) + 100, 0); // by the frame of the clock they were sent in
@@ -2629,7 +2652,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     const auto driven = [&](int64_t now, int correctedNow, uint8_t) {
         if (now - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
         if (now - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
-        if (d.corrected > correctedNow && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen < d.begunPair()) ++n.staleCorrected;
+        if (d.corrected > correctedNow && follow.tracker.side[me].pairs + follow.tracker.side[me].unseen < d.begunPair()) ++n.staleCorrected;
         if (d.played != played) {
             played = d.played, target = -1, ps.begin(now, d.begunPair());
             const GameField &begun = d.begunField(), &game = r.player[1].field;
@@ -2649,17 +2672,20 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     int tapFor[2] = {0, 0};
     for (int f = 0; f < how.frames && r.state == RoundState::Playing; ++f, ++clock) {
         if (pauseLeft > 0) {
+#if JURAIC_REALGAME_MEMORY
+            if(how.memoryMotion){nativePaused=true;d.useMemoryPose({},true);}
+#endif
             // (the round stopped: drawn as it stands, the light over it; the driver's clock goes on)
             draw(canvas, l, r, false, noise, how.quietLanding, words);
             const SideLayout& s = l.side[1];
             if (pauseLeft > how.pauseClear) canvas.fill(s.left + s.cellWidth, s.bottom - 12 * s.cellHeight, s.left + 4 * s.cellWidth, s.bottom - 9 * s.cellHeight, LIGHT);
             if (how.timed.on) {
-                pipe.picture(read(canvas.picture(), l), f);
+                pipe.picture(read(canvas.picture(), readAs), f);
                 pipe.run(f + 1, driven);
                 int64_t ignored = 0;
                 pipe.taken(f + 1, ignored);
             } else {
-                follow.step(read(canvas.picture(), l), clock);
+                follow.step(read(canvas.picture(), readAs), clock);
                 sent[size_t(clock - first)] = d.tick(follow, clock);
                 check(d.seenAsTracker(follow.tracker) && follow.seen[0].asTracker(follow.tracker.side[0]) && follow.seen[1].asTracker(follow.tracker.side[1]),
                       "the driver or Follower took other frames of a side from the events than the tracker has");
@@ -2670,6 +2696,9 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             if (how.each) how.each(clock, r.player[1], -1);
             continue;
         }
+#if JURAIC_REALGAME_MEMORY
+        nativePaused=false;
+#endif
         if (!words && how.wordsFrom >= 0 && f >= how.wordsFrom) {
             int h[W];
             r.player[1].field.heights(h);
@@ -2785,7 +2814,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         //  still for three frames, as the pair lands or before the window moves)
         const bool quiet = r.player[1].phase == Phase::Land || (r.player[1].phase == Phase::Next && r.player[1].wait > r.timing.nextSlide);
         if (how.strayAfterLight && strayPair >= 0 && litFor == 0 && litEndedAt >= 0 && clock - litEndedAt >= 3 && r.player[1].nextPair == strayPair + 1 && quiet &&
-            clock - follow.tracker.side[1].changedAt >= 3 && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen <= strayPair) {
+            clock - follow.tracker.side[me].changedAt >= 3 && follow.tracker.side[me].pairs + follow.tracker.side[me].unseen <= strayPair) {
             int h[W];
             r.player[1].field.heights(h);
             const int sx = how.strayAfterLight == 4 ? SPAWN_X + 1 : SPAWN_X;
@@ -2798,30 +2827,51 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             const SideLayout& s = l.side[1];
             canvas.fill(s.left + s.cellWidth, s.bottom - 10.75f * s.cellHeight, s.left + 5 * s.cellWidth, s.bottom - 8.25f * s.cellHeight, Rgb{240, 210, 60});
         }
-        if (how.timed.on) pipe.picture(read(canvas.picture(), l), f), pipe.run(f + 1, driven);
-        else follow.step(read(canvas.picture(), l), clock);
-        if (follow.tracker.side[1].clear) clearAt = clock;
+        if (how.timed.on) pipe.picture(read(canvas.picture(), readAs), f), pipe.run(f + 1, driven);
+        else follow.step(read(canvas.picture(), readAs), clock);
+#if JURAIC_REALGAME_MEMORY
+        // Production proof/freshness is tested separately. Here actual simulated fields exercise the
+        // consumer and pad end to end, with every seventh sample absent to exercise image fallback.
+        if (how.memoryFields && f % 7 != 0) {
+            std::array<GameField, 2> fields{r.player[0].field, r.player[1].field};
+            if (me == 0) std::swap(fields[0], fields[1]);
+            if (follow.useMemoryFields(fields)) {
+                ++n.memoryUses;
+                n.memoryBases += follow.memoryField(me) != nullptr;
+            }
+        }
+        if(how.memoryMotion && r.player[1].nextPair>=how.nativeAfter){
+            const auto& actual=r.player[1];std::optional<MemoryControlPose14> sample;
+            if(actual.phase==Phase::Control){MemoryControlPose14 p;p.frame=clock;p.nativeTick=uint32_t(f+1);
+                p.pair=actual.nextPair;p.colors=actual.colors;p.at=actual.pair;sample=p;}
+#if defined(JURAIC_MEMORY_ROUNDS_ONLY)
+            n.nativeSupplied+=bool(sample);
+#endif
+            d.useMemoryPose(sample,true);
+        }
+#endif
+        if (follow.tracker.side[me].clear) clearAt = clock;
         // (the pair seen as it is about to appear, or in play already when seen late)
         // (... or one that appeared and locked at once - on a full column - before a picture of it was read: the pair it
         //  is, seen once the round has gone on)
-        if (follow.tracker.spawned[1]) {
-            const int counted = follow.tracker.side[1].pairs, given = r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
+        if (follow.tracker.spawned[me]) {
+            const int counted = follow.tracker.side[me].pairs, given = r.player[1].nextPair + (r.player[1].phase == Phase::Control ? 0 : 1);
             const bool lockedAtOnce = r.player[1].phase != Phase::Control && counted == r.player[1].nextPair && ps.appearedFor == counted && ps.appearedAt >= clock - 3;
             ++n.spawnsSeen, n.miscounted += counted != given && !lockedAtOnce;
         }
-        if (const int k = follow.model[1].followed; k != foundBefore) {
+        if (const int k = follow.model[me].followed; k != foundBefore) {
             foundBefore = k;
             if (k >= 0 && k < int(putAsChosen.size()) && putAsChosen[size_t(k)] >= 0)
-                n.foundPairs += 1, n.foundAstray += placementId(follow.model[1].placed) != putAsChosen[size_t(k)];
+                n.foundPairs += 1, n.foundAstray += placementId(follow.model[me].placed) != putAsChosen[size_t(k)];
         }
         if (glitchDrawn) {
-            const SideTrack& s1 = follow.tracker.side[1];
+            const SideTrack& s1 = follow.tracker.side[me];
             n.glitchesRead += s1.pair.seen && s1.clear && s1.pair.at.x == glitchAt.x && s1.pair.at.y == glitchAt.y && s1.pair.at.dir == glitchAt.dir;
             glitchDrawn = false;
         }
         if (words) {
-            n.wordsSeen += follow.tracker.spawned[1];
-            if (r.player[1].phase == Phase::Control) ++n.wordsControl, n.wordsPairSeen += follow.tracker.side[1].pair.seen;
+            n.wordsSeen += follow.tracker.spawned[me];
+            if (r.player[1].phase == Phase::Control) ++n.wordsControl, n.wordsPairSeen += follow.tracker.side[me].pair.seen;
         }
         if (how.later && f == how.laterAt) d.replaceAgent(std::move(how.later)); // (another AI chosen on the screen of the mode)
         // (a frame the driver is not called in: the pad holds what it held)
@@ -2843,7 +2893,7 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             if (how.quickSwing && clock - quickAt <= how.quickSwing + 3) n.quickSwingCorrected += d.corrected - correctedNow;
             if (how.markRead && clock - markAt <= how.markRead + 3) n.markCorrected += d.corrected - correctedNow;
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
-            if (d.corrected > correctedNow && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen < d.begunPair()) ++n.staleCorrected;
+            if (d.corrected > correctedNow && follow.tracker.side[me].pairs + follow.tracker.side[me].unseen < d.begunPair()) ++n.staleCorrected;
         }
         if (!how.timed.on && d.played != played) {
             played = d.played, target = -1, ps.begin(clock, d.begunPair());
@@ -3024,6 +3074,12 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             r.player[1].wait += how.lateAfterHigh, lateFor = spawns + 1, ++n.lateSpawns, highLocked = false, n.earlyAfterHigh += d.begunByFrame - byFrameAtLock;
     }
     n.corrected += d.corrected;
+#if JURAIC_REALGAME_MEMORY
+    n.nativeSamples+=d.memoryPoseSamples;n.nativeCorrections+=d.memoryPoseCorrections;
+#if defined(JURAIC_MEMORY_ROUNDS_ONLY)
+    n.nativeRecoveries+=d.nativeRecoveries;
+#endif
+#endif
     n.walledHeld += d.walledHeld;
     n.quickLost += quickMissed && r.state != RoundState::Playing && r.state != RoundState::Won1;
     if (const auto* placing = dynamic_cast<const ai::PlacementAgent*>(d.agent.get())) {
@@ -3295,6 +3351,71 @@ static void testDriver() {
     std::cout << "the AI playing 2P through the screen and a pad: late as said, " << exact.hits << " pairs of " << exact.locks
               << " where it chose and none found elsewhere, the lag measured as it was; shaky, " << shaky.corrected << " pictures found a pair elsewhere and " << shaky.hits << " of "
               << shaky.locks << " went where it chose\n";
+}
+
+// An agent that looks at its own side alone: of the placements it may, the lowest, the first of them from a place told
+// by its pair and the pairs it has put. It chooses alike whichever its seat.
+struct OwnSideAgent : ai::PlacementAgent {
+    ~OwnSideAgent() override { finish(); }
+    int choose(const ai::Observation& o, Pair pair, unsigned legal) override {
+        int h[W];
+        o.self().field.heights(h);
+        const int from = (pair.axis * 5 + pair.child + o.self().moves) % PLACEMENTS;
+        int best = -1, bestHeight = 99;
+        for (int k = 0; k < PLACEMENTS; ++k) {
+            const int id = (from + k) % PLACEMENTS;
+            if (!(legal >> id & 1)) continue;
+            const Placement p = placement(id);
+            const int height = std::max(h[p.x], h[p.childX()]);
+            if (height < bestHeight) best = id, bestHeight = height;
+        }
+        return best < 0 ? 0 : best;
+    }
+};
+
+// The driver plays either seat alike: the same rounds, their 2P read as the side of the seat played, through a pad as
+// the real game, on a machine under load, and with the screen lit as pairs appear. With an AI that looks at its own side
+// alone, everything is the same: the pairs where it chose, the pictures put right, the lag and the turns taken. X3 may
+// choose otherwise in one seat than in the other from the same things shown (the game moves the two seats in a frame one
+// after the other: in these rounds, all it was shown and all it pressed the same up to its 17th pair, its choice was
+// another), and each seat plays as well: as many pairs where it chose within 2, none left to fall by itself, none taking
+// the down button as it appears.
+static void testDriverEitherSeat() {
+    const auto scenario = [](int seat, int kind, bool own) {
+        DriveScenario s;
+        s.seat = seat;
+        if (own) s.given = std::make_unique<OwnSideAgent>();
+        if (kind == 0) s.lag = 4, s.startLag = 6, s.swapped = true, s.hidden = 2, s.movedHidden = 1, s.quietLanding = true;
+        if (kind == 1) s.lag = 5, s.shaky = true, s.startLag = 6, s.turnShownLate = 2;
+        if (kind == 2) s.lag = 5, s.litAsAppears = 30, s.garbageAsLit = 6;
+        return s;
+    };
+    const auto text = [](const DriveCounts& c) {
+        return std::to_string(c.hits) + " of " + std::to_string(c.locks) + " where the AI chose, " + std::to_string(c.corrected) + " put right, " +
+               std::to_string(c.leftAlone) + " left alone, " + std::to_string(c.downAtSpawn) + " down as they appeared, lag kept " + std::to_string(c.lagTaken) +
+               ", turns found " + std::to_string(c.turnsFound);
+    };
+    long ownLocks = 0, x3Hits[2]{}, x3Locks[2]{};
+    for (int own = 1; own >= 0; --own)
+        for (int kind = 0; kind < 3; ++kind) {
+            DriveCounts n[2];
+            for (int seat = 0; seat < 2; ++seat)
+                for (int k = 0; k < 2; ++k) driveRound(112 + uint64_t(k), n[seat], scenario(seat, kind, own != 0));
+            const std::string what = std::string(own ? "an AI of its own side alone" : "X3") + ", rounds of kind " + std::to_string(kind) + ": 1P " + text(n[0]) + "; 2P " + text(n[1]);
+            for (int seat = 0; seat < 2; ++seat) check(n[seat].leftAlone == 0 && n[seat].downAtSpawn == 0, "a pair left alone or taken down as it appeared (" + what + ")");
+            if (own) {
+                const bool same = n[0].locks == n[1].locks && n[0].hits == n[1].hits && n[0].corrected == n[1].corrected && n[0].lagTaken == n[1].lagTaken &&
+                                  n[0].turnsFound == n[1].turnsFound && n[0].spawnsSeen == n[1].spawnsSeen && n[0].miscounted == n[1].miscounted;
+                check(same && n[0].locks >= 20, "the driver plays 1P otherwise than 2P (" + what + ")");
+                ownLocks += n[0].locks;
+            } else {
+                check(std::abs(n[0].hits - n[1].hits) <= 2 && n[0].locks >= 30 && n[1].locks >= 30 && n[0].hits * 100 >= n[0].locks * 85 && n[1].hits * 100 >= n[1].locks * 85,
+                      "the driver plays 1P less well than 2P (" + what + ")");
+                for (int seat = 0; seat < 2; ++seat) x3Hits[seat] += n[seat].hits, x3Locks[seat] += n[seat].locks;
+            }
+        }
+    std::cout << "either seat through the screen and a pad: an AI of its own side alone the same in " << ownLocks << " pairs of each seat; X3 " << x3Hits[0] << " of "
+              << x3Locks[0] << " where it chose as 1P, " << x3Hits[1] << " of " << x3Locks[1] << " as 2P, none left alone\n";
 }
 
 // On a machine under load the real game's frames take the buttons of the frame before or after now and then (its
@@ -7407,6 +7528,41 @@ static void testNoTurnBeforeAPairBetweenWalls() {
 
 int main(int argc, char** argv) {
     try {
+#if JURAIC_REALGAME_MEMORY && defined(JURAIC_MEMORY_ROUNDS_ONLY)
+        DriveCounts exact,shaky;
+        for(int lag:{2,6})driveRound(60+uint64_t(lag),exact,{.lag=lag,.memoryFields=true});
+        check(exact.memoryUses>20 && exact.memoryBases>10,"memory bases not exercised");
+        check(exact.locks>=40 && exact.hits==exact.locks,"memory fields changed a deterministic placement");
+        for(int k=0;k<2;++k)driveRound(70+uint64_t(k),shaky,{.lag=2,.shaky=true,.memoryFields=true});
+        check(shaky.memoryBases>10 && shaky.locks>=40 && shaky.hits*10>=shaky.locks*9,"memory driver fails with jittered input");
+        DriveCounts left;
+        for (int lag : {2, 6}) {
+            DriveScenario how;
+            how.lag = lag;
+            how.seat = 0;
+            how.memoryFields = true;
+            driveRound(60 + uint64_t(lag), left, std::move(how));
+        }
+        check(left.memoryUses > 20 && left.memoryBases > 10 && left.locks >= 40 && left.hits == left.locks,
+              "seat zero uses its own memory base without changing deterministic placements");
+        std::cout<<"memory simulated pad: exact "<<exact.hits<<'/'<<exact.locks<<", jittered "<<shaky.hits<<'/'<<shaky.locks
+                 <<", accepted fields "<<exact.memoryUses+shaky.memoryUses<<", own bases "<<exact.memoryBases+shaky.memoryBases<<'\n';
+        DriveCounts motion;
+        for(int k=0;k<6;++k){DriveScenario how;how.lag=2;how.shaky=k==2 || k==4;how.memoryFields=how.memoryMotion=true;
+            if(k==3 || k==4)how.startLag=6;
+            if(k==4)how.nativeAfter=8;
+            if(k==5)how.pauseFor=45;
+            const auto before=motion;driveRound(80+uint64_t(k),motion,std::move(how));
+            std::cout<<"native case "<<k<<": "<<motion.hits-before.hits<<'/'<<motion.locks-before.locks
+                     <<", supplied "<<motion.nativeSupplied-before.nativeSupplied<<", recoveries "<<motion.nativeRecoveries-before.nativeRecoveries<<", history samples "<<motion.nativeSamples-before.nativeSamples<<", corrections "<<motion.nativeCorrections-before.nativeCorrections<<'\n';
+        }
+        std::cout<<"memory current pose simulated pad: "<<motion.hits<<'/'<<motion.locks<<", samples "<<motion.nativeSamples<<", corrections "<<motion.nativeCorrections<<'\n';
+        // E keeps public current-pair recovery but prohibits uncalibrated history projection.
+        check(motion.nativeSupplied>200 && motion.nativeRecoveries>0,"native current-pair supply/recovery was not exercised");
+        check(motion.nativeSamples==0 && motion.nativeCorrections==0,"uncalibrated native history projection was enabled");
+        check(motion.locks>=40 && motion.hits*100>=motion.locks*95,"current-pose input path misses too many placements");
+        return 0;
+#endif
         testTableText();
         testOneColour();
         testPointRules();
@@ -7439,6 +7595,7 @@ int main(int argc, char** argv) {
         testLyingPieceHidden();
         testSecondChoiceHeld();
         testDriver();
+        testDriverEitherSeat();
         testTapsHeld();
         testPairsLitAsTheyAppear();
         testFirstPairLit();

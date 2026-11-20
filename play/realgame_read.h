@@ -992,6 +992,7 @@ public:
             for (const uint8_t x : k) n += x != 0;
         return n;
     }
+    uint64_t colourRevision() const { return colourRevision_; }
     // Where the two windows' pairs agree: for each shift (maxShift at most either way), the pairs both windows showed
     // standing still (knownOf 1) at the places it puts side by side, from the last of them back - the shift kept while
     // its last two agree (or all, fewer), else another taken whose last alignRun agree, the most of them (one alone).
@@ -1575,6 +1576,8 @@ private:
         uint8_t& k = known[size_t(index)];
         if (k == 1 && sure && !same(pairs[size_t(index)], p)) ++doubts, ++relearnt[s], relearntFrom[s] = learntAt[s][size_t(index)];
         if (k == 1 && !sure) return;
+        const juraic::Pair previous = pairs[size_t(index)];
+        if (k && (previous.axis != p.axis || previous.child != p.child)) ++colourRevision_;
         const bool changed = k != 1 || !same(pairs[size_t(index)], p);
         pairs[size_t(index)] = p, k = sure ? 1 : 2;
         if (!sure || !changed) return;
@@ -1585,6 +1588,7 @@ private:
         strengthAt(s, index) = 1;
         align();
     }
+    uint64_t colourRevision_ = 0;
     void newRound() {
         ++rounds;
         for (SideTrack& t : side)

@@ -20,14 +20,15 @@ inline Params quietPoke(Params p) {
 // The level a name asks for: "lv1" to "lv36" (ai/level.h), and "lv1q" to "lv36q" for the same levels of the AI that
 // hardly pokes. 0: the name is no level.
 inline int levelOf(const std::string& name) {
-    const size_t digits = name.size() - (!name.empty() && name.back() == 'q' ? 1 : 0);
+    const bool quiet = !name.empty() && name.back() == 'q';
+    const size_t digits = name.size() - int(quiet);
     if (digits < 3 || digits > 4 || name[0] != 'l' || name[1] != 'v' || name[2] == '0') return 0;
     int level = 0;
     for (size_t i = 2; i < digits; ++i) {
         if (name[i] < '0' || name[i] > '9') return 0;
         level = level * 10 + (name[i] - '0');
     }
-    return level >= 1 && level <= LAST_LEVEL ? level : 0;
+    return level >= 1 && level <= (quiet ? LEVELS : LAST_LEVEL) ? level : 0;
 }
 // Is that name the AI that hardly pokes, at its top (x3q) or at a level (lv1q to lv36q)?
 inline bool quietOf(const std::string& name) { return name == "x3q" || (levelOf(name) && name.back() == 'q'); }
@@ -46,6 +47,6 @@ inline std::unique_ptr<Agent> makeAgent(const std::string& name, const Params& p
     if (name == "random") return std::make_unique<RandomAgent>();
     return nullptr;
 }
-inline const char* agentNames() { return "x3, x3q, lv1 to lv37, lv1q to lv37q, random"; }
+inline const char* agentNames() { return "x3, x3q, lv1 to lv37, lv1q to lv36q, random"; }
 
 } // namespace juraic::ai

@@ -2,6 +2,8 @@
 
 [日本語 README](README.md)
 
+[Changes from v0.9.7 to v0.9.8.1 (Japanese)](docs/changes-since-0.9.7.md)
+
 Juraic Field is a falling-block puzzle program for versus and solo play. It has solo chain building ("toko"), two players on one PC, matches against the versus AI "Juraic", AI-versus-AI matches to watch, network matches between two people, saving and playing back replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit), Linux (x86-64), macOS (Apple silicon) and Android (arm64). The screens are in Japanese.
 
 - `JuraicField.exe` (`JuraicField` on Linux, `JuraicField.app` on macOS): the game
@@ -74,7 +76,7 @@ Japanese, with a short part in English).
 | 対戦（2 人） | two players on one PC |
 | 対戦（人 対 AI） | a person (1P) against the AI Juraic |
 | 観戦（AI 対 AI） | two AIs to watch |
-| 実機の 2P を Juraic が操作 | Windows only: Juraic plays 2P of the real game through a virtual pad (see [Juraic playing 2P of the real game](#juraic-playing-2p-of-the-real-game-windows-a-trial)) |
+| 実機の 2P を Juraic が操作 | Windows only: Juraic plays 2P in an offline match of the real game (see [Juraic playing 2P of the real game](#juraic-playing-2p-of-the-real-game-windows-a-trial)) |
 | ネット対戦（人 対 人） | two people on two PCs, connected directly (see [Matches over a network](#matches-over-a-network)) |
 | リプレイを見る | play a saved replay |
 | 設定 | rules, controls, AI, display and sound |
@@ -91,7 +93,7 @@ Japanese, with a short part in English).
 | pause | P | T |
 
 - Controllers (Xbox ones and others) work too. You can change the bindings under 操作の割り当て in the menu.
-- On Windows, PlayStation pads and the Switch Pro Controller and Joy-Con are read through SDL 3. Like Xbox pads, they are handled by button position (the bottom button rotates left, the right button rotates right).
+- This Windows package reads controllers through Windows input APIs. Builds with SDL 3 enabled use it for PlayStation pads, Switch Pro Controllers and Joy-Con, with buttons mapped by position.
 - With the setting クイックドロップ (quick drop) on, up drops the pair at once. Up is ↑ on keyboard 1, W on keyboard 2 and up on a controller.
 - With クイックドロップ off, ↑ also rotates right in solo play.
 
@@ -136,7 +138,7 @@ During a match, the number won is shown between the two fields: up to five as a 
 
 ### Pictures and music
 
-- Three pictures and nine pieces of music come with the program and are used from the start. In the repository they are in `media/`; the build copies them to `background` and `bgm` next to the executable. How they were made and their licence: [media/README.md](media/README.md).
+- Four backgrounds and nine pieces of music come with the program. Backgrounds and music are enabled on first launch. [Credits and licence](media/README.md).
 - A background can be chosen separately for three places (the 1P field, the 2P field, the rest).
 - Music can be chosen separately for three scenes (a match, solo play, the menu and similar screens).
 - Your own pictures and music can be chosen in the settings once you put them in these folders next to the executable:
@@ -151,7 +153,7 @@ During a match, the number won is shown between the two fields: up to five as a 
 - There are two kinds, with different play styles:
   - **Juraic 催促（小）**: once its field fills up, it attacks with small chains while keeping its main chain (the default).
   - **Juraic 催促（極小）**: it hardly attacks on its own, and grows its main chain before firing it.
-- There are 37 levels (the default is Lv 36). Lv 37 reads the opponent's possible replies before making a midgame poke.
+- Juraic 催促（小） has 37 levels and defaults to Lv 37. Lv 37 reads the opponent's possible replies before making a midgame poke. Juraic 催促（極小） is fixed at Lv 36.
   - Lv 1 to 9: for complete beginners
   - Lv 10 to 20: for beginners
   - Lv 21 to 25: beginner to intermediate
@@ -159,7 +161,8 @@ During a match, the number won is shown between the two fields: up to five as a 
   - Lv 31 to 35: advanced to expert
   - Lv 36 and 37 are for experts
 - The lower the level, the slower it places pairs, the later it sees the opponent's field, and the less it reads ahead.
-- Neighbouring levels were set by matches of 催促（小） against itself, so that the higher level wins about six rounds in ten. The levels of 催促（極小） use the same settings and were not measured.
+- Adjacent levels through Lv 36 were set by matches of 催促（小） against itself, so that the higher level wins about six rounds in ten.
+- With cancels enabled, the regular AI levels are offered in the order Lv 36, Lv 36Ex, Lv 37, Lv 37Ex. Ex looks for the quickest input sequence to lock the pair in the chosen position.
 - In matches against the AI and in AI-versus-AI matches, you can change the kind and the level of the AI with mouse clicks on the screen shown after the match. The change applies from the next match. Holding the button down on a level keeps changing it.
 - It uses up to 24 CPU threads: two fewer than the logical cores of the PC, or one fewer on PCs with fewer than eight logical cores.
 - Each decision is kept within 180 ms; on a slow PC the search is made narrower. After a round in which the AI was short of time, the top of the screen shows 処理落ち: AI が弱くなった可能性 ("slowdown: the AI may have played weaker").
@@ -169,11 +172,12 @@ During a match, the number won is shown between the two fields: up to five as a 
 
 ## Juraic playing 2P of the real game (Windows, a trial)
 
-- In an offline two-player match of the real game running on the same PC, the program reads the real game's window, and Juraic plays 2P through a virtual pad. 1P is a person. It does not work in online matches.
-- 実機の 2P を Juraic が操作 in the menu looks for the real game's window and chooses the 2P slot, the character and the control type. Once a match begins, it plays 2P.
+- Use this mode in an offline two-player match of the real game on the same PC. The person plays on the left and Juraic plays on the right.
+- Open 実機の 2P を Juraic が操作 from the menu. Choose the real game's window with 読み取り開始, then choose 2P の操作を開始.
+- 盤面の取得方法 defaults to メモリ読み取り（キャンセルなし）. It opens the real game's memory for reading only. To select Lv 36Ex or Lv 37Ex, switch to メモリ読み取り（キャンセルあり）.
+- 入力方式 defaults to キー（スキャンコード）. Assign a keyboard to the 2P side in the real game.
 - The kind and the level of the AI can be changed on that screen. Each time it opens, they start from those of the 2P side in the settings.
-- The virtual pad needs the ViGEmBus driver. It is not included in this program, so install it yourself, as described in [Installing the virtual pad driver (ViGEmBus)](#installing-the-virtual-pad-driver-vigembus).
-- **Juraic in this mode is weaker than Juraic in the matches of this program.** It knows the fields and the pairs only by reading the real game's screen, so it sometimes reads them wrong or cannot read them for a while. The pad's presses also reach the real game with a delay, and the way buttons are pressed and timed differs.
+- Install the [ViGEmBus driver](#installing-the-virtual-pad-driver-vigembus) if you select 仮想パッド（非推奨）.
 - The strength of the levels and the measurement in the section [The versus AI "Juraic"](#the-versus-ai-juraic) do not hold in this mode. The win rate against the real game has not been measured.
 - The following parts for investigating bugs are built only with `JURAIC_REALGAME_DEBUG=ON` in CMake. The released packages do not have them.
   - The record of each reading, written to `realgame\<date and time>` next to the executable. It can exceed 2 GB in one session.
@@ -183,7 +187,7 @@ During a match, the number won is shown between the two fields: up to five as a 
 
 ### Installing the virtual pad driver (ViGEmBus)
 
-You need it only for "Juraic playing 2P of the real game". ViGEmBus is not included in Juraic Field (its author is Nefarius Software Solutions).
+This driver is for 仮想パッド（非推奨）. It was made by Nefarius Software Solutions.
 
 1. Open the official release page: <https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0>
 2. Under "Assets" at the bottom of the page, download `ViGEmBus_1.22.0_x64_x86_arm64.exe`.
@@ -195,7 +199,6 @@ You need it only for "Juraic playing 2P of the real game". ViGEmBus is not inclu
 - **To remove it**: Settings → Apps → Installed apps → "ViGEm Bus Driver" → Uninstall. Other software may also use ViGEmBus, so check before removing it.
 - If the game says the ViGEmBus driver is not installed, start Juraic Field again after installing it. If a restart was requested, start it after the restart.
 - Juraic Field does not read this virtual pad as one of its own controllers.
-- Opening `仮想パッドのドライバーの入れ方.cmd` in the Windows zip shows the same instructions. It also checks whether the driver is installed.
 
 ## Matches over a network
 

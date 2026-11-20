@@ -11,7 +11,8 @@ under the same licence as the program (MIT; see `../LICENSE`).
 
 | File | Place | How it was made |
 | --- | --- | --- |
-| `1p/field-1p-silhouette.png` | the field of the first player (and of the one player) | drawn by calculation: `tools/make_pictures.py` |
+| `1p/field-1p-blue-scarf.png` | default background for the left field | supplied character edited with ImageGen for the dark backdrop |
+| `1p/field-1p-silhouette.png` | alternative background for the left field | drawn by calculation: `tools/make_pictures.py` |
 | `2p/field-2p-juraic.png` | the field of the second player | the author's character Juraic Vaid: the picture `source/juraic-vaid-original.webp`, cut out of its white ground, made dark and put on a dark ground by `tools/make_pictures.py` |
 | `other/stage-grid.png` | the rest of the screen | drawn by calculation: `tools/make_pictures.py` |
 

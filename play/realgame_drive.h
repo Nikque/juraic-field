@@ -25,6 +25,9 @@
 #include "../ai/agent.h"
 #include "../ai/pace.h"
 #include "realgame_follow.h"
+#if JURAIC_REALGAME_MEMORY
+#include "memory/motion_sample14.h"
+#endif
 #include <algorithm>
 #include <array>
 #include <deque>
@@ -49,10 +52,58 @@ namespace play::realgame {
 class Driver {
 public:
     int me = 1;                               // the seat played
+    const char* seatName() const { return me ? "2P" : "1P"; } // (as the notes name it)
     // Frames from a button sent to the frame of the game that takes it. The driver begins with it and takes the lag that
     // fits the pictures best (fit) from the next pair on, unless takeLag is false.
     int lag = 2;
     bool takeLag = true;
+#if JURAIC_REALGAME_MEMORY
+    int memoryPoseCorrections=0,memoryPoseSamples=0;
+    int nativeRecoveryState=0,nativeRecoveries=0;
+    // Evidence comes only from accepted, public images of this side's pair.
+    // A new host timestamp on a frozen image is not evidence of game progress.
+    void updateImageGateEvidence(const Follower& f,int64_t now){
+        const auto& t=f.tracker;const auto& a=t.side[me];
+        const bool valid=t.fromStart && a.pairs==pairsSeen && a.clear && a.inHand && a.pair.seen &&
+            t.frame<=now+1 && now-t.frame<=4 && a.colors.axis && a.colors.child;
+        imageGateCurrent_=valid;
+        if(!valid || t.frame==imageGateFrame_)return;
+        const bool same=imageGatePair_==a.pairs && imageGateColors_.axis==a.colors.axis && imageGateColors_.child==a.colors.child;
+        if(imageGateFrame_>=0 && t.frame>imageGateFrame_ && t.frame-imageGateFrame_<=4){
+            const bool moved=same && (imageGateAt_.x!=a.pair.at.x || imageGateAt_.y!=a.pair.at.y ||
+                imageGateAt_.upper!=a.pair.at.upper || imageGateAt_.dir!=a.pair.at.dir);
+            const bool appeared=a.pairs==imageGatePair_+1 && a.spawnedAt>imageGateFrame_;
+            if(moved || appeared)imageGateProgress_=t.frame;
+        }
+        imageGatePair_=a.pairs;imageGateFrame_=t.frame;imageGateAt_=a.pair.at;imageGateColors_=a.colors;
+    }
+    bool imageGateReady(int64_t now)const{
+        return nativeFallbackPair_==pairsSeen && imageGateCurrent_ && imageGatePair_==pairsSeen &&
+            imageGateFrame_<=now+1 && now-imageGateFrame_<=4 && imageGateProgress_<=now+1 && now-imageGateProgress_<=12;
+    }
+    int inputGateReasons(int64_t now,bool enabled,bool bound,bool advancing,uint64_t nativePair,bool nativeFresh,bool holdNothing){
+        nativeStreamExpired_=enabled && bound && !nativeFresh;
+        int reasons=juraic::inputdiag::gateReasons(enabled,bound,advancing,pairsSeen,nativePair,holdNothing);
+        // An expired stream has no authority over a separately recovered image
+        // controller. Fresh native stop/pair disagreement remains authoritative.
+        if(enabled && bound && !nativeFresh && imageGateReady(now))reasons&=~3;
+        if(reasons && nativeFallbackPair_==pairsSeen)nativeRecoveryState=4;
+        else if(!reasons && nativeRecoveryState==4 && nativeFallbackPair_==pairsSeen)nativeRecoveryState=3;
+        return reasons;
+    }
+    void useMemoryPose(std::optional<MemoryControlPose14> pose,bool bound,bool operating=false,uint32_t nativePair=0){
+        if(bound!=memoryBound_){shots.clear();fits.clear();fitted.reset();lags.clear();memoryFitPair_=-1;
+            nativeRecoveryAt_=-1;nativeContradictionAt_=-1;nativeFallbackPair_=-1;nativeRecoveryState=0;}
+        nativeObservedOperating_=operating || bool(pose);
+        nativeObservedPair_=nativePair?nativePair:(pose?uint32_t(pose->pair):0);
+        // Keep the interface restricted to public geometry even in synthetic
+        // tests. Control timers and buttons are reconstructed from sent input.
+        if(pose){juraic::PairControl geometry;geometry.x=pose->at.x;geometry.y=pose->at.y;
+            geometry.upper=pose->at.upper;geometry.dir=pose->at.dir;pose->at=geometry;}
+        memoryBound_=bound;memoryPose_=std::move(pose);
+        if(bound)lag=std::max(1,lag);
+    }
+#endif
     juraic::Rules rules = juraic::realGameRules(); // the real game's
     std::unique_ptr<juraic::ai::Agent> agent; // a PlacementAgent
     uint64_t seed = 1;                        // of the agent's rounds
@@ -228,7 +279,29 @@ public:
     }
 
 private:
+#if JURAIC_REALGAME_MEMORY
+    void takeMemory(const Follower& f) {
+        const auto* field=f.memoryField(me);
+        if(!field || own.phase!=juraic::Phase::Control || pairsSeen!=f.tracker.side[me].pairs || own.moves!=f.tracker.side[me].pairs-1 ||
+           !(Follower::shown(own.field)==Follower::shown(*field)))return;
+        const bool changed=!(own.field==*field);
+        own.field=*field;unsure13=unsure14=0;found.clear();unsureRows=Follower::shown(*field);tellUnsure();
+        if(changed){
+#if JURAIC_REALGAME_MEMORY
+            memoryFitPair_=-1;
+#endif
+            // History from before the hidden rows were corrected must not fit a lag or undo those rows.
+            past.clear();shots.clear();fitted.reset();
+            if(Follower::shown(startOwn.field)==Follower::shown(*field))startOwn.field=*field;
+            if(active && own.phase==juraic::Phase::Control)steer(f);
+            note(f.tracker.frame,std::string(seatName())+" base corrected from read-only memory (14 rows)");
+        }
+    }
+#endif
     uint8_t drive(const Follower& f, int64_t now) {
+#if JURAIC_REALGAME_MEMORY
+        memoryNow_=now;
+#endif
         const Tracker& t = f.tracker;
         takeEvents(t);
         if (nextAgent && !active) {
@@ -241,6 +314,12 @@ private:
         if (t.rounds != round) beginRound(t);
         undoBegunAgain(f);
         takePair(f);
+#if JURAIC_REALGAME_MEMORY
+        takeMemory(f);
+#endif
+#if JURAIC_REALGAME_MEMORY
+        updateImageGateEvidence(f,now);
+#endif
         keepShot(f);
         watchFitted(f);
         watchWindow(t);
@@ -257,11 +336,15 @@ private:
             else if (stoppedFor == pairsSeen && following && unshown() && windowWaits(t.side[me])) beginAgain(f, now);
             else if (stoppedFor != pairsSeen && stopped(f, now)) {
                 stoppedFor = pairsSeen;
-                note(t.frame, "2P pair " + std::to_string(pairsSeen) + " not shown, the game stopped: the window and the other side stand still");
+                note(t.frame, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " not shown, the game stopped: the window and the other side stand still");
                 beginAgain(f, now);
             }
         }
         if (!active && overdue(f)) resume(f, now);
+#if JURAIC_REALGAME_MEMORY
+        if(!active && nativeProjectionCalibrated_ && nativeControlEnabled())correctMemoryPose(f);
+        if(!active && nativeContradictionAt_>=0)recoverNativeControl(f,now,64);
+#endif
         if (!active) return holdDown(f, now);
         knowColours(t);
         const int rightBefore = corrected;
@@ -269,6 +352,14 @@ private:
         // (put right from a picture: the turns and moves from there are those to be shown taken)
         if (corrected != rightBefore) retakeTapAt = -1;
         confirmRetaken(f, now);
+#if JURAIC_REALGAME_MEMORY
+        if(nativeStreamExpired_ && nativeControlEnabled() && !memoryPose_ && nativeContradictionAt_<0)nativeContradictionAt_=now;
+        if(nativeControlEnabled() && memoryPose_ && memoryPose_->pair==pairsSeen &&
+           memoryPose_->frame<=now+1 && now-memoryPose_->frame<=lag+3 && now-nativeLastMotion()>lag+2 &&
+           (memoryPose_->at.x!=own.pair.x || memoryPose_->at.dir!=own.pair.dir) && nativeContradictionAt_<0)nativeContradictionAt_=now;
+        if(nativeContradictionAt_>=0)recoverNativeControl(f,now,64);
+        if(active && (nativeRecoveryState==1 || nativeRecoveryState==4 || nativeRecoveryState==5) && nativeContradictionAt_<0){nativeRecoveryState=0;nativeRecoveryAt_=-1;}
+#endif
         if (!active) return holdDown(f, now);
         const int64_t at = now + lag;
         // (frames of the game whose buttons were sent before: they took what was held. A frame the clock went past without
@@ -291,6 +382,11 @@ private:
     bool movedSinceBegun() const { return seen.movedAt > shiftBegun; }
     // (Tracker counts the pairs of a round from 0 only as a new round begins.)
     void beginRound(const Tracker& t) {
+#if JURAIC_REALGAME_MEMORY
+        memoryTick_=UINT32_MAX;memoryPair_=-1;memoryFitPair_=-1;
+        nativeRecoveryAt_=nativeContradictionAt_=-1;nativeRecoveryPair_=nativeFallbackPair_=-1;nativeRecoveryState=0;
+        imageGateFrame_=-1;imageGateProgress_=-1000000;imageGatePair_=-1;imageGateCurrent_=false;nativeStreamExpired_=false;
+#endif
         following = untilLocked = false;
         lockedPair = -1;
         liftedFor = shownAt = doubtAt = -1;
@@ -320,7 +416,7 @@ private:
         for (size_t i = 0; i < now.size(); ++i) d[i] = now[i] - thoughtBefore[i];
         thoughtBefore = now;
         if (d[0] == 0) return;
-        note(at, "2P the AI's thinking in the round before: " + std::to_string(d[0]) + " choices, " + std::to_string(d[1]) + " searches stopped by the clock, " + std::to_string(d[2]) +
+        note(at, std::string(seatName()) + " the AI's thinking in the round before: " +std::to_string(d[0]) + " choices, " + std::to_string(d[1]) + " searches stopped by the clock, " + std::to_string(d[2]) +
                      " made narrower, " + std::to_string(d[3]) + " choices with two pairs known, second choices " + std::to_string(d[4]) + " made and " + std::to_string(d[5]) + " poor");
     }
     // A pair seen, or one the window tells has come (the pair begun unseen let go): begun.
@@ -418,7 +514,7 @@ private:
         // picture shows it in the air; one such pair was left for 10 frames after a light of 80 frames.
         const bool heldBefore = untilLocked;
         if (shownInAir(f)) untilLocked = true;
-        if (!heldBefore && untilLocked) note(t.frame, "2P pair " + std::to_string(pairsSeen) + " held down again: the screen shows it in the air");
+        if (!heldBefore && untilLocked) note(t.frame, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " held down again: the screen shows it in the air");
         // So too, the window not moved on since the pair appeared, a pair Follower no longer finds lying, or takes as
         // put with no chain and nothing of it at rest: a clear picture that shows pieces of a colour above the pieces
         // at rest shows it in the air still (read lying, lifted by a turn on its way, let go by Tracker on a picture
@@ -433,7 +529,7 @@ private:
             const bool put = m.followed == pairsSeen - 1;
             const bool air = colouredAbove(t.last.side[me], side.resting) > 0;
             if (air && (put ? m.chains == 0 && side.resting == side.under : !m.lying)) {
-                if (!untilLocked) note(t.frame, "2P pair " + std::to_string(pairsSeen) + " held down again: pieces of a colour in the air after it was taken as " + (put ? "put" : "lying"));
+                if (!untilLocked) note(t.frame, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " held down again: pieces of a colour in the air after it was taken as " + (put ? "put" : "lying"));
                 untilLocked = true, liftedFor = pairsSeen, airShown = true;
             }
             else if (!air && put && liftedFor == pairsSeen) untilLocked = false, liftedFor = -1;
@@ -455,6 +551,15 @@ private:
             //  was begun: for a pair begun unseen that move was its own coming, and let go so it fell by itself.)
             const int64_t comes = appeared(t);
             if (comes >= 0 && movedSinceBegun() && now + lag >= comes) return press(now, held = sendable(now, tapToEnd(now, 0)));
+#if JURAIC_REALGAME_MEMORY
+            if(const int issue=nativeDropIssue(f,now)){
+                recoverNativeControl(f,now,issue);
+                juraic::inputdiag::trace.emit(juraic::inputdiag::NATIVE_GUARD,{2,now,pairsSeen,memoryPose_?int64_t(memoryPose_->nativeTick):-1,
+                    memoryPose_?memoryPose_->frame:-1,issue,memoryPose_?memoryPose_->at.x:-1,memoryPose_?memoryPose_->at.dir:-1,
+                    own.pair.x,own.pair.dir,own.pair.x,own.pair.dir,-1,putAim,lag});
+                return press(now,held=sendable(now,0));
+            }
+#endif
             return press(now, held = sendable(now, tapToEnd(now, juraic::BTN_DOWN)));
         }
         if constexpr (REASONS)
@@ -463,7 +568,7 @@ private:
                 Follower::shown(side.resting).heights(rest), Follower::shown(startOwn.field).heights(begun);
                 std::string columns;
                 for (int x = 0; x < juraic::W; ++x) columns += " " + std::to_string(rest[x]) + "/" + std::to_string(begun[x]);
-                note(t.frame, "2P pair " + std::to_string(pairsSeen) + " let go (columns at rest / begun over:" + columns + "): " +
+                note(t.frame, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " let go (columns at rest / begun over:" + columns + "): " +
                                   (side.pairs == pairsSeen || unseenInAir ? std::string("it lies, or the next pair is foreseen")
                                                                           : "the screen counts " + std::to_string(side.pairs) + " pairs and " + std::to_string(side.unseen) +
                                                                                 " unseen, and the pair is not one the screen has yet to show in the air (begun unseen " +
@@ -485,6 +590,98 @@ private:
         bool native=false;
     };
     juraic::Player own;
+#if JURAIC_REALGAME_MEMORY
+    // Native sample time is not independently calibrated for history replay.
+    // Keep image correction; native current-pair gates, shots/fit and recovery remain enabled.
+    static constexpr bool nativeProjectionCalibrated_=false;
+    bool memoryBound_=false,nativeObservedOperating_=false,imageGateCurrent_=false,nativeStreamExpired_=false;
+    int64_t imageGateFrame_=-1,imageGateProgress_=-1000000;
+    int imageGatePair_=-1;
+    juraic::PairControl imageGateAt_;
+    juraic::Pair imageGateColors_;
+    uint32_t nativeObservedPair_=0;
+    int64_t nativeRecoveryAt_=-1,nativeContradictionAt_=-1,nativeRecoveryNoted_=-1000000;
+    int nativeRecoveryPair_=-1,nativeFallbackPair_=-1,nativeRecoveryGoal_=-1;
+    uint64_t nativeRecoveryDecision_=0,putDecision_=0;
+    bool nativeControlEnabled()const{return memoryBound_ && nativeFallbackPair_!=pairsSeen;}
+    bool nativeImageCurrent(const Follower& f,int64_t now)const{
+        const auto& side=f.tracker.side[me];return side.pairs==pairsSeen && side.clear && side.inHand && side.pair.seen &&
+            f.tracker.frame>=now-4 && f.tracker.frame<=now+1 && f.tracker.frame>=nativeLastMotion()+lag+TURN_SHOWN;
+    }
+    int64_t nativeLastMotion()const{
+        for(auto it=pads.rbegin();it!=pads.rend();++it)if(it->second&(juraic::BTN_LEFT|juraic::BTN_RIGHT|juraic::BTN_CW|juraic::BTN_CCW))return it->first;
+        return -1000000;
+    }
+    int nativeDropIssue(const Follower& f,int64_t now)const{
+        if(!memoryBound_ || !untilLocked)return 0;
+        if(nativeObservedPair_ && nativeObservedPair_!=uint32_t(pairsSeen))return 2;
+        if(putAim<0)return 4;
+        const auto goal=juraic::placement(putAim);
+        const bool quiet=now-nativeLastMotion()>lag+2;
+        if(memoryPose_ && memoryPose_->pair==pairsSeen && memoryPose_->frame<=now+1 && now-memoryPose_->frame<=3 &&
+            memoryPose_->frame>=nativeLastMotion()+lag+1){
+            if(memoryPose_->at.x!=goal.x || memoryPose_->at.dir!=goal.dir)return 8;
+            return quiet?0:32;
+        }
+        if(nativeFallbackPair_==pairsSeen && nativeImageCurrent(f,now)){
+            const auto& at=f.tracker.side[me].pair.at;
+            if(at.x==goal.x && at.dir==goal.dir)return quiet?0:32;
+        }
+        return 1;
+    }
+    bool recoverNativeControl(const Follower& f,int64_t now,int reason){
+        if(nativeRecoveryPair_!=pairsSeen || nativeRecoveryAt_<0){
+            nativeRecoveryPair_=pairsSeen;nativeRecoveryAt_=now;
+            const auto* a=placer();nativeRecoveryGoal_=active && a?a->targetPlacement():putAim;
+            nativeRecoveryDecision_=active && a?a->diagnosticTargetDecision:putDecision_;
+        }
+        if(nativeObservedPair_ && nativeObservedPair_!=uint32_t(pairsSeen)){
+            nativeRecoveryState=now-nativeRecoveryAt_>=RESUME_AFTER?4:5;
+        }else{
+            const int settle=std::clamp(lag+2,3,15);
+            const bool quiet=now-nativeLastMotion()>lag+2;
+            const bool native=quiet && memoryPose_ && memoryPose_->pair==pairsSeen && memoryPose_->frame<=now+1 && now-memoryPose_->frame<=3 &&
+            memoryPose_->frame>=nativeLastMotion()+lag+1;
+            const bool image=quiet && now-nativeRecoveryAt_>=settle && nativeImageCurrent(f,now);
+            const auto* placing=placer();
+            if((native || image) && (!placing || placing->recoveryReady())){
+                const auto& side=f.tracker.side[me];
+                auto actual=native?memoryPose_->at:side.pair.at;
+                auto colors=native?memoryPose_->colors:side.colors;
+                own=startOwn;own.phase=juraic::Phase::Control;own.nextPair=pairsSeen;own.moves=pairsSeen-1;own.colors=colors;
+                own.field=hiddenFromEngine(side.under,startOwn.field);
+                if(const auto* field=f.memoryField(me))own.field=*field;
+                own.pair=juraic::PairControl{};own.pair.x=actual.x;own.pair.y=actual.y;own.pair.upper=actual.upper;own.pair.dir=actual.dir;
+                const juraic::detail::Cells cells(own.field);own.pair.grounded=!own.pair.upper && !cells.canStepDown(own.pair);
+                own.pair.held=givenAt(now);
+                next=now+1;past.clear();past.push_back({now,own,0});
+                active=true;following=false;untilLocked=false;lockedPair=-1;stoppedFor=-1;
+                nativeFallbackPair_=pairsSeen;nativeContradictionAt_=-1;nativeRecoveryAt_=-1;
+                shots.clear();fits.clear();fitted.reset();memoryFitPair_=-1;
+                carefulDown(true);
+                if(auto* a=placer()){
+                    juraic::ai::Observation o;observe(f,own,next,o);tellHeld();
+                    a->recoverKnownPair(o,nativeRecoveryGoal_,nativeRecoveryDecision_);
+                }
+                ++nativeRecoveries;nativeRecoveryState=native?2:3;
+                juraic::inputdiag::trace.emit(juraic::inputdiag::RECOVERY,{now,pairsSeen,reason,nativeRecoveryState,nativeRecoveryGoal_,own.pair.x,own.pair.y,own.pair.dir,next});
+                note(now,native?"native feedback recovery: current pair replanned; image control for the rest of this pair":"native feedback recovery: fresh image fallback replanned the current pair");
+                return true;
+            }
+            nativeRecoveryState=now-nativeRecoveryAt_>=settle?4:1;
+        }
+        if(nativeRecoveryState==4 && now-nativeRecoveryNoted_>=60){nativeRecoveryNoted_=now;
+            note(now,"native recovery waiting for a fresh current-pair observation; no blind down input");}
+        return false;
+    }
+    std::optional<MemoryControlPose14> memoryPose_;
+    uint32_t memoryTick_=UINT32_MAX;
+    int memoryPair_=-1;
+    int64_t memoryNow_=-1;
+    juraic::Player memoryStart_;
+    int64_t memoryStartNext_=0;
+    int memoryFitPair_=-1;
+#endif
     juraic::Tsumo tsumo;
     int64_t next = 0; // the frame of the game the engine plays next
     // shareHidden: the columns whose 13th and whose 14th row the pair in play was begun with is not sure of, and the
@@ -605,6 +802,11 @@ private:
     }
     // The buttons decided for the frame `now` of the clock as they go out (gate).
     uint8_t sendable(int64_t now, uint8_t decided) const {
+#if JURAIC_REALGAME_MEMORY
+        // A contradictory fresh pose must not be accelerated downward while
+        // the bounded recovery lets earlier motion commands settle.
+        if(nativeContradictionAt_>=0)decided=0;
+#endif
         return gate ? gate(now, decided) : decided;
     }
     // The buttons the pad held in the frame `at` of the clock (0 before any). (pads: by the frame, one after the other)
@@ -644,7 +846,7 @@ private:
             if (noted >= 0 && aim >= 0)
                 why = placing->steered != steeredSeen ? " (no way to the one before: the nearest)" : placing->againSwitched != againSeen ? " (the second choice)" : "";
             if constexpr (REASONS) why += choiceText();
-            noted = aim, note(now, "2P pair " + std::to_string(pairsSeen) + ": brought to " + placementText(aim) + why);
+            noted = aim, note(now, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + ": brought to " + placementText(aim) + why);
         }
         steeredSeen = placing->steered, againSeen = placing->againSwitched;
     }
@@ -683,7 +885,7 @@ private:
     // The pairs the screen has shown since the pair in play was begun, and that pair's colours once they are known (begun
     // before the screen showed it, of the first colour - learnPairs: the AI then waits for it, ai::PlacementAgent).
     void knowColours(const Tracker& t) {
-        const std::tuple<size_t, size_t, int> now{t.pairsLearnt(), t.knownCount(), t.aligns};
+        const auto now = std::tuple{t.pairsLearnt(), t.knownCount(), t.aligns, t.colourRevision()};
         if (now == learntAt) return;
         learntAt = now;
         learnPairs(t);
@@ -694,7 +896,7 @@ private:
         for (Past& q : past)
             if (q.state.phase == juraic::Phase::Control && q.state.nextPair - 1 == i) q.state.colors = c;
     }
-    std::tuple<size_t, size_t, int> learntAt{0, 0, 0}; // (knowColours: what the screen had shown as it last looked)
+    std::tuple<size_t, size_t, int, uint64_t> learntAt{}; // (knowColours: what the screen had shown as it last looked)
 
     // The engine begins pair `pair` with the 13th and 14th rows the AI is shown (Follower::withHidden: those Follower
     // made out, and the engine's own in the 13th row where Follower has none there), not those the engine made by
@@ -705,6 +907,12 @@ private:
     // longer differs there) - but for those a picture told since (found). The AI plans its ways with them so
     // (PlacementAgent::unsure13).
     void shareHidden(const Follower& f, int pair, uint8_t guessed) {
+#if JURAIC_REALGAME_MEMORY
+        if(f.memoryRestingField(me) && pair!=f.tracker.side[me].pairs){tellUnsure();return;}
+        if(const auto* field=f.memoryField(me);pair==f.tracker.side[me].pairs && field && Follower::shown(own.field)==Follower::shown(*field)){
+            own.field=*field;unsure13=unsure14=0;found.clear();unsureRows=Follower::shown(*field);tellUnsure();return;
+        }
+#endif
         const SideModel& m = f.model[me];
         const juraic::GameField rows = Follower::shown(own.field);
         const uint8_t high = Follower::twelveHigh(rows);
@@ -732,7 +940,7 @@ private:
         std::string columns;
         for (int x = 0; x < juraic::W; ++x)
             if (unsureColumns() >> x & 1) columns += " " + std::to_string(x + 1);
-        note(f.tracker.frame, "2P pair " + std::to_string(pair) + ": the 13th and 14th rows not sure over columns" + columns);
+        note(f.tracker.frame, std::string(seatName()) + " pair " + std::to_string(pair) + ": the 13th and 14th rows not sure over columns" + columns);
     }
     // The cells pictures told (found) in `g`, where their columns' twelve rows are as they were then.
     void withFound(juraic::GameField& g) const {
@@ -746,6 +954,22 @@ private:
     // What the AI is shown with the own side `p` at the frame `at` (Follower::observeAt), with the cells pictures told.
     void observe(const Follower& f, const juraic::Player& p, int64_t at, juraic::ai::Observation& o) const {
         f.observeAt(me, rules, p, at, o);
+#if JURAIC_REALGAME_MEMORY
+        // Keep the recovered pair's already-public colours available on every
+        // observation; an unread NEXT must not erase the current pair again.
+        if(nativeFallbackPair_==pairsSeen && p.phase==juraic::Phase::Control && p.nextPair==pairsSeen && p.colors.axis && p.colors.child){
+            const int current=p.nextPair-1;
+            if(current>=0 && !o.mine().known(current)){
+                auto& visible=o.ownTsumo && o.me==1?o.tsumo1:o.tsumo;
+                visible.pairs.resize(size_t(current)+1,juraic::Pair{o.rules.palette[0],o.rules.palette[0]});
+                visible.pairs[size_t(current)]=p.colors;
+            }
+        }
+        if(f.memoryRestingField(me)){
+            if(!f.memoryField(me) || pairsSeen!=f.tracker.side[me].pairs || p.moves!=f.tracker.side[me].pairs-1)o.player[me].field=p.field;
+            return;
+        }
+#endif
         withFound(o.player[me].field);
         if constexpr (REASONS) shownIncoming = o.player[me].incoming;
     }
@@ -780,6 +1004,9 @@ private:
         own = juraic::Player{};
         own.field = f.model[me].known ? f.model[me].core.field : side.under; // (with the 13th and 14th rows the moves followed put there)
         if (sameRound
+#if JURAIC_REALGAME_MEMORY
+            && !f.memoryField(me)
+#endif
         ) own.field = hiddenFromEngine(own.field, engine);
         shareHidden(f, side.pairs, 0);
         own.phase = juraic::Phase::Next;
@@ -791,7 +1018,7 @@ private:
         // (seen late, it was in play already in the frame of the picture: it is taken as appearing in that frame)
         next = seen.appearedAt + (seen.late ? 0 : 1);
         // (the frames from the picture to now have passed: at least the frames the picture is behind)
-        start(f, t.frame + lag, "2P pair " + std::to_string(side.pairs) + " begun" + (seen.late ? " (seen late)" : "") + ": seen in frame " +
+        start(f, t.frame + lag, std::string(seatName()) + " pair " + std::to_string(side.pairs) + " begun" + (seen.late ? " (seen late)" : "") + ": seen in frame " +
                                     std::to_string(seen.appearedAt) + ", the engine from frame " + std::to_string(next) + ", lag " + std::to_string(lag));
         begunAt = active ? t.frame : -1;
     }
@@ -844,7 +1071,7 @@ private:
         checked = shownAt = doubtAt = -1;
         begunAt = seen.late ? -1 : t.frame;
         active = true, following = false, untilLocked = false;
-        note(t.frame, "2P pair " + std::to_string(side.pairs) + " set to the frame it appeared in" + (seen.late ? " (seen late)" : "") + ": seen in frame " +
+        note(t.frame, std::string(seatName()) + " pair " + std::to_string(side.pairs) + " set to the frame it appeared in" + (seen.late ? " (seen late)" : "") + ": seen in frame " +
                           std::to_string(seen.appearedAt) + ", foreseen in frame " + std::to_string(foreseen) + ", the engine from frame " + std::to_string(next) +
                           " with what the pad held, lag " + std::to_string(lag));
         while (active && next < t.frame + lag) {
@@ -929,7 +1156,7 @@ private:
         uint8_t guessed = 0;
         if (side.loose == 0 && !(side.resting == engineShown) && Follower::fits(side.resting, engineShown)) {
             own.field = Follower::withGarbage(side.resting, own.field, rules.maxGarbagePerDrop / juraic::W, guessed);
-            note(t.frame, "2P pair " + std::to_string(side.pairs + side.unseen + 1) + ": the field with the garbage the screen showed");
+            note(t.frame, std::string(seatName()) + " pair " + std::to_string(side.pairs + side.unseen + 1) + ": the field with the garbage the screen showed");
         }
         shareHidden(f, side.pairs + side.unseen + 1, guessed);
         // (the colours learnt since the last pair begun: from the third pair begun unseen in a row on, the engine had
@@ -941,7 +1168,7 @@ private:
         pairsSeen = t.side[me].pairs + t.side[me].unseen + 1;
         blindFor = pairsSeen, blindAt = appears;
         earlyFor = -1;
-        start(f, now + lag, "2P pair " + std::to_string(pairsSeen) + " begun unseen: the screen not showing it, the engine had it appear in frame " +
+        start(f, now + lag, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " begun unseen: the screen not showing it, the engine had it appear in frame " +
                                 std::to_string(appears) + ", lag " + std::to_string(lag));
     }
     // The next pair is begun early (early) when its first button, sent now, reaches the game in the frame the engine
@@ -995,7 +1222,7 @@ private:
         own.wait = 1;
         next = appears + 1;
         earlyFor = pairsSeen, earlyAt = appears, earlyShifted = false;
-        start(f, std::max(now + lag, next), "2P pair " + std::to_string(pairsSeen) + " begun early: the engine has it appear in frame " + std::to_string(appears) + ", lag " +
+        start(f, std::max(now + lag, next), std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " begun early: the engine has it appear in frame " + std::to_string(appears) + ", lag " +
                                                 std::to_string(lag));
     }
     // The next pair is begun early by the window too (beginByWindow) when the engine could not foresee it - garbage on its
@@ -1053,7 +1280,7 @@ private:
         own.wait = 1;
         next = appears + 1;
         earlyFor = pairsSeen, earlyAt = appears, earlyShifted = false;
-        start(f, std::max(now + lag, next), "2P pair " + std::to_string(pairsSeen) + " begun early by the window: it went away in frame " + std::to_string(seen.awayAt) +
+        start(f, std::max(now + lag, next), std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " begun early by the window: it went away in frame " + std::to_string(seen.awayAt) +
                                                 ", the pair to appear in frame " + std::to_string(appears) + ", lag " + std::to_string(lag));
     }
     // (REASONS) In the first frame the next pair would be begun early (its first button reaching the frame the engine
@@ -1086,7 +1313,7 @@ private:
     void noteNotEarly(const Tracker& t, int pair) {
         if (!early || pair < 2) return;
         const std::string why = whyFor == pair - 1 ? (whyNotEarly.empty() ? "none (begun from the screen first)" : whyNotEarly) : "foreseen (the engine did not foresee it in time)";
-        note(t.frame, "2P pair " + std::to_string(pair) + " not begun early: " + why);
+        note(t.frame, std::string(seatName()) + " pair " + std::to_string(pair) + " not begun early: " + why);
     }
     // (REASONS) The next pair appears with the own side not read (the frame appeared tells): noted with the points read
     // unsure, and again as the side is read clear, with the readings in between (how long a light lasts as pairs come).
@@ -1103,7 +1330,7 @@ private:
                 ++lightReadings, lightPoints = std::max(lightPoints, t.last.side[me].unsure);
                 return;
             }
-            note(t.frame, "2P pair " + std::to_string(lightFor) + ": the own side read clear again after " + std::to_string(lightReadings) + " readings not clear, " +
+            note(t.frame, std::string(seatName()) + " pair " + std::to_string(lightFor) + ": the own side read clear again after " + std::to_string(lightReadings) + " readings not clear, " +
                               std::to_string(t.frame - lightFrom) + " frames after it appeared (" + std::to_string(lightPoints) + " points unsure at most)");
             lightFor = -1;
             return;
@@ -1114,11 +1341,14 @@ private:
         lightChecked = pairsSeen;
         if (side.clear) return;
         lightFor = pairsSeen + 1, lightFrom = comes, lightRead = t.frame, lightReadings = 1, lightPoints = t.last.side[me].unsure;
-        note(t.frame, "2P pair " + std::to_string(lightFor) + " appears with the own side not read: " + std::to_string(lightPoints) + " points unsure");
+        note(t.frame, std::string(seatName()) + " pair " + std::to_string(lightFor) + " appears with the own side not read: " + std::to_string(lightPoints) + " points unsure");
     }
     // The pair in play begun (begin, beginBlind, beginEarly) with the engine as it is set, noted so (`line`): the frames
     // of the game before `at` have passed - the agent decides them, the game took what the pad held.
     void start(const Follower& f, int64_t at, const std::string& line) {
+#if JURAIC_REALGAME_MEMORY
+        if(nativeRecoveryPair_!=pairsSeen){nativeRecoveryAt_=nativeContradictionAt_=-1;nativeRecoveryState=0;}
+#endif
         {const auto* a=placer();juraic::inputdiag::trace.emit(juraic::inputdiag::DRIVER_START,{
             f.tracker.rounds,pairsSeen,f.tracker.frame,at,next,a?a->targetPlacement():-1,
             a?a->diagnosticTargetPair:-1,a?int64_t(a->diagnosticTargetDecision):0});}
@@ -1171,7 +1401,7 @@ private:
         const uint8_t wanted = uint8_t(agent->frame(o) & ~juraic::BTN_DROP);
         const auto diagnosticNext=next;
         if (placing && placing->revisedChoices != revisions)
-            note(next, "2P pair " + std::to_string(pairsSeen) + " choice renewed: the field or known pairs changed");
+            note(next, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " choice renewed: the field or known pairs changed");
         // (a tap the agent lets go before its end - its way planned again, a picture put right - is held to its end: one
         //  that went out for a frame as a pair was put right was lost by a frame of the game under load now and then)
         // (retaking: the down button of a pair taken up again waits, once a turn or a move went out for it, for a picture
@@ -1232,6 +1462,9 @@ private:
         //  late, put as the frames that had passed were played again, was counted against a placement chosen after it was put)
         const auto* placing = placer();
         putAim = placing && sentFor ? placing->targetPlacement() : -1;
+#if JURAIC_REALGAME_MEMORY
+        putDecision_=placing?placing->diagnosticTargetDecision:0;
+#endif
         stop(), following = true, untilLocked = true, lockedAt = at;
         lockedPair = pairsSeen - 1, lockedPlacement = own.pair.placement();
         lockedHigh = own.pair.y >= juraic::CLEAR_H - 1 || own.pair.childY() >= juraic::CLEAR_H - 1 ? pairsSeen : -1;
@@ -1367,7 +1600,7 @@ private:
         else blindAt = appears;
         shots.clear(); // (not fitted: its engine is not begun as it appeared)
         carefulDown(true);
-        start(f, now + lag, "2P pair " + std::to_string(pairsSeen) + " begun again: the game went on after it stopped, the engine had the next pair come in frame " +
+        start(f, now + lag, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " begun again: the game went on after it stopped, the engine had the next pair come in frame " +
                                 std::to_string(foreseen) + ", lag " + std::to_string(lag));
     }
     // A pair begun again (beginAgain) and not shown yet, and the window starts moving on: the pair had been put (the next
@@ -1383,7 +1616,7 @@ private:
         own = putOwn, next = putNext, lockedPair = pairsSeen - 1, lockedPlacement = putPlacement;
         againFor = -1;
         stop(), following = true, untilLocked = false;
-        note(f.tracker.frame, "2P pair " + std::to_string(pairsSeen) + " not begun again after all: the window moved on, the engine as it had put it");
+        note(f.tracker.frame, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " not begun again after all: the window moved on, the engine as it had put it");
     }
     // A clear picture shows the pair the engine has put (it still in hand on the screen) in the air.
     bool shownInAir(const Follower& f) const {
@@ -1412,7 +1645,7 @@ private:
     // agent chose for it is planned again from there (held down where it was, the pair went down elsewhere than the AI
     // chose, 6 of 24 pairs in rounds drawn so).
     void resume(const Follower& f, int64_t now) {
-        const std::string line = "2P pair " + std::to_string(pairsSeen) + " taken up again: the engine put it in frame " + std::to_string(lockedAt) + ", the picture shows " +
+        const std::string line = std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " taken up again: the engine put it in frame " + std::to_string(lockedAt) + ", the picture shows " +
                                  controlText(f.tracker.side[me].pair.at);
         if (takeUp(f, now, line)) retaking = active, retakes = 0, retakeTapAt = -1, retakeUnseen = 0;
     }
@@ -1477,7 +1710,7 @@ private:
             return;
         }
         const int tries = retakes;
-        if (takeUp(f, now, "2P pair " + std::to_string(pairsSeen) + " taken up once more: the picture shows " + controlText(seen) + ", the engine had " + controlText(had) +
+        if (takeUp(f, now, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " taken up once more: the picture shows " + controlText(seen) + ", the engine had " + controlText(had) +
                                " - the buttons sent for it were not taken"))
             retaking = active, retakes = tries, retakeTapAt = -1, retakeUnseen = 0;
     }
@@ -1508,6 +1741,13 @@ private:
 
     // A clear picture of the pair in play, kept for the fit.
     void keepShot(const Follower& f) {
+#if JURAIC_REALGAME_MEMORY
+        if(nativeControlEnabled()){
+            if(memoryPose_ && memoryPose_->pair==pairsSeen && (shots.empty() || shots.back().frame<memoryPose_->frame))
+                shots.push_back({memoryPose_->frame,memoryPose_->at,true});
+            return;
+        }
+#endif
         const SideTrack& s = f.tracker.side[me];
         if (pairsSeen <= 0 || s.pairs != pairsSeen || !s.inHand || !s.pair.seen || !s.clear) return;
         if (!shots.empty() && shots.back().frame >= f.tracker.frame) return;
@@ -1545,6 +1785,9 @@ private:
     // The pair in play so, numbered `pair`.
     Fitted toFit(int pair) const {
         Fitted p{startOwn, startNext, shots, tsumo, pair, false, -1};
+#if JURAIC_REALGAME_MEMORY
+        if(memoryBound_ && memoryFitPair_==pair+1){p.own=memoryStart_;p.next=memoryStartNext_;}
+#endif
         for (const Past& q : past) p.high = p.high || (q.state.phase == juraic::Phase::Control && q.state.pair.y >= 12);
         return p;
     }
@@ -1611,6 +1854,34 @@ private:
     }
     void fitPair(const Follower& f, const Fitted& p) {
         if (!takeLag || int(p.shots.size()) < FIT_SHOTS) return;
+#if JURAIC_REALGAME_MEMORY
+        if(memoryBound_ && !p.shots.empty() && std::all_of(p.shots.begin(),p.shots.end(),[](const Shot& s){return s.native;})){
+            const auto diagnosticBegin=juraic::inputdiag::clock();const bool oldSwap=turnsSwapped;
+            std::array<std::array<int,2>,13> diagnosticScores{};
+            const int old=lag;const auto current=fitScore(f,p,lag,turnsSwapped);
+            int best=lag,bestScore=current.pictures;bool other=false;
+            // Native timestamp uncertainty must not be mistaken for reversed
+            // physical buttons. Preserve the configured/image-verified mapping;
+            // measure lag with that mapping only. Opposite scores stay diagnostic.
+            // Logical native poses have no image move/turn rendering delay.
+            // Search the physical queue range directly; the image fit's local
+            // +/-3 window cannot reach 2 from a startup guess of 6 reliably.
+            for(int by=1;by<=12;++by)for(int flip=0;flip<2;++flip){
+                const auto score=fitScore(f,p,by,turnsSwapped!=(flip!=0));
+                diagnosticScores[size_t(by)][size_t(flip)]=score.pictures;
+                if(flip==0 && score.pictures>bestScore){best=by;bestScore=score.pictures;}
+            }
+            lags.push_back(best);if(lags.size()>15)lags.erase(lags.begin());
+            if(bestScore>=FIT_SHOTS && bestScore>=current.pictures+FIT_MARGIN){lag=best;fits.clear();
+                note(f.tracker.frame,"native input lag measured: "+std::to_string(lag)+" (was "+std::to_string(old)+"), logical poses "+std::to_string(bestScore)+"/"+std::to_string(p.shots.size()));}
+            for(int by=1;by<=12;++by)juraic::inputdiag::trace.emit(juraic::inputdiag::CAL_ROW,{
+                f.tracker.rounds,p.pair+1,f.tracker.frame,old,oldSwap,by,diagnosticScores[size_t(by)][0],diagnosticScores[size_t(by)][1],int64_t(p.shots.size())});
+            juraic::inputdiag::trace.emit(juraic::inputdiag::CAL_APPLY,{f.tracker.rounds,p.pair+1,f.tracker.frame,old,oldSwap,lag,turnsSwapped,
+                current.pictures,bestScore,best,other,bestScore>=FIT_SHOTS && bestScore>=current.pictures+FIT_MARGIN,
+                diagnosticScores[size_t(best)][0],diagnosticScores[size_t(best)][1],int64_t(p.shots.size()),1,(juraic::inputdiag::clock()-diagnosticBegin)/10});
+            return;
+        }
+#endif
         const int placed = p.placed;
         FitTable table{};
         std::array<std::array<bool, 2>, 2 * FIT_REACH + 1> lockedThere{};
@@ -1795,7 +2066,7 @@ private:
         found.push_back({x, row14, cell, Follower::shown(field).f.occupied().column(x)});
         (row14 ? unsure14 : unsure13) &= uint8_t(~(1u << x));
         tellUnsure();
-        note(t.frame, "2P pair " + std::to_string(pairsSeen) + ": the picture tells the " + (row14 ? "14th" : "13th") + " row of column " + std::to_string(x + 1) + " is " +
+        note(t.frame, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + ": the picture tells the " + (row14 ? "14th" : "13th") + " row of column " + std::to_string(x + 1) + " is " +
                           (cell == juraic::EMPTY ? "empty" : "not empty") + " (the picture shows " + controlText(seen) + ")");
         if (own.phase != juraic::Phase::Control) {
             lockEngine(t.frame);
@@ -1808,7 +2079,97 @@ private:
     // pad is a frame early or late now and then, 7% of the frames of a record of the real game, and the pair put right
     // for it had the buttons in flight played again for the wrong frames, sent to and fro). Shown right a little before,
     // put right only when the clear picture before showed it alike (DOUBT_FRAMES, alike).
+#if JURAIC_REALGAME_MEMORY
+    void correctMemoryPose(const Follower& f){
+        const auto diagnosticBegin=juraic::inputdiag::clock();const auto before=own.pair;const auto nextBefore=next;
+        const int usedBefore=memoryPoseSamples,correctedBefore=memoryPoseCorrections;int outcome=0;
+        juraic::inputdiag::ScopeExit correctionLog{[&]{const auto& p=memoryPose_;
+            juraic::inputdiag::trace.emit(juraic::inputdiag::CORRECT,{f.tracker.rounds,pairsSeen,p?p->pair:-1,p?int64_t(p->nativeTick):-1,
+                p?p->frame:-1,memoryNow_,lag,outcome,nextBefore,next,before.x,before.y,before.upper,before.dir,
+                own.pair.x,own.pair.y,own.pair.upper,own.pair.dir,memoryPoseSamples-usedBefore,memoryPoseCorrections-correctedBefore,
+                p?p->readBegin100ns:0,p?p->readEnd100ns:0,before.gain,before.moveWait,own.pair.gain,own.pair.moveWait,
+                (juraic::inputdiag::clock()-diagnosticBegin)/10});}};
+        if(!memoryPose_)return;
+        if(memoryPose_->pair!=pairsSeen){outcome=1;return;}
+        if(memoryPose_->frame<0){outcome=2;return;}
+        if(memoryPose_->frame>=memoryNow_+lag){outcome=3;return;}
+        if(memoryPair_==memoryPose_->pair && memoryTick_==memoryPose_->nativeTick){outcome=4;return;}
+        const auto& sample=*memoryPose_;memoryPair_=sample.pair;memoryTick_=sample.nativeTick;++memoryPoseSamples;
+        if(sample.at.x==own.pair.x && sample.at.dir==own.pair.dir)nativeContradictionAt_=-1;
+        size_t i=pastIndex(sample.frame);
+        if(i==past.size()){
+            // A pause or a long scheduling gap invalidates the old wall-clock
+            // history. Re-anchor the already identified pair, never a new one,
+            // keeping its independently followed base and visible colours.
+            if(startOwn.nextPair!=sample.pair && startOwn.nextPair!=sample.pair-1){outcome=6;return;}
+            if(nativeContradictionAt_<0)nativeContradictionAt_=memoryNow_;
+            outcome=13;return;
+        }
+        auto base=past[i].state;
+        if(base.phase!=juraic::Phase::Control){
+            size_t before=i;
+            while(before>0 && (past[before].state.phase!=juraic::Phase::Control || past[before].state.nextPair!=sample.pair))--before;
+            if(past[before].state.phase!=juraic::Phase::Control || past[before].state.nextPair!=sample.pair){outcome=7;return;}
+            base=past[before].state;
+        }
+        if(base.nextPair!=sample.pair || base.colors.axis!=sample.colors.axis || base.colors.child!=sample.colors.child){outcome=8;return;}
+        if(memoryFitPair_!=sample.pair){
+            memoryStart_=base;memoryStart_.pair.x=sample.at.x;memoryStart_.pair.y=sample.at.y;
+            memoryStart_.pair.upper=sample.at.upper;memoryStart_.pair.dir=sample.at.dir;
+            memoryStartNext_=sample.frame+1;memoryFitPair_=sample.pair;
+        }
+        const auto equal=[&](const Past& p){return p.state.phase==juraic::Phase::Control && p.state.nextPair==sample.pair &&
+            p.state.pair.x==sample.at.x && p.state.pair.y==sample.at.y && p.state.pair.upper==sample.at.upper && p.state.pair.dir==sample.at.dir;};
+        // Polling the native update against the host frame can straddle a
+        // boundary. An already explained adjacent frame must not cause jitter.
+        for(int by:{0,-1,1}){const auto k=pastIndex(sample.frame+by);if(k<past.size() && equal(past[k])){outcome=9;return;}}
+        // Work transactionally: a timestamp mismatch must not apply an already
+        // observed move/turn a second time in the projected state.
+        auto anchor=base;auto& had=anchor.pair;
+        const bool vertical=had.y!=sample.at.y || had.upper!=sample.at.upper;
+        had.x=sample.at.x;had.y=sample.at.y;had.upper=sample.at.upper;had.dir=sample.at.dir;
+        had.moveWait=0;
+        if(vertical)had.gain=0,had.groundFrames=0;
+        const juraic::detail::Cells cells(anchor.field);
+        had.grounded=!had.upper && !cells.canStepDown(had);
+        if(!had.grounded)had.groundFrames=0;
+        auto projected=anchor;
+        std::vector<juraic::Player> projectedStates;projectedStates.reserve(past.size()-i-1);
+        // Reuse only the buttons actually sent (including the output gate).
+        for(size_t k=i+1;k<past.size();++k){juraic::Incoming nobody;
+            juraic::advancePlayer(projected,nobody,past[k].buttons,tsumo,rules,f.tracker.timing,f.tracker.roundFrame(past[k].frame));
+            projectedStates.push_back(projected);
+        }
+        int64_t explainedAt=-1;
+        for(size_t k=i?i-1:0;k<past.size();++k){const auto& q=past[k];
+            if(q.frame>sample.frame+lag+2)break;
+            if(q.state.phase==juraic::Phase::Control && q.state.nextPair==sample.pair && q.state.colors.axis==sample.colors.axis &&
+               q.state.colors.child==sample.colors.child && q.state.pair.x==sample.at.x && q.state.pair.dir==sample.at.dir){explainedAt=q.frame;break;}
+        }
+        const bool wouldChangeMotion=projected.pair.x!=own.pair.x || projected.pair.dir!=own.pair.dir;
+        if(explainedAt>=0 && wouldChangeMotion){
+            outcome=12;
+            if(sample.at.x!=own.pair.x || sample.at.dir!=own.pair.dir){if(nativeContradictionAt_<0)nativeContradictionAt_=memoryNow_;}
+            juraic::inputdiag::trace.emit(juraic::inputdiag::NATIVE_GUARD,{1,memoryNow_,pairsSeen,int64_t(sample.nativeTick),sample.frame,
+                (projected.pair.x!=own.pair.x?1:0)|(projected.pair.dir!=own.pair.dir?2:0),sample.at.x,sample.at.dir,
+                own.pair.x,own.pair.dir,projected.pair.x,projected.pair.dir,explainedAt,putAim,lag});
+            return;
+        }
+        past[i].state=anchor;
+        for(size_t k=i+1;k<past.size();++k)past[k].state=projectedStates[k-i-1];
+        own=projected;
+        // The replay ends at past.back(); wait() may have advanced old next.
+        next=past.back().frame+1;
+        outcome=10;++corrected;++memoryPoseCorrections;
+        note(sample.frame,"current pair corrected from read-only native pose, pair "+std::to_string(sample.pair));
+        if(own.phase!=juraic::Phase::Control){outcome=11;lockEngine(sample.frame);return;}
+        active=true;lockedPair=-1;untilLocked=false;steer(f);
+    }
+#endif
     void correct(const Follower& f) {
+#if JURAIC_REALGAME_MEMORY
+        if(nativeProjectionCalibrated_ && nativeControlEnabled()){correctMemoryPose(f);return;}
+#endif
         const Tracker& t = f.tracker;
         const SideTrack& side = t.side[me];
         if (!side.pair.seen || !side.clear || t.frame <= checked) return;
@@ -1909,7 +2270,7 @@ private:
         doubtAt = -1;
         if (explain(f, seen, c) || (either && explain(f, other, c))) return;
         ++corrected;
-        note(t.frame, "2P pair " + std::to_string(pairsSeen) + " put right: the engine had " + controlText(had) + ", the picture shows " + controlText(seen));
+        note(t.frame, std::string(seatName()) + " pair " + std::to_string(pairsSeen) + " put right: the engine had " + controlText(had) + ", the picture shows " + controlText(seen));
         // (put right, a pair of one colour keeps the way the engine has it, and so the piece it has as its axis: the
         //  picture's way, its axis taken where it was seen last, was the other way round for a pair gone down since,
         //  and on the real game its way to a placement was two turns longer, turned at the wall it went down a column

@@ -1,7 +1,7 @@
 #pragma once
 // The pictures behind the game and the music: files of the folders "background" and "bgm" next to
 // the executable, chosen among on the settings screen (play/settings.h keeps the names). The
-// package comes with three pictures and nine pieces of music (media/ in the sources, copied there
+// package comes with four pictures and nine pieces of music (media/ in the sources, copied there
 // by the build); more can be put beside them.
 //   background: .png .jpg .jpeg .bmp .webp   (read with the Windows Imaging Component; drawn so
 //               that it covers its place - a field, or the whole canvas -, its middle kept, and

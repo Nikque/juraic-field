@@ -31,6 +31,11 @@
 #include "realgame_pace.h"
 #include "realgame_input_win.h"
 #include "realgame_pad_win.h"
+#if JURAIC_REALGAME_MEMORY
+#include "memory/primary_drive14_win.h"
+#include "memory/runtime14_win.h"
+#include "memory/window_watch14.h"
+#endif
 #include <mmsystem.h>
 #include <atomic>
 #include <chrono>
@@ -84,18 +89,27 @@ inline HWND findProgramWindow(const std::wstring& program) {
 
 struct RealGameMode {
     enum Row { ROW_STYLE, ROW_LEVEL,
+#if JURAIC_REALGAME_MEMORY
+        ROW_SOURCE,
+#endif
         ROW_READ, ROW_PLAY, ROW_PRESS,
+#if JURAIC_REALGAME_MEMORY
+        ROW_WAY, ROW_LATE, ROW_LISTED, ROW_RANDOM, ROW_OPPONENT_INPUT,
+#endif
         ROW_BACK, ROWS };
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
-    int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
+    int level = juraic::ai::LAST_LEVEL; // stored normal level
     // The seat is marked "Ex" (as Settings::aiEx, play/level_ex.h): from Lv 36 up, with the real game read by its memory
     // first and the row of the screen on the cancels, the AI takes the ways over soonest; the same level without the
     // mark takes the straight ways there. The row of the level steps through both.
-    bool ex = true;
+    bool ex = false;
+    int shownLevel() const { return styleLevel(level, style); }
     // Settings laid over those of the AI that plays 2P (realgame::overlayParams: name=value,...); "": the AI's as a match
     // against it has them.
     std::string aiSettings;
+    static constexpr int seat = 1; // the seat the AI plays
+    const char* seatName() const { return "2P"; } // (as the record names it)
 
     RealGameMode() = default;
     RealGameMode(const RealGameMode&) = delete;
@@ -104,6 +118,10 @@ struct RealGameMode {
     ~RealGameMode() {
         capture.stop();
         stopPlayer();
+#if JURAIC_REALGAME_MEMORY
+        primary.stop();
+        memory.stop();
+#endif
         pad.stop();
     }
 
@@ -122,10 +140,20 @@ struct RealGameMode {
     void open(int settingsStyle, int settingsLevel) {
         row = ROW_STYLE;
         autoRead = true, notTheGame = nullptr;
+#if JURAIC_REALGAME_MEMORY
+        listedPairs = false, realgame::primaryListedPairs14 = false;
+        garbageRandom = false, realgame::primaryGarbageRandom14 = false;
+        opponentInput = false, realgame::primaryInputSeat14 = -1;
+        lateTrial = false, primary.lateTrial = false;
+#endif
         stopPlaying(), stopPress();
         style = settingsStyle ? 1 : 0;
         level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LAST_LEVEL ? juraic::ai::LAST_LEVEL : settingsLevel;
         stopReading();
+    }
+    bool showRow(int i) const {
+        (void)i;
+        return true;
     }
     // The value of the row under the cursor changed by `by` steps; past either end it comes in again at the other
     // (as on the settings screen: Lv 36 → Lv 1). False: the row has no value.
@@ -133,11 +161,43 @@ struct RealGameMode {
         const Hold hold(state);
         if (row == ROW_STYLE) style = ((style + by) % 2 + 2) % 2;
         else if (row == ROW_LEVEL) {
+            if (style) return false;
             // (with the cancels: Lv 36, then Lv 36Ex)
             const LevelPick to = levelStep(level, ex, by, cancelOffered());
             level = to.level, ex = to.ex;
         }
+#if JURAIC_REALGAME_MEMORY
+        else if(row==ROW_SOURCE){
+            // (the screen, the memory under the pictures, the memory first without and with the cancels; changed while
+            //  the AI plays, the AI stops and is begun again by whoever shows the screen: restartWanted)
+            source=((source+by)%SOURCES+SOURCES)%SOURCES;
+            if(playing){stopPlaying();restartWanted=true;}
+            memoryEnabled=source==SOURCE_UNDER;memory.enabled(memoryEnabled);follow.clearMemoryFields();memoryUsed=false;
+        }
+#endif
         else if (row == ROW_PRESS) pressButton = ((pressButton + by) % PRESS_BUTTONS + PRESS_BUTTONS) % PRESS_BUTTONS;
+#if JURAIC_REALGAME_MEMORY
+        else if (row == ROW_WAY) changeWay(((pad.way() + by) % RealPad::WAYS + RealPad::WAYS) % RealPad::WAYS);
+        else if (row == ROW_LATE) {
+            lateTrial = !lateTrial, primary.lateTrial = lateTrial;
+            record.event(tracker.frame, lateTrial ? "the trial of buttons set late begins" : "the trial of buttons set late ends");
+        }
+        else if (row == ROW_LISTED) {
+            // (read from the next sample on: PrimarySeat14::listed)
+            listedPairs = !listedPairs;
+            realgame::primaryListedPairs14 = listedPairs;
+            record.event(tracker.frame, listedPairs ? "the pairs beyond the window are read from now on" : "the pairs beyond the window are not read any more");
+        }
+        else if (row == ROW_RANDOM) {
+            garbageRandom = !garbageRandom, realgame::primaryGarbageRandom14 = garbageRandom;
+            record.event(tracker.frame, garbageRandom ? "the garbage random states are read from now on" : "the garbage random states are not read any more");
+        }
+        else if (row == ROW_OPPONENT_INPUT) {
+            opponentInput = !opponentInput;
+            realgame::primaryInputSeat14 = opponentInput ? 1 - seat : -1;
+            record.event(tracker.frame, opponentInput ? "the other seat input is read from now on" : "the other seat input is not read any more");
+        }
+#endif
         else return false;
         return true;
     }
@@ -182,19 +242,33 @@ struct RealGameMode {
     void beginDriver(std::unique_ptr<juraic::ai::Agent> agent) {
         driver = realgame::Driver{};
         told = {};
+        driver.me = seat;
         realgame::Driver::prepare(agent.get());
         driver.lag = lag, driver.turnsSwapped = turnsSwapped, driver.agent = std::move(agent);
         driver.notes = &notes;
         juraic::inputdiag::trace.seat=driver.me;
+#if JURAIC_REALGAME_MEMORY
+        const int64_t memoryOn=memoryEnabled;
+#else
         const int64_t memoryOn=0;
+#endif
         juraic::inputdiag::trace.emit(juraic::inputdiag::CONFIG,{2,driver.me,memoryOn,1,automaticMenuInput()});
         // (no picture for long, or a menu read: the pad holds nothing, and the driver's engine takes so - holdNothing)
         driver.gate = [this](int64_t now, uint8_t b) {
             ++diagnosticGateCalls;int reasons=0;
+#if JURAIC_REALGAME_MEMORY
+            reasons=driver.inputGateReasons(now,memoryEnabled,memoryMotionBound,memoryMotionAdvancing,memoryMotionPair,memoryMotionFresh,holdNothing);
+#endif
             if(holdNothing)reasons|=4;
             const auto output=reasons?uint8_t(0):b;
+#if JURAIC_REALGAME_MEMORY
+            juraic::inputdiag::trace.emit(juraic::inputdiag::GATE,{tracker.rounds,now,driver.begunPair(),int64_t(memoryMotionPair),b,output,reasons,
+                memoryEnabled,memoryMotionBound,memoryMotionAdvancing,memoryMotionRunning,driver.lag,driver.turnsSwapped,
+                diagnosticNativeTick,diagnosticPoseFrame,memoryMotionFresh,driver.imageGateReady(now)});
+#else
             juraic::inputdiag::trace.emit(juraic::inputdiag::GATE,{tracker.rounds,now,driver.begunPair(),0,b,output,reasons,
                 0,0,0,0,driver.lag,driver.turnsSwapped,-1,-1,0,0});
+#endif
             return output;
         };
     }
@@ -205,22 +279,73 @@ struct RealGameMode {
         const Hold hold(state);
         if (reading != Reading::On) return error = L"先に「読み取り開始」で実機のウィンドウを選択してください", false;
         if (!pad.running() && !pad.start(error)) return false;
+#if JURAIC_REALGAME_MEMORY
+        if (sourceFirst()) {
+            // Memory first (play/memory/primary_drive14_win.h): the AI plays by the real game's memory on a thread of
+            // its own, which sets the pad; the pictures go on being read (the notice above the fields is theirs, and
+            // the screen of the mode shows them), and their driver presses nothing.
+            realgame::PrimaryDrive14::Setup setup;
+            setup.program = windowProgram(capture.window()), setup.me = seat, setup.delay = primaryDelay;
+            setup.cancel = cancels(), setup.turnsSwapped = turnsSwapped, setup.listedPairs = listedPairs;
+            setup.garbageRandom = garbageRandom;
+            setup.opponentInput = opponentInput;
+            // (with the record: also the bytes of the field and player objects for the first minutes, for finding where the
+            //  score and the waiting garbage are kept - PrimaryDrive14::Setup::rawBytes)
+            // (a folder of its own for each time the AI begins - the row of the screen that chooses how the field is read begins it
+            //  anew -, so that one does not write over the other: primary, primary-2, ...)
+            if (record.isOpen()) {
+                if (primaryRecord != record.folder()) primaryRecord = record.folder(), primaryStarts = 0;
+                ++primaryStarts;
+                setup.record = record.folder() / (primaryStarts > 1 ? L"primary-" + std::to_wstring(primaryStarts) : std::wstring(L"primary"));
+                setup.rawBytes = uint64_t(48) << 20;
+            }
+            if (setup.program.empty()) return error = L"実機の実行ファイルの場所を取得できません", false;
+            primary.press = [this](uint8_t b) {
+                // (a press asked for by hand comes first: the menus; and while the driver of the pictures has taken
+                //  over, the pad is its own)
+                if (!handPress.load() && !primaryFallback.load()) pad.press(b);
+            };
+            spareAgent = std::move(spare), primaryFallback = false, primaryLost = 0;
+            primary.notice = [this] { return std::array<int, 2>{noticeShown[0].load(), noticeShown[1].load()}; };
+            driver = realgame::Driver{};
+            driver.me = seat; // (the seat the pictures are watched for: watchPrimary)
+            primary.start(setup, std::move(agent));
+            playing = primaryPlaying = true;
+            record.event(tracker.frame, std::string("the AI plays ") + seatName() + " by the memory first: " + (setup.cancel ? "the ways over soonest (cancels)" : "the straight ways") + ", delay " +
+                                            std::to_string(primaryDelay) + ", the two turns sent " + (turnsSwapped ? "swapped" : "as they are") + ", the buttons by " +
+                                            RealPad::WAY_RECORD_NAMES[pad.way()] + (lateTrial ? ", set late for a trial" : "") +
+                                            (listedPairs ? ", the pairs beyond the window read" : ""));
+            return true;
+        }
+#endif
         if(!juraic::inputdiag::trace.active())return error=L"診断ログが開始されていないため、画面認識の方式では AI を開始できません",false;
         beginDriver(std::move(agent));
         playing = true;
-        record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are"));
+        record.event(tracker.frame, std::string("the AI plays ") + seatName() + ": lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are"));
         return true;
     }
     // The AI plays by the real game's memory first (not by its pictures).
     bool memoryFirst() const {
+#if JURAIC_REALGAME_MEMORY
+        return primaryPlaying;
+#else
         return false;
+#endif
     }
     // The AI changed on the screen while it plays (its kind, its level): `agent` plays 2P from the next pair on.
     void replaceAgent(std::unique_ptr<juraic::ai::Agent> agent, std::unique_ptr<juraic::ai::Agent> spare = nullptr) {
         const Hold hold(state);
         if (!playing) return;
+#if JURAIC_REALGAME_MEMORY
+        if (primaryPlaying) {
+            primary.replaceAgent(std::move(agent), cancels());
+            // (the spare one: the driver of the pictures has it while it has taken over)
+            if (spare && primaryFallback.load()) realgame::Driver::prepare(spare.get()), driver.replaceAgent(std::move(spare));
+            else if (spare) spareAgent = std::move(spare);
+        } else
+#endif
         driver.replaceAgent(std::move(agent));
-        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level) + (cancels() ? "Ex (the ways over soonest)" : ""));
+        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(shownLevel()) + (cancels() ? "Ex (the ways over soonest)" : ""));
     }
     void stopPlaying() {
         const Hold hold(state);
@@ -234,6 +359,12 @@ struct RealGameMode {
         const auto letGo = [](std::unique_ptr<juraic::ai::Agent>& agent) {
             if (agent) std::thread([a = std::move(agent)]() mutable { a.reset(); }).detach();
         };
+#if JURAIC_REALGAME_MEMORY
+        // (its thread sets the pad without holding `state`: it can be waited for here)
+        if (primaryPlaying) primary.stop(), primaryPlaying = false;
+        primaryFallback = false, primaryLost = 0;
+        letGo(spareAgent);
+#endif
         driver.stop();
         letGo(driver.agent);
         pad.press(0);
@@ -243,6 +374,9 @@ struct RealGameMode {
         const Hold hold(state);
         if (!pad.running() && !pad.start(error)) return false;
         pressLeft = PRESS_WAIT + PRESS_HOLD, pressBits = PRESS_BUTTON_BITS[pressButton];
+#if JURAIC_REALGAME_MEMORY
+        handPress = true;
+#endif
         record.event(tracker.frame, std::string("a press of ") + PRESS_RECORD_NAMES[pressButton] + " asked for");
         return true;
     }
@@ -259,6 +393,9 @@ struct RealGameMode {
         const Hold hold(state);
         if (pressLeft >= 0) pad.hold(0);
         pressLeft = -1;
+#if JURAIC_REALGAME_MEMORY
+        handPress = false;
+#endif
     }
     // The mode is left: everything stops and the pad is pulled out. Until then the pad stays plugged in once it is
     // (stopPlaying and stopPress only let its buttons go): a pad pulled out and plugged in again is a new pad to the
@@ -276,6 +413,9 @@ struct RealGameMode {
         const Hold hold(state);
         const auto diagnosticBegin=juraic::inputdiag::clock();const auto costBefore=juraic::inputdiag::trace.cost100ns();
         diagnosticGateCalls=0;int64_t diagnosticDriverTime=0;
+#if JURAIC_REALGAME_MEMORY
+        refreshMemory();
+#endif
         const auto diagnosticRefreshEnd=juraic::inputdiag::clock();
         realgame::PadRecord held{now, 0, 0, 0};
         realgame::SentRecord sent{0, 0, why};
@@ -283,7 +423,19 @@ struct RealGameMode {
             --pressLeft;
             pad.hold(pressLeft >= 0 && pressLeft < PRESS_HOLD ? pressBits : USHORT(0));
             held.by = 2;
+#if JURAIC_REALGAME_MEMORY
+            handPress = pressLeft >= 0;
+        } else if (playing && primaryPlaying && !primaryFallback.load()) {
+            // (memory first: the pad is set by the thread of PrimaryDrive14, as each frame of the game is read)
+            handPress = false;
+            held.buttons = primary.status().held, held.by = 1;
+            watchPrimary();
+#endif
         } else if (playing) {
+#if JURAIC_REALGAME_MEMORY
+            handPress = false;
+            if (primaryPlaying && primaryBack()) return drive(now, why); // (the memory is read again: its play goes on)
+#endif
             const int corrected = driver.corrected;
             holdNothing = why == 3 || why == 4;
             const auto diagnosticDriverBegin=juraic::inputdiag::clock();
@@ -306,7 +458,11 @@ struct RealGameMode {
             if (held.by == 1) record.sent(sent);
         }
         record.flush();
+#if JURAIC_REALGAME_MEMORY
+        const int64_t memoryOn=memoryEnabled,memoryTaken=memoryUsed;
+#else
         const int64_t memoryOn=0,memoryTaken=0;
+#endif
         juraic::inputdiag::trace.emit(juraic::inputdiag::DRIVE,{tracker.rounds,now,tracker.frame,driver.begunPair(),diagnosticGateCalls,
             memoryOn,memoryTaken,diagnosticDriverTime/10,(diagnosticRefreshEnd-diagnosticBegin)/10,held.buttons,held.pad,why,
             diagnosticBegin,sent.driven,sent.set,juraic::inputdiag::clock(),int64_t((juraic::inputdiag::trace.cost100ns()-costBefore)/10),
@@ -341,8 +497,129 @@ struct RealGameMode {
     std::wstring layoutError; // (the file is there and a line of it is not understood: the table built in is used)
     realgame::Follower follow;
     int64_t diagnosticGateCalls=0;
+#if JURAIC_REALGAME_MEMORY
+    realgame::MemoryRuntime14 memory;
+    bool memoryEnabled=false,memoryUsed=false;
+    // How the real game is read for the play (the row ROW_SOURCE): by its pictures; by its pictures with the memory
+    // under them (memoryEnabled); by its memory first, the AI's ways straight or over soonest with the cancels.
+    // (the play begins by the memory first, without the cancels)
+    enum { SOURCE_SCREEN, SOURCE_FIRST, SOURCE_UNDER, SOURCE_FIRST_CANCEL, SOURCES };
+    bool sourceFirst() const { return source == SOURCE_FIRST || source == SOURCE_FIRST_CANCEL; }
+    // The row of the screen is on the cancels: the levels from Lv 36 up are offered twice (play/level_ex.h).
+    bool cancelOffered() const { return source == SOURCE_FIRST_CANCEL; }
+    // The AI takes the ways over soonest: the cancels are offered and the level chosen is an Ex.
+    bool cancels() const { return !style && levelEx(level, ex, cancelOffered()); }
+    int source = SOURCE_FIRST;
+    bool restartWanted = false;   // the source was changed while the AI played: it is to be begun again
+    // The trial of buttons set late is on (the row ROW_LATE; PrimaryDrive14::lateTrial): with the play by the memory
+    // first, newly pressed buttons are set some milliseconds after their frame on purpose, to measure the way they go.
+    bool lateTrial = false;
+    // The pairs beyond the window are read from the game's own list and shown to the AI (the row ROW_LISTED;
+    // PrimaryDrive14::Setup::listedPairs). Off unless the row is set.
+    bool listedPairs = false;
+    bool garbageRandom = false;
+    bool opponentInput = false;
+    // The buttons go another way from now on (the row ROW_WAY). The AI stops if it plays, and whoever shows the screen
+    // begins it again (restartWanted); what was held is let go and a pad plugged in is pulled out. The real game is to
+    // be told anew which of its devices plays the seat (in its menus).
+    void changeWay(int to) {
+        const Hold hold(state);
+        const bool played = playing;
+        if (playing) stopPlaying();
+        stopPress();
+        pad.setWay(to);
+        padError.clear();
+        if (reading == Reading::On && padOnReading && !pad.start(padError)) padError = L"入力方式を開始できません: " + padError;
+        presser = realgame::MenuPresser{};
+        if (played) restartWanted = true;
+        record.event(tracker.frame, std::string("the buttons go by ") + RealPad::WAY_RECORD_NAMES[pad.way()]);
+    }
+    realgame::PrimaryDrive14 primary;
+    bool primaryPlaying = false;  // the AI plays by the memory first
+    // The play by the memory first has no seats to read (a round whose objects are not found, another version of the
+    // program) while the pictures show 2P with a pair in its hands: after PRIMARY_LOST such frames the driver of the
+    // pictures takes over with the spare agent (primaryFallback), and gives the pad back once both seats are read in a
+    // round again. (In four records of the real game two rounds were not bound at all, and 2P pressed nothing in them.)
+    // The driver of the pictures plays only with the diagnostic log open (startPlaying); without it nothing takes over,
+    // and the screen of the mode tells that the memory is not read (memoryText).
+    static constexpr int PRIMARY_LOST = 45;
+    std::atomic<bool> primaryFallback{false};
+    int primaryLost = 0;
+    long primaryFallbacks = 0; // times the driver of the pictures took over
+    std::unique_ptr<juraic::ai::Agent> spareAgent;
+    void watchPrimary() {
+        const auto s = primary.status();
+        if (s.cpuSeat || s.reader.state == "bound") primaryLost = 0;
+        else if (tracker.side[driver.me].inHand) ++primaryLost;
+        if (primaryLost < PRIMARY_LOST || !spareAgent || !juraic::inputdiag::trace.active()) return;
+        beginDriver(std::move(spareAgent));
+        primaryFallback = true, primaryLost = 0, ++primaryFallbacks;
+        pad.press(0);
+        record.event(tracker.frame, "the memory is not read (" + s.reader.state + ") and " + seatName() + " has a pair in its hands: the driver of the pictures takes over");
+    }
+    // The driver of the pictures has taken over: true once the memory is read again in a round - the driver stops, its
+    // agent is the spare one again, and the pad is the memory's play's.
+    bool primaryBack() {
+        if (!primaryFallback.load()) return false;
+        const auto s = primary.status();
+        if (!s.cpuSeat && (s.reader.state != "bound" || !s.round)) return false;
+        driver.stop();
+        if (s.cpuSeat && !handPress.load()) pad.press(0);
+        spareAgent = driver.takeAgent();
+        driver = realgame::Driver{};
+        driver.me = seat;
+        primaryFallback = false, primaryLost = 0;
+        primary.resend();
+        record.event(tracker.frame, "the memory is read again: the play by the memory first goes on");
+        return true;
+    }
+    int primaryDelay = 0;         // frames a button takes to reach the game beyond its next frame (PrimaryDrive14::Setup)
+    int primaryStarts = 0;        // times the AI began to play by the memory first with the record of `primaryRecord`
+    std::filesystem::path primaryRecord;
+    std::atomic<bool> handPress{false};          // a press asked for by hand is on its way: the play sets nothing
+    std::array<std::atomic<int>, 2> noticeShown{}; // the notice above each field as the pictures have it
+    int64_t diagnosticNativeTick=-1,diagnosticPoseFrame=-1;
+    bool memoryMotionBound=false,memoryMotionRunning=false;
+    bool memoryMotionAdvancing=false;
+    uint32_t memoryMotionPair=0;
+    bool memoryMotionFresh=false;
+    uint64_t memoryMotionNoteAt=0;
+    int memoryMotionRound=-1;
+    uint64_t memorySequence=0;
+    bool userSelectedWindow=false,rememberedWindowProgram=false,windowWatchNoted=false;
+    std::array<std::tuple<uint64_t,int64_t,int,int,uint64_t,uint32_t>,2> nextConsumerDiagnostic{};
+    // (for the screen of the mode, with the parts for finding faults: how the play by the memory first goes)
+    std::wstring primaryLine() const {
+        const auto s=primary.status();
+        return L"メモリ読み取り: 取得 "+std::to_wstring(s.reader.samples)+L" フレーム（欠落 "+std::to_wstring(s.reader.stepsMore)+L"、3 ms 超の待ち "+std::to_wstring(s.reader.lateWaits)+
+            L"）　操作 "+std::to_wstring(s.frames)+L" フレーム（補完 "+std::to_wstring(s.filled)+L"、予測との不一致 "+std::to_wstring(s.corrections)+L"、再捕捉 "+std::to_wstring(s.recovered)+
+            L"）　入力遅延 "+std::to_wstring(s.delay)+(s.measured>=0?L"（実測 "+std::to_wstring(s.measured)+L"）":L"")+L"　最大処理時間 "+std::to_wstring(s.slowestUs/1000)+L" ms"+
+            L"　思考 "+std::to_wstring(s.thinking[0])+L" 回（時間切れで打ち切り "+std::to_wstring(s.thinking[1])+L"、探索幅を縮小 "+std::to_wstring(s.thinking[2])+L"、2 組先までの計画 "+std::to_wstring(s.thinking[3])+L"）";
+    }
+    std::wstring memoryText() const {
+        if(sourceFirst()){
+            if (!primaryPlaying) return L"メモリ読み取り: 「2P の操作を開始」で開始します（読み取り専用）";
+            if(primaryFallback.load())return L"メモリ読み取り: メモリを読み取れないため、画面認識で操作中（読み取れ次第、戻ります）";
+            const auto s=primary.status();
+            const std::wstring base=s.reader.state=="bound"?(s.round?L"メモリ読み取り: 両プレイヤーを読み取って操作中":L"メモリ読み取り: 両プレイヤーを読み取り中（対戦開始待ち）"):
+                s.reader.state=="no_process"?L"メモリ読み取り: 実機のプロセスが見つかりません":
+                s.reader.state=="no_access"?L"メモリ読み取り: 実機のプロセスを開けません（実機が管理者権限で動いている場合は、本ソフトも管理者権限で起動してください）":
+                primaryLost>=PRIMARY_LOST?L"メモリ読み取り: 対戦中ですが、メモリから両プレイヤーのデータを読み取れません（AI は操作していません）":L"メモリ読み取り: 両プレイヤーのデータを検索中";
+            return base+(DEBUG_PARTS?L"　組数 "+std::to_wstring(s.pairs)+L"　欠落 "+std::to_wstring(s.skipped)+L"　補正 "+std::to_wstring(s.repaired)+L"　画面認識への切り替え "+std::to_wstring(primaryFallbacks)+L" 回":L"");
+        }
+        if(!memoryEnabled)return L"盤面: 画面認識";
+        if(memoryMotionBound)return memoryMotionRunning?(follow.memoryNextAvailable(driver.me)?L"メモリ: 操作中の組と NEXT を照合して操作中":L"メモリ: 操作中の組を追跡して操作中（NEXT は画面認識）"):L"メモリ: 操作待機中";
+        if(memoryUsed)return L"盤面: メモリから両プレイヤーの 14 段を取得。操作対象を照合中（NEXT は画面認識）";
+        const auto s=memory.status();
+        if(s.state==realgame::Follow14State::NeedScan)return L"盤面: メモリアドレスを検索中。現在は画面認識";
+        if(s.state==realgame::Follow14State::NoProcess || s.state==realgame::Follow14State::Unsupported)return L"盤面: メモリ未接続または未対応。現在は画面認識";
+        if(s.state==realgame::Follow14State::RoundUnknown)return L"メモリ待機: 対戦開始時からの確認が必要です。現在は画面認識";
+        return L"盤面: メモリを照合中。現在は画面認識";
+    }
+#else
     bool cancelOffered() const { return false; }
     bool cancels() const { return false; }
+#endif
     const realgame::Tracker& tracker = follow.tracker;
     WindowCapture capture;
     int width = 0, height = 0;  // of the last picture
@@ -401,10 +678,17 @@ struct RealGameMode {
             recordError=L"診断ログを作成できません（画面認識の方式では AI を開始できません）";
         if (DEBUG_PARTS && record.isOpen()) film.open(record.folder() / L"film"), topFilm.open(record.folder() / L"film");
         notes.clear();
+#if JURAIC_REALGAME_MEMORY
+        DWORD memoryPid=0;GetWindowThreadProcessId(w,&memoryPid);
+        memory.enabled(memoryEnabled);memory.start(windowProgram(w),memoryPid);memorySequence=0;memoryUsed=false;
+#endif
         const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table, menus); }, error);
         reading = started ? Reading::On : Reading::Off;
         if (started) startPlayer();
         else {
+#if JURAIC_REALGAME_MEMORY
+            memory.stop();
+#endif
             juraic::inputdiag::trace.close();
             if (DEBUG_PARTS) film.close(), topFilm.close();
             record.close();
@@ -417,6 +701,9 @@ struct RealGameMode {
         stopPlayer();
         const Hold hold(state);
         if (playing) stopPlaying();
+#if JURAIC_REALGAME_MEMORY
+        memory.stop();follow.clearMemoryFields();memoryUsed=false;
+#endif
         juraic::inputdiag::trace.close();
         if (DEBUG_PARTS) film.close(), topFilm.close();
         record.close(); // (after the capture: its thread offers the record pictures)
@@ -432,6 +719,10 @@ struct RealGameMode {
     void pump() {
         const int64_t last = lastPicture.load();
         framesWithout = last < 0 ? framesWithout + 1 : int(clockFrame() - last);
+#if JURAIC_REALGAME_MEMORY
+        const Hold hold(state);
+        if(framesWithout>15){memoryUsed=false;follow.clearMemoryFields();}
+#endif
     }
 
     // The next picture kept as it is, to be saved (savedPicture). Nothing without DEBUG_PARTS.
@@ -456,6 +747,76 @@ struct RealGameMode {
     }
 
 private:
+#if JURAIC_REALGAME_MEMORY
+    void refreshMemory() {
+        // One transition record per seat/status/pair/generation. The frame and
+        // packet identity in the event are evidence, not a source of control.
+        std::array<int,2> nextStatus{2,2};
+        std::array<std::optional<realgame::PublishedNextVerified14>,2> nextEvidence;
+        std::array<uint64_t,2> nextNow{};
+        uint32_t nextPid=0;
+        juraic::inputdiag::ScopeExit nextLog{[&]{
+            auto& trace=juraic::inputdiag::trace;if(!trace.active())return;
+            for(int seat=0;seat<2;++seat){const auto& n=nextEvidence[size_t(seat)];
+                if(nextStatus[size_t(seat)]!=7)follow.noteNextUnavailable(seat);
+                const auto gen=n?n->generation:0;auto key=std::tuple{trace.session(),tracker.roundStart,tracker.side[seat].pairs,nextStatus[size_t(seat)],gen,nextPid};
+                if(key==nextConsumerDiagnostic[size_t(seat)])continue;nextConsumerDiagnostic[size_t(seat)]=key;
+                trace.emit(juraic::inputdiag::NEXT_CONSUMER,{seat,tracker.roundStart,tracker.side[seat].pairs,tracker.frame,nextStatus[size_t(seat)],
+                    int64_t(gen),n?int64_t(n->pair):-1,n?n->frame:-1,n?int64_t(n->observedMs):0,int64_t(nextNow[size_t(seat)]),n?int64_t(n->tick):0,nextPid});
+            }
+        }};
+        memoryMotionFresh=false;
+        int64_t present=0,usable=0,accepted=0,generation=0,observed=0,sampleFrame=-1,readBegin=0,readEnd=0;
+        juraic::inputdiag::ScopeExit sourceLog{[&]{juraic::inputdiag::trace.emit(juraic::inputdiag::SOURCE,{
+            tracker.rounds,tracker.frame,memoryEnabled,memoryUsed,memoryMotionBound,memoryMotionAdvancing,memoryMotionRunning,
+            int64_t(memoryMotionPair),present,usable,accepted,generation,observed,sampleFrame,diagnosticPoseFrame,
+            diagnosticNativeTick,readBegin,readEnd});}};
+        diagnosticNativeTick=-1;diagnosticPoseFrame=-1;
+        follow.clearMemoryFields();memoryUsed=false;
+        if(!memoryEnabled || reading!=Reading::On){nextStatus={1,1};memoryMotionBound=memoryMotionRunning=memoryMotionAdvancing=false;driver.useMemoryPose({},false);return;}
+        if(memoryMotionRound!=tracker.rounds){memoryMotionRound=tracker.rounds;memoryMotionBound=memoryMotionRunning=false;driver.useMemoryPose({},false);}
+        DWORD pid=0;GetWindowThreadProcessId(capture.window(),&pid);nextPid=pid;
+        const auto now=realgame::MemoryRuntime14::clockMs();
+        const auto motion=memory.motion();
+        if(motion){present=1;generation=int64_t(motion->generation);observed=int64_t(motion->observedMs);sampleFrame=motion->frame;
+            const auto seat=size_t(driver.me);diagnosticNativeTick=motion->nativeTick[seat];diagnosticPoseFrame=motion->poseFrame[seat];
+            readBegin=motion->readBegin100ns[seat];readEnd=motion->readEnd100ns[seat];}
+        if(!motion){memoryMotionBound=memoryMotionRunning=memoryMotionAdvancing=false;driver.useMemoryPose({},false);}
+        else if(realgame::usableMemoryMotion14(*motion,tracker,now,pid)){usable=1;memoryMotionFresh=true;
+            memoryMotionBound=motion->bound[size_t(driver.me)];memoryMotionRunning=motion->running[size_t(driver.me)];
+            memoryMotionAdvancing=motion->advancing[size_t(driver.me)];
+            memoryMotionPair=motion->pairs[size_t(driver.me)];
+            const auto pose=realgame::memoryControlPose14(*motion,tracker,driver.me,now,pid);accepted=bool(pose);
+            driver.useMemoryPose(pose,memoryMotionBound,memoryMotionRunning,memoryMotionPair);
+        }else{
+            // Once a bound stream expires, release until revalidated. Never
+            // silently reuse a last good pose as the current control state.
+            memoryMotionRunning=memoryMotionAdvancing=false;driver.useMemoryPose({},memoryMotionBound);
+        }
+        if(now>=memoryMotionNoteAt){memoryMotionNoteAt=now+1000;
+            record.event(clockFrame(),"native input feedback: seat="+std::to_string(driver.me+1)+", bound="+std::to_string(memoryMotionBound)+
+                ", advancing="+std::to_string(memoryMotionAdvancing)+", operating="+std::to_string(memoryMotionRunning)+
+                ", pair="+std::to_string(memoryMotionPair)+", used="+std::to_string(driver.memoryPoseSamples)+
+                ", corrected="+std::to_string(driver.memoryPoseCorrections)+", lag="+std::to_string(driver.lag));
+        }
+        const auto sample=memory.sample();if(!sample)return;
+        if(juraic::inputdiag::trace.active())nextEvidence=sample->next;
+        if(!realgame::usableMemorySample14(*sample,tracker,realgame::MemoryRuntime14::clockMs(),pid)){nextStatus={3,3};return;}
+        if(!follow.useMemoryFields(sample->value.fields)){nextStatus={8,8};return;}
+        memoryUsed=true;
+        nextStatus={motion?5:4,motion?5:4};
+        if(motion)for(int seat=0;seat<2;++seat)if(sample->next[size_t(seat)]){
+            const auto checkedAt=realgame::MemoryRuntime14::clockMs();nextNow[size_t(seat)]=checkedAt;
+            nextStatus[size_t(seat)]=follow.useMemoryNext(*sample->next[size_t(seat)],*motion,seat,checkedAt,pid)?7:6;
+        }
+        if(memorySequence!=sample->value.sequence){
+            memorySequence=sample->value.sequence;
+            record.event(tracker.frame,"read-only memory accepted: pid "+std::to_string(pid)+", sequence "+std::to_string(memorySequence)+
+                ", source frame "+std::to_string(sample->frame)+", both fields (14 rows):\n"+
+                realgame::memoryFieldText14(sample->value.fields[0])+realgame::memoryFieldText14(sample->value.fields[1]));
+        }
+    }
+#endif
     struct Taken {
         realgame::Reading reading;
         int64_t frame;
@@ -517,6 +878,10 @@ private:
             const bool noting = record.isOpen();
             const Counts before = noting ? counts() : Counts{};
             follow.step(t.reading, frame);
+#if JURAIC_REALGAME_MEMORY
+            memory.submit(t.reading,frame);
+            for (size_t s = 0; s < 2; ++s) noticeShown[s] = follow.notice[s];
+#endif
             width = t.width, height = t.height;
             ++pictures;
             if (noting) noteStep(before, frame);

@@ -1333,13 +1333,13 @@ static void testKnownSearchPairs() {
 
 static void testLevelTable() {
     const ai::Params standard;
-    check(ai::levelOf("lv37") == 37 && ai::levelOf("lv37q") == 37 &&
+    check(ai::levelOf("lv37") == 37 && !ai::makeAgent("lv37q") &&
           ai::agentParams("lv37", standard).knownPairs == ai::MAX_KNOWN &&
           ai::agentParams("lv36", standard).knownPairs == 3 && ai::agentParams("x3", standard).knownPairs == 3,
           "only the selected level 37 uses the longer known prefix");
     check(ai::LEVELS == 36 && ai::levelOf("lv1") == 1 && ai::levelOf("lv9") == 9 && ai::levelOf("lv36") == 36 && ai::levelOf("lv1q") == 1 && ai::levelOf("lv12q") == 12 && ai::levelOf("lv36q") == 36,
           "the names of the levels are not read");
-    for (const char* name : {"lv", "lv0", "lv01", "lv38", "lv100", "lv1a", "x3", "x3q", "random", "", "LV1", "q", "lvq", "lv0q", "lv38q", "lv100q", "lv1qq"})
+    for (const char* name : {"lv", "lv0", "lv01", "lv38", "lv100", "lv1a", "x3", "x3q", "random", "", "LV1", "q", "lvq", "lv0q", "lv37q", "lv38q", "lv100q", "lv1qq"})
         check(!ai::levelOf(name), std::string("a level is read from the name ") + name);
     check(!ai::quietOf("x3") && ai::quietOf("x3q") && !ai::quietOf("lv12") && ai::quietOf("lv12q") && ai::quietOf("lv36q") && !ai::quietOf("random") && !ai::quietOf("q"), "which names are the AI that hardly pokes");
     const auto text = [](const ai::Params& p) {

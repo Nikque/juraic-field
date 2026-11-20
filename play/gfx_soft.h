@@ -4,6 +4,7 @@
 // DirectWrite lays it out on Windows closely enough: one line, in a box, from its top, left, centred or right.
 #include "raster.h"
 #include "../third_party/stb/stb_truetype.h"
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
@@ -102,11 +103,22 @@ struct GfxBase {
     void unclip() { raster.unclip(); }
     // align: -1 left, 0 centre, 1 right
     void text(const std::wstring& s, float x, float y, float w, float, int size, ColorF c, int align = -1) {
+        drawText(s, x, y, w, SIZES[size], c, align);
+    }
+    void fitText(const std::wstring& s, float x, float y, float w, float h, int size, ColorF c, int align = -1) {
+        if (s.empty() || w <= 4 || h <= 0) return;
+        clip({x, y, x + w, y + h});
+        drawText(s, x + 2, y, w - 4, std::min(SIZES[size], h / 1.4f), c, align, true);
+        unclip();
+    }
+
+private:
+    void drawText(const std::wstring& s, float x, float y, float w, float size, ColorF c, int align, bool fit = false) {
         Face& f = face[face[1].ready ? 1 : 0];
         if (!f.ready) return;
         // (the characters and the room each takes, once for the line and its edge)
         Line l;
-        l.px = SIZES[size] * raster.scale; // (the size in pixels of the window)
+        l.px = size * raster.scale; // (the size in pixels of the window)
         l.text = toChars(s);
         l.advance.resize(l.text.size()), l.kern.resize(l.text.size());
         for (size_t i = 0; i < l.text.size(); ++i) {
@@ -115,6 +127,10 @@ struct GfxBase {
             l.width += l.advance[i];
             if (i + 1 < l.text.size()) l.width += l.kern[i];
         }
+        if (fit && l.width > w * raster.scale) {
+            drawText(s, x, y, w, size * w * raster.scale / l.width, c, align);
+            return;
+        }
         if (shadow) {
             // (a picture is behind the game: every text gets a dark edge, so that it can be read on any picture)
             for (int k = 0; k < 4; ++k) line(f, l, x + (k & 1 ? 1.5f : -1.5f), y + (k & 2 ? 1.5f : -1.5f), w, colorF(0, 0, 0, 0.7f * c.a), align);
@@ -122,7 +138,6 @@ struct GfxBase {
         line(f, l, x, y, w, c, align);
     }
 
-private:
     struct Line {
         float px = 0, width = 0;
         std::u32string text;

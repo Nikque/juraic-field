@@ -51,17 +51,14 @@ struct Settings {
     // aiStyle: the 2P side - the
     // opponent of a person, and one of two AIs that are watched; aiStyle1: the 1P side when two AIs are watched.
     int aiStyle = 0, aiStyle1 = 0;
-    // The level of the AI of a seat, 1 to 36 (ai/level.h; 36 = the strongest, the AI as it is, and the level a new
-    // settings file has). Either of the two AIs above plays at every level (the agents lv1 to lv36 and lv1q to lv36q).
-    // aiLevel: the 2P side, aiLevel1: the 1P side when two AIs are watched. On the screen the levels come in six
-    // groups, each with a name and a colour (LEVEL_GROUP_NAMES, LEVEL_GROUP_COLORS below).
-    int aiLevel = juraic::ai::LEVELS, aiLevel1 = juraic::ai::LEVELS;
+    // The stored normal level for each seat. Quiet AI is always Lv36.
+    int aiLevel = juraic::ai::LAST_LEVEL, aiLevel1 = juraic::ai::LAST_LEVEL;
     // With Rules::cancel the levels from LEVEL_EX_FROM up come twice (play/level_ex.h): 1 = the seat plays the "Ex" of
     // its level - the way to a placement that is over soonest among the buttons of every frame (ai/agent.h,
     // PlacementAgent::fastestWays: a pair moved on the ground before it locks, turns that push the pair aside) -,
     // 0 = the level as it is, the straight way. No part without the cancel or below that level. aiEx: the 2P side,
     // aiEx1: the 1P side when two AIs are watched. The screens change it together with the level (Lv 36 → Lv 36Ex).
-    int aiEx = 1, aiEx1 = 1;
+    int aiEx = 0, aiEx1 = 0;
     // How the buttons of a person reach the game (play/input.h). Not rules: a replay holds the
     // buttons as these have made them.
     // A match over a network, the host's side: the frames by which garbage is late (game/link.h); 0 = set by the
@@ -80,7 +77,7 @@ struct Settings {
     int bgm[MUSIC_SCENES]{}, bgmVolume = 40;              // ... and the volume of the music, percent
     std::vector<std::wstring> backgroundFiles[PICTURE_PLACES], bgmFiles[MUSIC_SCENES];
     // (the names until a settings file says otherwise: the pictures and the tunes that come with the package, media/)
-    std::wstring backgroundName[PICTURE_PLACES] = {L"field-1p-silhouette.png", L"field-2p-juraic.png", L"stage-grid.png"};
+    std::wstring backgroundName[PICTURE_PLACES] = {L"field-1p-blue-scarf.png", L"field-2p-juraic.png", L"stage-grid.png"};
     std::wstring bgmName[MUSIC_SCENES] = {L"synth-versus.flac", L"synth-solo.flac", L"synth-menu.flac"};
     // The file of a scene's music below the folder "bgm" ("versus/name"), nothing when the scene has none.
     std::wstring musicFile(int scene) const { return bgm[scene] && !bgmName[scene].empty() ? std::wstring(MUSIC_FOLDERS[scene]) + L"/" + bgmName[scene] : std::wstring(); }
@@ -190,12 +187,12 @@ struct SettingsTable {
             // (with the cancel the levels from LEVEL_EX_FROM up come twice, the second time as "Ex": the row steps through
             //  both and keeps the mark in aiEx, which has no row of its own - play/level_ex.h)
             {L"AI のレベル（2P 側）", "aiLevel", 1, juraic::ai::LAST_LEVEL, 1, [](Settings& x) -> int& { return x.aiLevel; },
-             [this, &s](int v) { return levelText(v, levelEx(v, s.aiEx != 0, cancel != 0)); }},
+             [this, &s](int v) { return levelText(styleLevel(v, s.aiStyle), !s.aiStyle && levelEx(v, s.aiEx != 0, cancel != 0)); }},
             {L"AI の Ex（2P 側）", "aiEx", 0, 1, 1, [](Settings& x) -> int& { return x.aiEx; }, onOff},
             {L"AI（観戦の 1P 側）", "aiStyle1", 0, 1, 1, [](Settings& x) -> int& { return x.aiStyle1; },
              [](int v) { return std::wstring(v ? L"Juraic 催促（極小）" : L"Juraic 催促（小）"); }},
             {L"AI のレベル（観戦の 1P 側）", "aiLevel1", 1, juraic::ai::LAST_LEVEL, 1, [](Settings& x) -> int& { return x.aiLevel1; },
-             [this, &s](int v) { return levelText(v, levelEx(v, s.aiEx1 != 0, cancel != 0)); }},
+             [this, &s](int v) { return levelText(styleLevel(v, s.aiStyle1), !s.aiStyle1 && levelEx(v, s.aiEx1 != 0, cancel != 0)); }},
             {L"AI の Ex（観戦の 1P 側）", "aiEx1", 0, 1, 1, [](Settings& x) -> int& { return x.aiEx1; }, onOff},
             // (the pictures: one for each field and one for the rest of the screen; toko's field is the first player's)
             {L"背景（1P 側のフィールド）", PICTURE_KEYS[PICTURE_FIELD1], 0, int(s.backgroundFiles[PICTURE_FIELD1].size()), 1, [](Settings& x) -> int& { return x.background[PICTURE_FIELD1]; }, picture(PICTURE_FIELD1)},
@@ -221,11 +218,13 @@ struct SettingsTable {
             if (item.key == "aiLevel" || item.key == "aiLevel1") item.color = levelColor;
             if (item.key == "aiLevel")
                 item.change = [this](Settings& x, int by) {
+                    if (x.aiStyle) return;
                     const LevelPick pick = levelStep(x.aiLevel, x.aiEx != 0, by, cancel != 0);
                     x.aiLevel = pick.level, x.aiEx = pick.ex;
                 };
             if (item.key == "aiLevel1")
                 item.change = [this](Settings& x, int by) {
+                    if (x.aiStyle1) return;
                     const LevelPick pick = levelStep(x.aiLevel1, x.aiEx1 != 0, by, cancel != 0);
                     x.aiLevel1 = pick.level, x.aiEx1 = pick.ex;
                 };
@@ -235,6 +234,8 @@ struct SettingsTable {
             for (SettingItem& item : items)
                 if (item.key == key) item.enabled = enabled;
         };
+        when("aiLevel", [](const Settings& x) { return x.aiStyle == 0; });
+        when("aiLevel1", [](const Settings& x) { return x.aiStyle1 == 0; });
         for (const char* key : {"aiWidth", "aiDepth", "aiQueues"}) when(key, [](const Settings& x) { return x.aiAuto == 0; }); // (the automatic search sets them itself)
         when("tsumoCorrection", [](const Settings& x) { return x.rules.colors > 3; }); // (with three colours the first pairs hold no more anyway)
         when("backgroundDim", [](const Settings& x) { return x.background[PICTURE_FIELD1] || x.background[PICTURE_FIELD2] || x.background[PICTURE_OTHER]; });

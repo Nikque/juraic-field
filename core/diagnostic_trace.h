@@ -1,5 +1,5 @@
 #pragma once
-// Private diagnostic build only. No process reader, input sender, or game state access.
+// Event tracing for diagnostics. This header records the fields supplied by callers.
 #include <array>
 #include <algorithm>
 #include <atomic>

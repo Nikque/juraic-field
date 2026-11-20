@@ -178,8 +178,10 @@ struct Toko {
 // is, or the one that hardly pokes -, `level` its level. At the top level they are x3 and x3q; below it lv1 to
 // lv35, and lv1q to lv35q.
 inline std::string aiOfLevel(int level, int style) {
-    if (level == ai::LAST_LEVEL) return style ? "lv37q" : "lv37";
-    return level >= ai::LEVELS ? std::string(style ? "x3q" : "x3") : "lv" + std::to_string(level < 1 ? 1 : level) + (style ? "q" : "");
+    if (style) return "x3q";
+    if (level >= ai::LAST_LEVEL) return "lv37";
+    if (level == ai::LEVELS) return "x3";
+    return "lv" + std::to_string(styleLevel(level, 0));
 }
 
 // ---- versus ------------------------------------------------------------------------------
@@ -260,14 +262,14 @@ struct Versus {
             if (placing->ahead < 1) placing->ahead = 12; // (an AI that does not choose the moment itself)
             // (the Ex of a level, play/level_ex.h: the way that is over soonest - with the cancel, from Lv 36 up, where
             //  the seat is marked so; seat 1 is the 2P side)
-            placing->fastestWays = levelEx(ai::levelOf(name) ? ai::levelOf(name) : ai::LEVELS, (i ? s.aiEx : s.aiEx1) != 0, s.rules.cancel);
+            placing->fastestWays = !ai::quietOf(name) && levelEx(ai::levelOf(name) ? ai::levelOf(name) : ai::LEVELS, (i ? s.aiEx : s.aiEx1) != 0, s.rules.cancel);
         }
         // (the AI of the game is called Juraic; in the tools, the replays and the sources it is x3, x3q for the one
         //  that hardly pokes, and lv1 to lv35 and lv1q to lv35q for their levels below the top. The two names on the
         //  screen are 催促（小） for x3 and 催促（極小） for x3q.)
         const bool juraic = name == "x3" || name == "x3q" || ai::levelOf(name);
         const int level = ai::levelOf(name) ? ai::levelOf(name) : ai::LEVELS;
-        agentName[i] = juraic ? std::wstring(ai::quietOf(name) ? L"Juraic 催促（極小） Lv " : L"Juraic 催促（小） Lv ") + levelNumber(level, levelEx(level, (i ? s.aiEx : s.aiEx1) != 0, s.rules.cancel))
+        agentName[i] = juraic ? std::wstring(ai::quietOf(name) ? L"Juraic 催促（極小） Lv " : L"Juraic 催促（小） Lv ") + levelNumber(level, !ai::quietOf(name) && levelEx(level, (i ? s.aiEx : s.aiEx1) != 0, s.rules.cancel))
                               : L"AI（" + std::wstring(name.begin(), name.end()) + L"）";
     }
     void startMatch(const Settings& s, uint64_t seed) {

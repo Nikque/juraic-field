@@ -77,7 +77,8 @@ enum class Screen {
 };
 
 // The items of the menu, in the order they are shown (the mode of the real game is in the Windows build only).
-enum MenuItem { MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH, MENU_REAL_GAME, MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT };
+enum MenuItem { MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH, MENU_REAL_GAME,
+                MENU_NET, MENU_REPLAY, MENU_SETTINGS, MENU_BINDINGS, MENU_GENERATOR, MENU_QUIT };
 constexpr MenuItem MENU_ITEMS[] = {MENU_TOKO, MENU_TWO, MENU_VS_AI, MENU_WATCH,
 #ifdef _WIN32
                                    MENU_REAL_GAME,
@@ -440,6 +441,7 @@ struct App {
 
 #ifdef _WIN32
     void createFonts() {
+        gfx.textFactory = dwrite;
         const float sizes[] = {18, 24, 36, 60};
         for (int i = 0; i < 4; ++i) {
             dwrite->CreateTextFormat(L"Yu Gothic UI", nullptr, i >= 2 ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
@@ -678,6 +680,9 @@ struct App {
         case MENU_REAL_GAME:
 #ifdef _WIN32
             realGame.open(settings.aiStyle, settings.aiLevel), realGame.ex = settings.aiEx != 0;
+#if JURAIC_REALGAME_MEMORY
+            loadRealGameWay();
+#endif
             screen = Screen::RealGame;
 #endif
             break;
@@ -725,15 +730,33 @@ struct App {
         if (m.reading != RealGameMode::Reading::On) m.drive(RealGameMode::clockFrame());
         pads.skipXInput = m.pad.running() ? m.pad.xinputSlot() : -1;
         const int count = RealGameMode::ROWS;
-        if (heldStep(NAV_UP, 6, 6)) m.row = (m.row + count - 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
-        if (heldStep(NAV_DOWN, 6, 6)) m.row = (m.row + 1) % count, audio.play(SND_MOVE), dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
+        const auto moveRow = [&](int by) {
+            do m.row = (m.row + count + by) % count; while (!m.showRow(m.row));
+            audio.play(SND_MOVE);
+            dirHeld[NAV_LEFT] = dirHeld[NAV_RIGHT] = 0;
+        };
+        if (heldStep(NAV_UP, 6, 6)) moveRow(-1);
+        if (heldStep(NAV_DOWN, 6, 6)) moveRow(1);
         bool heard = false;
         const bool right = heldStep(NAV_RIGHT, 4, 2, &heard), left = heldStep(NAV_LEFT, 4, 2, &heard);
         int change = (right ? 1 : 0) - (left ? 1 : 0);
+#if JURAIC_REALGAME_MEMORY
+        // (rows that stop the AI or switch a setting change once a press, not again while the key is held)
+        if (m.row == RealGameMode::ROW_SOURCE || m.row == RealGameMode::ROW_WAY || m.row == RealGameMode::ROW_LATE || m.row == RealGameMode::ROW_LISTED ||
+            m.row == RealGameMode::ROW_RANDOM || m.row == RealGameMode::ROW_OPPONENT_INPUT)
+            change = (right && dirHeld[NAV_RIGHT] == 1 ? 1 : 0) - (left && dirHeld[NAV_LEFT] == 1 ? 1 : 0);
+#endif
         if (change && m.change(change)) {
             if (heard) audio.play(SND_ROTATE);
+#if JURAIC_REALGAME_MEMORY
+            if (m.row == RealGameMode::ROW_WAY) saveRealGameWay();
+#endif
             // (the AI plays as soon as the window is read: changed now, it plays so from its next pair on)
             if ((m.row == RealGameMode::ROW_STYLE || m.row == RealGameMode::ROW_LEVEL) && m.playing) startRealGameAI();
+#if JURAIC_REALGAME_MEMORY
+            // (how the real game is read was changed while the AI played: it stopped, and begins again so)
+            if (m.restartWanted) m.restartWanted = false, startRealGameAI();
+#endif
         }
         const bool ok = nav(NAV_OK); // (read once in a frame: a key is down in it only the first time it is asked)
         if (ok && m.row == RealGameMode::ROW_READ) {
@@ -788,18 +811,41 @@ struct App {
         // memory first sets them for the real game - RealGameMode::cancels -, and the driver of the pictures takes the
         // straight ways).
         const auto seatAI = [&](Versus& v) {
-            v.seat(1, aiOfLevel(m.level, m.style), settings);
-            if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(v.agent[1].get())) x3->noting = false;
-            if (ai::PlacementAgent* placing = dynamic_cast<ai::PlacementAgent*>(v.agent[1].get())) placing->fastestWays = false;
+            v.seat(m.seat, aiOfLevel(m.level, m.style), settings);
+            if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(v.agent[m.seat].get())) x3->noting = false;
+            if (ai::PlacementAgent* placing = dynamic_cast<ai::PlacementAgent*>(v.agent[m.seat].get())) placing->fastestWays = false;
         };
         seatAI(made);
         // (the play by the memory first: an agent like it more, for the driver of the pictures to take over with while
         //  the memory cannot be read - RealGameMode::watchPrimary)
         Versus spare;
-        if (m.playing) return m.replaceAgent(std::move(made.agent[1]), std::move(spare.agent[1]));
+#if JURAIC_REALGAME_MEMORY
+        if (m.sourceFirst()) {
+            spare.adjust = made.adjust;
+            seatAI(spare);
+        }
+#endif
+        if (m.playing) return m.replaceAgent(std::move(made.agent[m.seat]), std::move(spare.agent[m.seat]));
         std::wstring error;
-        if (!m.startPlaying(std::move(made.agent[1]), error, std::move(spare.agent[1]))) say(error);
+        if (!m.startPlaying(std::move(made.agent[m.seat]), error, std::move(spare.agent[m.seat]))) say(error);
     }
+#if JURAIC_REALGAME_MEMORY
+    // The way the buttons go to the real game (RealGameMode::ROW_WAY) is kept from one start of the program to the
+    // next: its name as the records have it (RealPad::WAY_RECORD_NAMES), in RealGameMode::INPUT_FILE. Read as the
+    // screen of the mode is opened from the menu; a file that names no way leaves the way as it is.
+    void loadRealGameWay() {
+        std::ifstream kept(userDirectory / RealGameMode::INPUT_FILE);
+        std::string name;
+        if (!std::getline(kept, name)) return;
+        if (!name.empty() && name.back() == '\r') name.pop_back();
+        for (int way = 0; way < RealPad::WAYS; ++way)
+            if (name == RealPad::WAY_RECORD_NAMES[way] && way != realGame.pad.way()) realGame.changeWay(way);
+    }
+    void saveRealGameWay() {
+        std::ofstream keep(userDirectory / RealGameMode::INPUT_FILE);
+        keep << RealPad::WAY_RECORD_NAMES[realGame.pad.way()] << "\n";
+    }
+#endif
     // The real game's window found by itself (RealGameMode::autoRead): the window of the program kept, at once; otherwise
     // the window brought to the front is chosen (chooseRealGame). A window read is confirmed or let go.
     void findRealGame() {
@@ -827,6 +873,17 @@ struct App {
             std::wofstream keep(userDirectory / RealGameMode::WINDOW_FILE);
             keep << windowProgram(m.capture.window()) << L"\n";
         } else if (RealGameMode::clockFrame() - m.readSince > RealGameMode::NOT_THE_GAME) {
+#if JURAIC_REALGAME_MEMORY
+            // A user-selected window or previously identified program may legitimately show a
+            // pause or mid-round screen without satisfying the start detector.
+            // Keep reading; this does not authorize a memory sample or input.
+            const auto memoryState=m.memory.status().state;
+            const bool keep=realgame::keepSelectedWindow14(m.userSelectedWindow,m.rememberedWindowProgram);
+            if(!m.windowWatchNoted){m.windowWatchNoted=true;
+                juraic::inputdiag::trace.emit(juraic::inputdiag::WINDOW_WATCH,{m.tracker.frame,RealGameMode::clockFrame()-m.readSince,
+                    m.userSelectedWindow,m.rememberedWindowProgram,m.memoryEnabled,int(memoryState),keep});}
+            if(keep)return;
+#endif
             m.notTheGame = m.capture.window();
             m.stopReading();
             say(L"読み取り中のウィンドウに実機の画面が見つからないため、別のウィンドウを検索します");
@@ -852,10 +909,19 @@ struct App {
         GetClientRect(w, &inside);
         std::wstring error;
         // (the head of the record: this build, the AI, the window read)
-        const std::string about = std::string("Juraic Field, built ") + __DATE__ + " " + __TIME__ + "\nAI " + (m.style ? "x3q" : "x3") + ", level " + std::to_string(m.level) + (m.cancels() ? "Ex" : "") +
-                                  "\nthe window read: " + std::to_string(inside.right) + " x " + std::to_string(inside.bottom) + " inside";
+        std::string about = std::string("Juraic Field, built ") + __DATE__ + " " + __TIME__ + "\nAI " + (m.style ? "x3q" : "x3") + ", level " + std::to_string(m.shownLevel()) + (m.cancels() ? "Ex" : "") +
+                            "\nthe window read: " + std::to_string(inside.right) + " x " + std::to_string(inside.bottom) + " inside";
         if (m.startReading(w, userDirectory, about, error)) {
             m.confirmed = false, m.readSince = RealGameMode::clockFrame();
+#if JURAIC_REALGAME_MEMORY
+            std::wifstream rememberedFile(userDirectory / RealGameMode::WINDOW_FILE);
+            std::wstring rememberedProgram;std::getline(rememberedFile,rememberedProgram);
+            // The automatic path reaches here only after findProgramWindow
+            // matched the remembered program; a manual choice is explicit.
+            m.rememberedWindowProgram=!userSelected || realgame::sameRememberedProgram14(windowProgram(w),rememberedProgram);
+            m.userSelectedWindow=userSelected;
+            m.windowWatchNoted=false;
+#endif
             say(!m.padError.empty() ? m.padError : m.recordError.empty() ? L"実機のウィンドウの読み取りを開始しました" : m.recordError);
             // (from the menus on: 2P is picked there by its pad, and the AI plays the pairs of 2P when they come)
             if (m.padError.empty()) startRealGameAI();
@@ -1159,6 +1225,7 @@ struct App {
     int pickAt(float x, float y) const {
         for (int seat = 0; seat < 2; ++seat)
             for (int k = 0; versus.agent[seat] && k < 6; ++k) {
+                if (k >= 3 && (seat ? settings.aiStyle : settings.aiStyle1)) continue;
                 const RectF r = pickBox(seat, k);
                 if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return seat * 4 + (k < 3 ? (k == 0 ? 0 : 1) : (k == 3 ? 2 : 3));
             }
@@ -1417,12 +1484,12 @@ struct App {
     // ---- drawing ----
     void drawMenu() {
         gfx.text(L"Juraic Field", 0, 70, CANVAS_W, 80, 3, rgb(255, 255, 255), 0);
-        // (eleven items, with the mode of the real game: a little closer together, to end above the line of the keys)
-        const float top = MENU_COUNT > 10 ? 152.f : 164.f, gap = MENU_COUNT > 10 ? 43.f : 46.f;
+        // (eleven items or more, with the modes of the real game: closer together, to end above the line of the keys)
+        const float top = MENU_COUNT > 11 ? 148.f : MENU_COUNT > 10 ? 152.f : 164.f, gap = MENU_COUNT > 11 ? 40.f : MENU_COUNT > 10 ? 43.f : 46.f;
         for (int i = 0; i < MENU_COUNT; ++i) {
             const float y = top + i * gap;
             if (i == menuIndex) gfx.round(rectF(410, y - 1, 870, y + 43), 12, rgb(84, 104, 190));
-            gfx.text(menuText(MENU_ITEMS[i]), 410, y, 460, 44, 2, i == menuIndex ? rgb(255, 255, 255) : rgb(170, 178, 204), 0);
+            gfx.fitText(menuText(MENU_ITEMS[i]), 420, y, 440, 44, 2, i == menuIndex ? rgb(255, 255, 255) : rgb(170, 178, 204), 0);
         }
         gfx.text(L"↑↓ で選ぶ　Enter で決定　（コントローラー: 方向と決定ボタン。「操作の割り当て」で変えられます）", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
         gfx.text(pads.count() ? L"コントローラー " + std::to_wstring(pads.count()) + L" 台を認識しています" : L"コントローラーは接続されていません", 0, 668,
@@ -1430,13 +1497,13 @@ struct App {
     }
     void drawSettings() {
         SettingsTable table(settings);
-        gfx.text(L"設定", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
+        gfx.fitText(L"設定", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         // The parts.
         for (int k = 0; k < SETTING_SECTIONS; ++k) {
             const float y = 132 + float(k) * 58;
             const bool on = k == settingSection;
             if (on) gfx.round(rectF(96, y - 6, 316, y + 40), 8, settingInside ? rgb(52, 62, 104) : rgb(84, 104, 190));
-            gfx.text(SETTING_SECTION_NAMES[k], 96, y, 220, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212), 0);
+            gfx.fitText(SETTING_SECTION_NAMES[k], 96, y, 220, 34, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212), 0);
         }
         // The settings of the part chosen (fourteen rows fit: the list moves with the row chosen).
         std::vector<int> shown;
@@ -1454,32 +1521,32 @@ struct App {
             const bool on = settingInside && shown[size_t(n)] == settingIndex, usable = table.enabled(item, settings);
             if (on) gfx.round(rectF(356, y - 3, 1172, y + 31), 8, rgb(84, 104, 190));
             const ColorF name = !usable ? rgb(98, 104, 128) : on ? rgb(255, 255, 255) : rgb(180, 188, 212);
-            gfx.text(item.name, 376, y, 400, 30, 1, name);
+            gfx.fitText(item.name, 376, y, 354, 30, 1, name);
             // (the levels of the AI are written in the colour of their group, play/settings.h)
             const unsigned tint = usable && item.color ? item.color(item.value(settings)) : 0xFFFFFF;
-            gfx.text((on ? L"◀  " : L"") + item.show(item.value(settings)) + (on ? L"  ▶" : L""), 700, y, 452, 30, 1,
+            gfx.fitText((on && usable ? L"◀  " : L"") + item.show(item.value(settings)) + (on && usable ? L"  ▶" : L""), 744, y, 408, 30, 1,
                      usable ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(98, 104, 128), 1);
         }
-        gfx.text(settingInside ? L"↑↓ で選ぶ　←→ で変更（押したままで続けて変わります）　Esc / Enter で左の一覧へ　（灰色の項目は、今の設定では使われません）"
+        gfx.fitText(settingInside ? L"↑↓ で選ぶ　←→ で変更（押したままで続けて変わります）　Esc / Enter で左の一覧へ　（灰色の項目は、今の設定では使われません）"
                                : L"↑↓ で選ぶ　Enter / → で開く　Esc で保存して戻る　（ルールの変更は次のゲームから）",
                  0, 660, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
     }
     void drawBindings() {
-        gfx.text(L"操作の割り当て", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
+        gfx.fitText(L"操作の割り当て", 0, 40, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         const auto row = [&](int index, const std::wstring& name, const std::wstring& value, bool arrows) {
             const float y = 112 + float(index) * 34 + (index >= 2 ? 14 : 0) + (index >= 3 ? 8 : 0) + (index >= 3 + GAME_ACTIONS ? 10 : 0);
             const bool on = index == bindIndex;
             if (on) gfx.round(rectF(300, y - 2, 980, y + 30), 8, binding ? rgb(190, 110, 60) : rgb(84, 104, 190));
-            gfx.text(name, 320, y, 360, 30, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
-            gfx.text((on && arrows ? L"◀  " : L"") + value + (on && arrows ? L"  ▶" : L""), 600, y, 360, 30, 1, rgb(255, 255, 255), 1);
+            gfx.fitText(name, 320, y, 270, 30, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
+            gfx.fitText((on && arrows ? L"◀  " : L"") + value + (on && arrows ? L"  ▶" : L""), 600, y, 360, 30, 1, rgb(255, 255, 255), 1);
         };
         for (int i = 0; i < 2; ++i)
             row(i, std::to_wstring(i + 1) + L"P の操作", input.device[i] < 0 ? L"自動（コントローラー優先）" : deviceName(input.device[i]), true);
         row(2, L"割り当てを変えるもの", layoutNames[bindLayout], true);
         for (int a = 0; a < bindActions(); ++a)
             row(3 + a, actionNames[a], binding && bindIndex == 3 + a ? L"キーかボタンを押してください" : codeName(bindLayout, input.bind[bindLayout][a]), false);
-        gfx.text(L"↑↓ で選ぶ　←→ で変更　Enter で割り当てを変更（Esc で取り消し）　Esc で保存して戻る", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
-        gfx.text(L"とこは、キーボード 1 と 1P の操作の両方で動かせます。メニューの決定と戻るは、対戦の操作とは別に割り当てます。", 0, 668, CANVAS_W, 26,
+        gfx.fitText(L"↑↓ で選ぶ　←→ で変更　Enter で割り当てを変更（Esc で取り消し）　Esc で保存して戻る", 0, 640, CANVAS_W, 30, 0, rgb(150, 158, 186), 0);
+        gfx.fitText(L"とこは、キーボード 1 と 1P の操作の両方で動かせます。メニューの決定と戻るは、対戦の操作とは別に割り当てます。", 0, 668, CANVAS_W, 26,
                  0, rgb(120, 126, 150), 0);
     }
     // Garbage waiting above a field: the count, and the usual symbols for it.
@@ -1589,14 +1656,15 @@ struct App {
             // (the AI of each AI seat and its level, changed with the mouse for the next match: updateVersus)
             for (int seat = 0; seat < 2; ++seat) {
                 if (!v.agent[seat]) continue;
-                const int style = seat ? settings.aiStyle : settings.aiStyle1, level = seat ? settings.aiLevel : settings.aiLevel1;
+                const int style = seat ? settings.aiStyle : settings.aiStyle1;
+                const int level = styleLevel(seat ? settings.aiLevel : settings.aiLevel1, style);
                 const unsigned tint = levelColor(level);
-                const bool ex = levelEx(level, (seat ? settings.aiEx : settings.aiEx1) != 0, settings.rules.cancel);
-                const std::wstring words[6] = {L"◀", style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", L"▶", L"◀", levelText(level, ex), L"▶"};
+                const bool ex = !style && levelEx(level, (seat ? settings.aiEx : settings.aiEx1) != 0, settings.rules.cancel);
+                const std::wstring words[6] = {L"◀", style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", L"▶", style ? L"" : L"◀", levelText(level, ex), style ? L"" : L"▶"};
                 gfx.text(seat ? L"2P" : L"1P", 352, pickBox(seat, 0).top, 40, 28, 0, rgb(200, 206, 226));
                 for (int k = 0; k < 6; ++k) {
                     const RectF r = pickBox(seat, k);
-                    if (k % 3 != 1) gfx.round(rectF(r.left + 2, r.top + 1, r.right - 2, r.bottom - 1), 6, rgb(84, 104, 190));
+                    if (k % 3 != 1 && !words[k].empty()) gfx.round(rectF(r.left + 2, r.top + 1, r.right - 2, r.bottom - 1), 6, rgb(84, 104, 190));
                     gfx.text(words[k], r.left, r.top + 1, r.right - r.left, 26, 0,
                              k == 4 ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 0);
                 }
@@ -1608,94 +1676,146 @@ struct App {
     void drawRealGame() {
         const RealGameMode& m = realGame;
         const RealGameMode::Hold hold(m.state); // (the thread of the play changes what is shown)
-        gfx.text(L"実機の 2P を Juraic が操作", 0, 30, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
-        const unsigned tint = levelColor(m.level);
-        const float below = RealGameMode::ROWS > 6 ? 22.f : 0.f; // (what stands under the rows is this much lower)
-        const std::wstring rows[RealGameMode::ROWS] = {L"AI", L"レベル",
-                                                       m.reading == RealGameMode::Reading::Off ? L"読み取り開始" : L"読み取り停止",
-                                                       m.playing ? L"2P の操作を停止" : L"2P の操作を開始",
-                                                       m.pressing() ? L"ボタン入力を中止" : L"2P のボタン入力",
-                                                       L"戻る"};
-        const std::wstring values[RealGameMode::ROWS] = {m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", levelText(m.level, m.cancels()),
-                                                         m.reading == RealGameMode::Reading::On ? L"読み取り中" : m.reading == RealGameMode::Reading::Choosing ? L"ウィンドウを選択中" : L"",
-                                                         m.playing ? L"操作中" : L"",
-                                                         m.pressing() ? (m.pressSeconds() ? std::to_wstring(m.pressSeconds()) + L" 秒後に " : std::wstring(L"まもなく ")) +
-                                                                            RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] + L" を押します"
-                                                                      : L"5 秒後に " + std::wstring(RealGameMode::PRESS_BUTTON_NAMES[m.pressButton]) + L" を 1 回押す",
-                                                         L""};
-        const bool close = RealGameMode::ROWS > 6;
-        const float step = close ? 21.5f : 38.f, tall = close ? step : 34.f;
-        if (m.row >= 0 && m.row < RealGameMode::ROWS) {
-            const float selected = 88 + float(m.row) * step;
-            gfx.round(rectF(40, selected, 640, selected + tall), 8, rgb(84, 104, 190));
-        }
+        const std::wstring who = L"2P"; // (the seat the AI plays)
+        gfx.fitText(L"実機の 2P を Juraic が操作", 0, 30, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
+        const unsigned tint = levelColor(m.shownLevel());
+        std::wstring rows[RealGameMode::ROWS], values[RealGameMode::ROWS];
+        rows[RealGameMode::ROW_STYLE] = L"AI", values[RealGameMode::ROW_STYLE] = m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）";
+        rows[RealGameMode::ROW_LEVEL] = L"レベル", values[RealGameMode::ROW_LEVEL] = levelText(m.shownLevel(), m.cancels());
+#if JURAIC_REALGAME_MEMORY
+        rows[RealGameMode::ROW_SOURCE] = L"盤面の取得方法";
+        values[RealGameMode::ROW_SOURCE] = m.source==RealGameMode::SOURCE_FIRST_CANCEL?L"メモリ読み取り（キャンセルあり）":m.source==RealGameMode::SOURCE_FIRST?L"メモリ読み取り（キャンセルなし）":
+                                                             m.memoryEnabled?L"画面認識（メモリ併用・非推奨）":L"画面認識（非推奨）";
+#endif
+        rows[RealGameMode::ROW_READ] = m.reading == RealGameMode::Reading::Off ? L"読み取り開始" : L"読み取り停止";
+        values[RealGameMode::ROW_READ] = m.reading == RealGameMode::Reading::On ? L"読み取り中" : m.reading == RealGameMode::Reading::Choosing ? L"ウィンドウを選択中" : L"";
+        rows[RealGameMode::ROW_PLAY] = who + (m.playing ? L" の操作を停止" : L" の操作を開始");
+        if (m.playing) values[RealGameMode::ROW_PLAY] = L"操作中";
+        rows[RealGameMode::ROW_PRESS] = m.pressing() ? L"ボタン入力を中止" : who + L" のボタン入力";
+        values[RealGameMode::ROW_PRESS] = m.pressing() ? (m.pressSeconds() ? std::to_wstring(m.pressSeconds()) + L" 秒後に " : std::wstring(L"まもなく ")) +
+                                                             RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] + L" を押します"
+                                                       : L"5 秒後に " + std::wstring(RealGameMode::PRESS_BUTTON_NAMES[m.pressButton]) + L" を 1 回押す";
+#if JURAIC_REALGAME_MEMORY
+        static constexpr const wchar_t* inputNames[RealPad::WAYS] = {
+            L"仮想パッド（非推奨）", L"キー（スキャンコード）",
+            L"キー（仮想キー）", L"キー（メッセージ）",
+        };
+        rows[RealGameMode::ROW_WAY] = L"入力方式", values[RealGameMode::ROW_WAY] = inputNames[m.pad.way()];
+        rows[RealGameMode::ROW_LATE] = L"入力遅延テスト", values[RealGameMode::ROW_LATE] = m.lateTrial ? L"オン（非推奨）" : L"オフ";
+        rows[RealGameMode::ROW_LISTED] = L"先の組の読み取り", values[RealGameMode::ROW_LISTED] = m.listedPairs ? (m.sourceFirst() ? L"オン（NEXT 表示より先も取得）" : L"オン（メモリ使用時のみ）") : L"オフ";
+        rows[RealGameMode::ROW_RANDOM] = L"乱数の種の読み取り";
+        values[RealGameMode::ROW_RANDOM] = m.garbageRandom ? (m.sourceFirst() ? L"オン" : L"オン（メモリ使用時のみ）") : L"オフ";
+        rows[RealGameMode::ROW_OPPONENT_INPUT] = L"相手の入力の読み取り";
+        values[RealGameMode::ROW_OPPONENT_INPUT] = m.opponentInput ? (m.sourceFirst() ? L"オン" : L"オン（メモリ使用時のみ）") : L"オフ";
+#endif
+        rows[RealGameMode::ROW_BACK] = L"戻る";
+        int visible = 0;
+        for (int i = 0; i < RealGameMode::ROWS; ++i) visible += m.showRow(i);
+        const float step = visible > 6 ? 26.f : 38.f;
+        float y = 88;
         for (int i = 0; i < RealGameMode::ROWS; ++i) {
-            const float y = 88 + float(i) * step;
+            if (!m.showRow(i)) continue;
             const bool on = i == m.row;
-            gfx.text(rows[i], 64, y, 260, tall, 1, on ? rgb(255, 255, 255) : rgb(180, 188, 212));
-            gfx.text(values[i], 320, y, 300, tall, 1, i == RealGameMode::ROW_LEVEL ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 1);
+            if (on) gfx.round(rectF(40, y, 640, y + step), 8, rgb(84, 104, 190));
+            const ColorF label = on ? rgb(255, 255, 255) : rgb(180, 188, 212);
+            const ColorF value = i == RealGameMode::ROW_LEVEL
+                ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255);
+            gfx.fitText(rows[i], 64, y, 248, step, 1, label);
+            gfx.fitText(values[i], 318, y, 302, step, 1, value, 1);
+            y += step;
         }
-        // With the settings recommended the AI plays as it does in the matches of this program; with the others, weaker.
-        gfx.text(L"推奨設定（メモリ読み取り＋キーボード入力）では、本ソフト内の対戦と同等の強さです。", 44, 330 + below, 620, 20, 0, rgb(240, 196, 110));
-        gfx.text(L"画面認識・仮想パッド・入力遅延テストを使うと、遅延や誤認識のため弱くなります。", 44, 350 + below, 620, 20, 0, rgb(240, 196, 110));
-        // What is known of the reading (its counters only with the parts for finding faults).
         const bool debug = RealGameMode::DEBUG_PARTS;
-        std::vector<std::wstring> lines;
-        if (m.reading == RealGameMode::Reading::Off) {
-            lines.push_back(L"読み取っていません。「読み取り開始」で、実機のウィンドウを再検索します。");
-            lines.push_back(L"実機への入力には、キーボード入力（スキャンコード）を使います。");
-        } else if (m.reading == RealGameMode::Reading::Choosing) {
-            lines.push_back(L"実機のウィンドウを検索中です。実機のウィンドウをクリックして前面に表示すると、読み取りを開始します（次回以降は自動で検出します）。");
-        } else {
-            lines.push_back(L"読み取り中のウィンドウ: " + std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) +
-                            (debug ? L"（基準サイズ " + std::to_wstring(m.layout.baseWidth) + L" × " + std::to_wstring(m.layout.baseHeight) + L"）" : L""));
-            if (m.framesWithout > 60) lines.push_back(L"画面を取得できません（ウィンドウが最小化されていませんか）");
-            if (debug) {
-                const int64_t span = m.firstFrame >= 0 ? m.tracker.frame - m.firstFrame : 0;
-                lines.push_back(L"取得した画面: " + std::to_wstring(m.pictures) + L" 枚" + (span >= 60 ? L"（毎秒 " + std::to_wstring(int((m.pictures - 1) * 60 / span)) + L" 枚）" : L""));
-                lines.push_back(m.layoutOwn ? L"レイアウト定義: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"レイアウト定義: 内蔵値（実機の画像から計測）");
-                if (!m.layoutError.empty()) lines.push_back(std::wstring(RealGameMode::LAYOUT_FILE) + L" を読み込めませんでした: " + m.layoutError);
-                lines.push_back(L"前回と一致しない読み取り: " + std::to_wstring(m.tracker.doubts) + L" 回" + (m.tracker.fromStart ? L"" : L"（対戦開始時から読み取っていません）"));
-                lines.push_back(L"設置位置を特定できた組: " + std::to_wstring(m.follow.placements) + L"　保留した予告: " + std::to_wstring(m.follow.held) + L" 回");
-                lines.push_back(L"計算上の盤面と画面の照合: " + std::to_wstring(m.follow.checks) + L" 回中 " + std::to_wstring(m.follow.misses) + L" 回不一致");
+        {
+            y += 8;
+#if JURAIC_REALGAME_MEMORY
+            gfx.fitText(m.memoryText(), 44, y, 590, 20, 0, m.memoryUsed ? rgb(120, 230, 180) : rgb(240, 196, 110));
+            y += 20;
+#endif
+            // What is known of the reading (its counters only with the parts for finding faults).
+            std::vector<std::wstring> lines;
+            if (!m.padError.empty()) lines.push_back(L"入力方式を開始できません");
+            if (!m.recordError.empty()) lines.push_back(L"記録を保存できません");
+            if (m.reading == RealGameMode::Reading::Off) {
+                lines.push_back(L"読み取っていません。「読み取り開始」で、実機のウィンドウを再検索します。");
+#if JURAIC_REALGAME_MEMORY
+                lines.push_back(L"実機への入力には、「入力方式」で選んだ方法を使います（キーボード入力を推奨。仮想パッドは遅延があるため非推奨）。");
+#else
+                lines.push_back(L"実機への入力には、キーボード入力（スキャンコード）を使います。");
+#endif
+            } else if (m.reading == RealGameMode::Reading::Choosing) {
+                lines.push_back(L"実機のウィンドウを検索中です。実機のウィンドウをクリックして前面に表示すると、読み取りを開始します（次回以降は自動で検出します）。");
+            } else {
+                lines.push_back(L"読み取り中のウィンドウ: " + std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) +
+                                (debug ? L"（基準サイズ " + std::to_wstring(m.layout.baseWidth) + L" × " + std::to_wstring(m.layout.baseHeight) + L"）" : L""));
+                if (m.framesWithout > 60) lines.push_back(L"画面を取得できません（ウィンドウが最小化されていませんか）");
+                if (debug) {
+                    const int64_t span = m.firstFrame >= 0 ? m.tracker.frame - m.firstFrame : 0;
+                    lines.push_back(L"取得した画面: " + std::to_wstring(m.pictures) + L" 枚" + (span >= 60 ? L"（毎秒 " + std::to_wstring(int((m.pictures - 1) * 60 / span)) + L" 枚）" : L""));
+                    lines.push_back(m.layoutOwn ? L"レイアウト定義: " + std::wstring(RealGameMode::LAYOUT_FILE) : L"レイアウト定義: 内蔵値（実機の画像から計測）");
+                    if (!m.layoutError.empty()) lines.push_back(std::wstring(RealGameMode::LAYOUT_FILE) + L" を読み込めませんでした: " + m.layoutError);
+                    lines.push_back(L"前回と一致しない読み取り: " + std::to_wstring(m.tracker.doubts) + L" 回" + (m.tracker.fromStart ? L"" : L"（対戦開始時から読み取っていません）"));
+                    lines.push_back(L"設置位置を特定できた組: " + std::to_wstring(m.follow.placements) + L"　保留した予告: " + std::to_wstring(m.follow.held) + L" 回");
+                    lines.push_back(L"計算上の盤面と画面の照合: " + std::to_wstring(m.follow.checks) + L" 回中 " + std::to_wstring(m.follow.misses) + L" 回不一致");
+                }
+            }
+            if (m.pressing() && m.pressSeconds())
+                lines.push_back(std::to_wstring(m.pressSeconds()) + L" 秒後に " + who + L" のボタン " + RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] +
+                                L" を押します。実機のウィンドウをクリックして前面に表示してください。");
+            if (m.seat == 1 && m.reading == RealGameMode::Reading::On && m.menu != realgame::Menu::None)
+                lines.push_back(std::wstring(L"実機のメニュー: ") +
+                                (m.menu == realgame::Menu::PlayersWaiting ? L"にんずうセレクト（2P の枠が未確定）"
+                                 : m.menu == realgame::Menu::Players      ? L"にんずうセレクト"
+                                 : m.menu == realgame::Menu::Characters   ? L"キャラクターセレクト（2P の決定待ち）"
+                                                                          : L"キャラクターセレクト（2P は決定済み）") +
+                                (debug && m.automaticMenuInput() ? L"　A の入力回数: " + std::to_wstring(m.presser.presses) : std::wstring()));
+            if (m.record.isOpen())
+                lines.push_back(L"記録: " + m.record.folder().wstring() + L"（画像 " + std::to_wstring(m.record.picturesTaken()) + L" 枚）");
+            if (m.pad.running() && m.pad.byKeys())
+                lines.push_back(std::wstring(L"入力方式: ") + RealPad::WAY_NAMES[m.pad.way()] + L"　キー送信 " + std::to_wstring(m.pad.keys.sent.load()) + L" 回（実機のウィンドウが前面にないため未送信 " +
+                                std::to_wstring(m.pad.keys.away.load()) + L" 回、送信失敗 " + std::to_wstring(m.pad.keys.refused.load()) + L" 回）　設定ファイルから取得したキー " +
+                                std::to_wstring(m.pad.keys.keysRead) + L"／6");
+            else if (m.pad.running())
+                lines.push_back(L"仮想パッド: 接続中（XInput " + std::to_wstring(m.pad.xinputSlot() + 1) + L" 番）" +
+                                (debug && m.playing ? L"　操作した組: " + std::to_wstring(m.driver.played) + L"　画面認識による位置補正の回数: " + std::to_wstring(m.driver.corrected) : L""));
+#if JURAIC_REALGAME_MEMORY
+            if (debug && m.memoryFirst()) lines.push_back(m.primaryLine());
+#endif
+            if (debug && m.playing && !m.memoryFirst())
+                lines.push_back(L"入力遅延: " + std::to_wstring(m.driver.lag) + L" フレーム（" +
+                                (m.driver.lags.empty() ? std::wstring(L"未計測") : L"画面から " + std::to_wstring(m.driver.lags.size()) + L" 回計測") + L"）　回転: " +
+                                (m.driver.turnsSwapped ? L"左右の回転ボタンを入れ替えて送信中" : L"入れ替えずに送信中"));
+#if JURAIC_REALGAME_MEMORY
+            if(m.driver.nativeRecoveryState==4)lines.push_back(L"入力再開待ち: 操作中の組と組番号を再確認中");
+#endif
+            if (!lines.empty()) {
+                const float lineHeight = std::min(20.f, (640 - y) / float(lines.size()));
+                for (const auto& line : lines) {
+                    gfx.fitText(line, 44, y, 590, lineHeight, 0, rgb(200, 206, 226));
+                    y += lineHeight;
+                }
             }
         }
-        if (m.pressing() && m.pressSeconds())
-            lines.push_back(std::to_wstring(m.pressSeconds()) + L" 秒後に 2P のボタン " + RealGameMode::PRESS_BUTTON_NAMES[m.pressButton] +
-                            L" を押します。実機のウィンドウをクリックして前面に表示してください。");
-        if (m.reading == RealGameMode::Reading::On && m.menu != realgame::Menu::None)
-            lines.push_back(std::wstring(L"実機のメニュー: ") +
-                            (m.menu == realgame::Menu::PlayersWaiting ? L"にんずうセレクト（2P の枠が未確定）"
-                             : m.menu == realgame::Menu::Players      ? L"にんずうセレクト"
-                             : m.menu == realgame::Menu::Characters   ? L"キャラクターセレクト（2P の決定待ち）"
-                                                                      : L"キャラクターセレクト（2P は決定済み）") +
-                            (debug && m.automaticMenuInput() ? L"　A の入力回数: " + std::to_wstring(m.presser.presses) : std::wstring()));
-        if (m.record.isOpen())
-            lines.push_back(L"記録: " + m.record.folder().wstring() + L"（画像 " + std::to_wstring(m.record.picturesTaken()) + L" 枚）");
-        if (m.pad.running() && m.pad.byKeys())
-            lines.push_back(std::wstring(L"入力方式: ") + RealPad::WAY_NAMES[m.pad.way()] + L"　キー送信 " + std::to_wstring(m.pad.keys.sent.load()) + L" 回（実機のウィンドウが前面にないため未送信 " +
-                            std::to_wstring(m.pad.keys.away.load()) + L" 回、送信失敗 " + std::to_wstring(m.pad.keys.refused.load()) + L" 回）　設定ファイルから取得したキー " +
-                            std::to_wstring(m.pad.keys.keysRead) + L"／6");
-        else if (m.pad.running())
-            lines.push_back(L"仮想パッド: 接続中（XInput " + std::to_wstring(m.pad.xinputSlot() + 1) + L" 番）" +
-                            (debug && m.playing ? L"　操作した組: " + std::to_wstring(m.driver.played) + L"　画面認識による位置補正の回数: " + std::to_wstring(m.driver.corrected) : L""));
-        if (debug && m.playing && !m.memoryFirst())
-            lines.push_back(L"入力遅延: " + std::to_wstring(m.driver.lag) + L" フレーム（" +
-                            (m.driver.lags.empty() ? std::wstring(L"未計測") : L"画面から " + std::to_wstring(m.driver.lags.size()) + L" 回計測") + L"）　回転: " +
-                            (m.driver.turnsSwapped ? L"左右の回転ボタンを入れ替えて送信中" : L"入れ替えずに送信中"));
-        for (size_t i = 0; i < lines.size(); ++i) gfx.text(lines[i], 44, 400 + below + float(i) * 20, 620, 20, 0, rgb(200, 206, 226));
         // The two sides as they are read: the pieces at rest, the pair in play, the window of the next pairs, the notice.
         const float cell = 22;
         for (int s = 0; s < 2; ++s) {
             const realgame::SideTrack& t = m.tracker.side[s];
             const float x0 = 700 + float(s) * 290, bottom = 120 + 13 * cell;
-            gfx.text(s ? L"2P（Juraic）" : L"1P", x0, 80, W * cell, 26, 0, rgb(220, 226, 240), 0);
+            gfx.fitText(s == m.seat ? who + L"（Juraic）" : std::wstring(s ? L"2P" : L"1P"), x0, 80, W * cell, 26, 0, rgb(220, 226, 240), 0);
             gfx.fill(rectF(x0, bottom - 13 * cell, x0 + W * cell, bottom - 12 * cell), rgb(26, 28, 40));
             gfx.fill(rectF(x0, bottom - 12 * cell, x0 + W * cell, bottom), rgb(36, 40, 60));
             showPicture(s?PICTURE_FIELD2:PICTURE_FIELD1,rectF(x0,bottom-12*cell,x0+W*cell,bottom));
             if (m.reading != RealGameMode::Reading::On) continue;
             const auto at = [&](int x, float height) { return std::pair<float, float>(x0 + (float(x) + 0.5f) * cell, bottom - height * cell); };
+#if JURAIC_REALGAME_MEMORY
+            const auto* memoryField=m.follow.memoryRestingField(s);
+            const auto& field=memoryField?*memoryField:t.resting;
+            if(memoryField){
+                gfx.fill(rectF(x0,bottom-14*cell,x0+W*cell,bottom-13*cell),rgb(26,28,40));
+                for(int x=0;x<W;++x)if(const Cell c=field.row14[size_t(x)])gfx.piece(c,at(x,13.5f).first,at(x,13.5f).second,1,1,cell);
+            }
+#else
             const auto& field=t.resting;
+#endif
             for (int x = 0; x < W; ++x)
                 for (int y = 0; y < H; ++y)
                     if (const Cell c = field.f.get(x, y)) gfx.piece(c, at(x, float(y) + 0.5f).first, at(x, float(y) + 0.5f).second, 1, 1, cell);
@@ -1712,15 +1832,11 @@ struct App {
                     gfx.piece(t.next[n].child, nx, ny, 1, 1, cell * 0.9f);
                     gfx.piece(t.next[n].axis, nx, ny + cell * 0.9f, 1, 1, cell * 0.9f);
                 }
-            gfx.text(L"おじゃま " + std::to_wstring(m.follow.notice[s]), x0, bottom + 8, W * cell + 50, 24, 0, rgb(220, 226, 240), -1);
-            gfx.text(!t.clear ? L"エフェクト等で読み取り不可" : m.tracker.still(s) ? L"静止中" : L"動作中", x0, bottom + 34, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
-            gfx.text(L"組 " + std::to_wstring(t.pairs), x0, bottom + 60, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
+            gfx.fitText(L"おじゃま " + std::to_wstring(m.follow.notice[s]), x0, bottom + 8, W * cell + 50, 24, 0, rgb(220, 226, 240), -1);
+            gfx.fitText(!t.clear ? L"エフェクト等で読み取り不可" : m.tracker.still(s) ? L"静止中" : L"動作中", x0, bottom + 34, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
+            gfx.fitText(L"組 " + std::to_wstring(t.pairs), x0, bottom + 60, W * cell + 50, 24, 0, rgb(180, 188, 212), -1);
         }
-        const wchar_t* notes[] = {L"同じ PC 上の実機のオフライン 2 人対戦で、2P を Juraic が操作します（1P はあなたが操作します。オンライン対戦では使用できません）。",
-                                  L"0.9.7.3 統合・検証用。キーボード入力ではメニューを手動で操作します。読み取り後、AI 操作の行で Enter を押すまで AI は開始しません。",
-                                  L"AI とレベルは、この画面を開くたびに設定の 2P 側の値になります。仮想パッド（非推奨）の使用には ViGEmBus ドライバーが必要です。"};
-        for (int i = 0; i < 3; ++i) gfx.text(notes[i], 0, 592 + float(i) * 18, CANVAS_W, 18, 0, rgb(150, 158, 186), 0);
-        gfx.text(debug ? L"↑↓: 選択　←→: 変更　Enter: 決定　S: 実機の画面を保存　Esc: 戻る" : L"↑↓ で選ぶ　←→ で変える　Enter で決定　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
+        gfx.fitText(debug ? L"↑↓: 選択　←→: 変更　Enter: 決定　S: 実機の画面を保存　Esc: 戻る" : L"↑↓ で選ぶ　←→ で変える　Enter で決定　Esc で戻る", 0, 650, CANVAS_W, 26, 0, rgb(150, 158, 186), 0);
     }
 #endif
     void drawLobby() {
@@ -2021,7 +2137,7 @@ struct App {
         const int mode = frames > 0 ? frames % 10 : 0;
         screen = frames == -2 || frames == -3 ? Screen::Bindings : frames == -4 ? Screen::NetLobby : frames == -6 ? Screen::Versus
 #ifdef _WIN32
-                 : frames == -7 ? Screen::RealGame
+                 : (frames == -7 || frames == -15) ? Screen::RealGame
 #endif
                  : frames == -8 ? Screen::ArenaLobby : frames == -9 || frames == -10 ? Screen::Arena
                  : frames < 0 ? Screen::Settings : frames == 0 ? Screen::Menu : mode == 8 ? Screen::Net : mode >= 2 ? Screen::Versus : Screen::Toko;
@@ -2125,7 +2241,7 @@ struct App {
             say(good ? L"the port of the lobby: taken as typed, from 1 to 65535" : L"the port of the lobby: a port typed is not taken as it should be");
         }
 #ifdef _WIN32
-        if (frames == -7) {
+        if (frames == -7 || frames == -15) {
             // The screen of the mode that plays the real game's 2P (updateRealGame). Result 16 when it does not do what
             // it says: it opens with the AI of the 2P side in the settings, on the row of the AI; to the left there - the
             // other AI; down to the row of the level and to the right LEVELS times, a press at a time - round past Lv 36
@@ -2136,21 +2252,56 @@ struct App {
             bool good = realGame.style == style && realGame.level == level && realGame.row == RealGameMode::ROW_STYLE;
             const auto frame = [&](unsigned held) { selfNav = held, updateRealGame(), selfNavWas = selfNav; };
             const unsigned right = 1u << NAV_RIGHT, left = 1u << NAV_LEFT, below = 1u << NAV_DOWN, above = 1u << NAV_UP;
-            frame(left), frame(0);
-            good = good && realGame.style == 1 - style;
-            frame(below), frame(0);
-            good = good && realGame.row == RealGameMode::ROW_LEVEL;
+            if (style == 0) frame(left), frame(0);
+            good = good && realGame.style == 1 && realGame.shownLevel() == ai::LEVELS;
+            frame(below), frame(0), frame(right), frame(0);
+            good = good && realGame.row == RealGameMode::ROW_LEVEL && realGame.level == level && !realGame.cancels();
+            frame(above), frame(0), frame(left), frame(0), frame(below), frame(0);
+            good = good && realGame.style == 0 && realGame.row == RealGameMode::ROW_LEVEL;
             bool passed = false;
             for (int k = 0; k < ai::LAST_LEVEL; ++k) frame(right), frame(0), passed = passed || realGame.level == 1;
             good = good && realGame.level == level && (passed || level == 1);
             frame(left), frame(0);
             good = good && realGame.level == (level == 1 ? ai::LAST_LEVEL : level - 1);
             frame(right), frame(0), frame(left | right), frame(0);
-            good = good && realGame.level == level && settings.aiStyle == style && settings.aiLevel == level && screen == Screen::RealGame;
+            good = good && realGame.level == level && screen == Screen::RealGame && realGame.seat == 1;
             frame(below), frame(0);
+#if JURAIC_REALGAME_MEMORY
+            good = good && realGame.row==RealGameMode::ROW_SOURCE;
+            good = good && realGame.source == RealGameMode::SOURCE_FIRST && realGame.pad.way() == RealPad::WAY_KEYS;
+            good = good && !realGame.lateTrial && !realGame.listedPairs && !realGame.garbageRandom && !realGame.opponentInput;
+            const bool memoryBefore=realGame.memoryEnabled;
+            frame(right),frame(0);good=good && realGame.memoryEnabled!=memoryBefore;
+            frame(left),frame(0);good=good && realGame.memoryEnabled==memoryBefore;
+            frame(below),frame(0);
+#endif
             good = good && realGame.row == RealGameMode::ROW_READ;
             frame(above), frame(0);
+#if JURAIC_REALGAME_MEMORY
+            good = good && realGame.row==RealGameMode::ROW_SOURCE;
+            frame(above),frame(0);
+#endif
             good = good && realGame.row == RealGameMode::ROW_LEVEL;
+#if JURAIC_REALGAME_MEMORY
+            realGame.row = RealGameMode::ROW_SOURCE;
+            realGame.change(2);
+            realGame.row = RealGameMode::ROW_LEVEL;
+            realGame.level = ai::LAST_LEVEL;
+            realGame.ex = false;
+            frame(right), frame(0);
+            good = good && realGame.cancels() && realGame.level == ai::LAST_LEVEL;
+            frame(left), frame(0);
+            good = good && !realGame.cancels() && realGame.level == ai::LAST_LEVEL;
+            if (frames == -15) {
+                frame(right), frame(0);
+                good = good && realGame.cancels() && realGame.shownLevel() == ai::LAST_LEVEL;
+            } else {
+                realGame.row = RealGameMode::ROW_SOURCE;
+                realGame.change(-2);
+                realGame.row = RealGameMode::ROW_LEVEL;
+                realGame.level = level;
+            }
+#endif
             selfNav = selfNavWas = 0;
             if (!good) result = 16;
             say(good ? L"実機対戦の設定画面のテストに合格しました" : L"実機対戦の設定画面のテストに失敗しました");
@@ -2174,6 +2325,7 @@ struct App {
             };
             settings.aiLevel = 10;
             const int style = settings.aiStyle;
+            settings.aiStyle = 0;
             at(5, true);
             for (int f = 1; f < 40; ++f) at(5, false);
             bool good = settings.aiLevel == 15;
@@ -2185,7 +2337,9 @@ struct App {
             mouseDown = false, updateVersus();
             at(0, true);
             for (int f = 1; f < 100; ++f) at(0, false);
-            good = good && settings.aiStyle != style && settings.aiLevel == 26 && v.state == Versus::MatchEnd;
+            good = good && settings.aiStyle == 1 && settings.aiLevel == 26 && v.state == Versus::MatchEnd;
+            mouseDown = false, updateVersus(), at(5, true);
+            good = good && settings.aiLevel == 26 && aiOfLevel(settings.aiLevel, settings.aiStyle) == "x3q";
             mouseDown = false, updateVersus();
 #ifdef _WIN32
             // The window's part (windowProc), on a window that is never shown: the button that goes down takes the
@@ -2208,15 +2362,17 @@ struct App {
             {
                 const int level = settings.aiLevel, ex = settings.aiEx;
                 const bool cancel = settings.rules.cancel;
-                settings.rules.cancel = true, settings.aiLevel = ai::LEVELS, settings.aiEx = 0;
+                settings.aiStyle = 0, settings.rules.cancel = true, settings.aiLevel = ai::LEVELS, settings.aiEx = 0;
                 at(5, true), mouseDown = false, updateVersus();
                 good = good && settings.aiLevel == ai::LEVELS && settings.aiEx == 1;
                 at(5, true), mouseDown = false, updateVersus();
                 good = good && settings.aiLevel == ai::LAST_LEVEL && settings.aiEx == 0;
                 at(5, true), mouseDown = false, updateVersus();
+                good = good && settings.aiLevel == ai::LAST_LEVEL && settings.aiEx == 1;
+                at(5, true), mouseDown = false, updateVersus();
                 good = good && settings.aiLevel == 1 && settings.aiEx == 0;
                 at(3, true), mouseDown = false, updateVersus();
-                good = good && settings.aiLevel == ai::LAST_LEVEL && settings.aiEx == 0;
+                good = good && settings.aiLevel == ai::LAST_LEVEL && settings.aiEx == 1;
                 const auto soonest = [&](const char* name, int mark, bool with) {
                     Versus t;
                     settings.rules.cancel = with, settings.aiEx = mark;
@@ -2224,8 +2380,8 @@ struct App {
                     const ai::PlacementAgent* placing = dynamic_cast<const ai::PlacementAgent*>(t.agent[1].get());
                     return placing && placing->fastestWays;
                 };
-                good = good && soonest("x3", 1, true) && !soonest("x3", 0, true) && !soonest("x3", 1, false) && !soonest("lv35", 1, true) && !soonest("lv37", 1, true);
-                settings.aiLevel = level, settings.aiEx = ex, settings.rules.cancel = cancel;
+                good = good && soonest("x3", 1, true) && !soonest("x3", 0, true) && !soonest("x3", 1, false) && !soonest("lv35", 1, true) && soonest("lv37", 1, true) && !soonest("lv37", 0, true) && !soonest("x3q", 1, true);
+                settings.aiStyle = style, settings.aiLevel = level, settings.aiEx = ex, settings.rules.cancel = cancel;
             }
             clicked = false;
             if (!good) result = 15;
@@ -2749,6 +2905,8 @@ int main(int argc, char** argv) {
     }
 }
 #else
+#include "media_check_win.h"
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     static App a; // large (move history): not on the stack
@@ -2775,6 +2933,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         if (std::wstring(argv[i]) == L"--board") board = argv[i + 1];
         if (std::wstring(argv[i]) == L"--replay") replay = argv[i + 1];
         if (std::wstring(argv[i]) == L"--check-replay") return checkReplay(argv[i + 1]);
+        if (std::wstring(argv[i]) == L"--check-media") return checkPackageMedia(a, argv[i + 1]);
         if (std::wstring(argv[i]) == L"--net-test" && i + 3 < argc) {
             const int host = std::wstring(argv[i + 1]) == L"host" ? 1 : std::wstring(argv[i + 1]) == L"host4" ? 2 : std::wstring(argv[i + 1]) == L"hostall" ? 3 : 0;
             const std::wstring address = host ? L"" : argv[i + 2];
@@ -2795,7 +2954,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassW(&wc);
     RECT rc{0, 0, 1280, 720};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    a.window = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Juraic Field MEMPRIVATE 0.9.7.3 integration 2P (experimental)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+    a.window = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Juraic Field 0.9.8.1", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, instance, nullptr);
     if (!a.window || !a.createTarget()) return 1;
     a.audio.init();

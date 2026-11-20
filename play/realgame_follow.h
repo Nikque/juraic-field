@@ -17,6 +17,14 @@
 // What the screen does not tell: the points of the down key (a point a row, which count towards garbage), so the
 // garbage a chain sends is reckoned short by a little at times (Follower::slack).
 #include "realgame_read.h"
+#ifndef JURAIC_REALGAME_MEMORY
+#define JURAIC_REALGAME_MEMORY 0
+#endif
+#if JURAIC_REALGAME_MEMORY
+#include "memory/published_next14.h"
+#include "../core/diagnostic_trace.h"
+#include <tuple>
+#endif
 
 namespace play::realgame {
 
@@ -73,6 +81,37 @@ public:
     int placements = 0;         // pairs whose placement was found
     int checks = 0, misses = 0; // pieces at rest checked against the game as a new pair appeared, and found other than it
     int held = 0;               // notices held back (more than reckoned) until they had read the same for noticeLong frames
+#if JURAIC_REALGAME_MEMORY
+    int memoryUpdates = 0;
+    // Caller has proved process, round, pair counts and freshness. This last check is transactional:
+    // never turn a field including a landed pair into the base of the pair that is still being driven.
+    bool useMemoryFields(const std::array<juraic::GameField,2>& fields) {
+        clearMemoryFields();
+        for(int s=0;s<2;++s){
+            const auto& t=tracker.side[s];
+            if(!tracker.still(s) || !(shown(fields[size_t(s)])==shown(t.resting)))return false;
+            for(int y=0;y<14;++y)for(int x=0;x<6;++x)
+                if(unsigned(y==13?fields[size_t(s)].row14[size_t(x)]:fields[size_t(s)].f.get(x,y))>6)return false;
+        }
+        for(int s=0;s<2;++s){
+            memoryFields_[size_t(s)]=fields[size_t(s)];
+            const auto& t=tracker.side[s];memoryBase_[size_t(s)]=t.inHand && t.pair.seen && !t.pair.axisHidden && !t.pair.childHidden &&
+                t.resting==t.under && model[s].known;
+            if(memoryBase_[size_t(s)]){model[s].core.field=fields[size_t(s)];model[s].unsure=0;}
+        }
+        memoryCurrent_=true;++memoryUpdates;return true;
+    }
+    const juraic::GameField* memoryRestingField(int side) const {return memoryCurrent_ && side>=0 && side<2?&memoryFields_[size_t(side)]:nullptr;}
+    const juraic::GameField* memoryField(int side) const {return memoryRestingField(side) && memoryBase_[size_t(side)]?memoryRestingField(side):nullptr;}
+    void clearMemoryFields(){memoryCurrent_=false;memoryBase_={};memoryNext_={};}
+    bool useMemoryNext(const PublishedNextVerified14& n,const MemoryMotionSample14& m,int seat,uint64_t now,uint32_t pid){
+        if(seat<0||seat>1)return false;memoryNext_[size_t(seat)].reset();
+        if(!usablePublishedNext14(n,m,tracker,seat,now,pid))return false;
+        memoryNext_[size_t(seat)]=n;return true;
+    }
+    bool memoryNextAvailable(int seat)const{return seat>=0&&seat<2&&bool(memoryNext_[size_t(seat)]);}
+    void noteNextUnavailable(int seat){if(seat>=0&&seat<2)nextObservationDiagnostic_[size_t(seat)]={};}
+#endif
     // The last notice of each side that began to be held back (takeNotice): the frame, what it read, and what the most
     // it could show was made of (ceiling) - the notice taken before, the garbage the other side's chains were reckoned to
     // bring still, what its pair lying would send, and the slack. `begun`: how many began so; `on`: it is held back now
@@ -86,6 +125,9 @@ public:
     Hold holding[2];
 
     void reset() {
+#if JURAIC_REALGAME_MEMORY
+        clearMemoryFields();memoryUpdates=0;
+#endif
         tracker.reset();
         for (SideModel& m : model) m = SideModel{};
         notice[0] = notice[1] = 0;
@@ -119,6 +161,9 @@ public:
     }
 
     void step(const Reading& r, int64_t at) {
+#if JURAIC_REALGAME_MEMORY
+        clearMemoryFields();
+#endif
         const Before previous[2] = {before(tracker.side[0]), before(tracker.side[1])};
         tracker.step(r, at);
         seen[0].take(tracker, 0), seen[1].take(tracker, 1);
@@ -215,6 +260,9 @@ public:
     bool observe(int me, const juraic::Rules& real, juraic::ai::Observation& o) const {
         if (!observeSpawn(tracker, me, real, o)) return false;
         complete(o, tracker.frame);
+#if JURAIC_REALGAME_MEMORY
+        applyMemoryNext(o);
+#endif
         return true;
     }
     // ... and with the own side as the caller follows it at the frame `at` of the clock (observeWith) - the frame its
@@ -222,9 +270,41 @@ public:
     void observeAt(int me, const juraic::Rules& real, const juraic::Player& own, int64_t at, juraic::ai::Observation& o) const {
         observeWith(tracker, me, real, &own, at, o);
         complete(o, at);
+#if JURAIC_REALGAME_MEMORY
+        applyMemoryNext(o);
+#endif
     }
 
 private:
+#if JURAIC_REALGAME_MEMORY
+    std::array<std::optional<PublishedNextVerified14>,2> memoryNext_;
+    mutable std::array<std::tuple<uint64_t,int64_t,int,int,int64_t,uint32_t>,2> nextObservationDiagnostic_{};
+    void logNextObservation(int seat,const PublishedNextVerified14& n,int status,size_t prefix,int64_t observedFrame)const{
+        auto& trace=juraic::inputdiag::trace;if(!trace.active())return;
+        auto key=std::tuple{trace.session(),tracker.roundStart,tracker.side[seat].pairs,status,int64_t(n.generation),n.context.process.pid};
+        if(key==nextObservationDiagnostic_[size_t(seat)])return;
+        nextObservationDiagnostic_[size_t(seat)]=key;
+        trace.emit(juraic::inputdiag::NEXT_OBSERVATION,{seat,tracker.roundStart,tracker.side[seat].pairs,tracker.frame,status,
+            int64_t(n.generation),n.pair,n.frame,int64_t(n.observedMs),n.tick,observedFrame,int64_t(prefix),n.context.process.pid});
+    }
+    void applyMemoryNext(juraic::ai::Observation& o)const{
+        for(int seat=0;seat<2;++seat)if(const auto& n=memoryNext_[size_t(seat)];n){
+            const auto& t=tracker.side[seat];
+            if(n->roundStart!=tracker.roundStart||n->pair!=uint32_t(t.pairs)||t.unseen||n->frame>tracker.frame||tracker.frame-n->frame>3||
+               !publishedNextMatchesImage14(*n,tracker,seat)){logNextObservation(seat,*n,2,0,o.frame);continue;}
+            auto& seen=seat==0?o.tsumo:o.tsumo1;
+            // Do not fill an unknown earlier pair to reach these two published indices.
+            if(t.pairs<1||seen.pairs.size()<size_t(t.pairs)){logNextObservation(seat,*n,3,seen.pairs.size(),o.frame);continue;}
+            const auto prefix=seen.pairs.size();
+            if(seen.pairs.size()<size_t(t.pairs+2))seen.pairs.resize(size_t(t.pairs+2));
+            seen.pairs[size_t(t.pairs)]=n->next[0];seen.pairs[size_t(t.pairs+1)]=n->next[1];
+            logNextObservation(seat,*n,1,prefix,o.frame);
+        }
+    }
+    bool memoryCurrent_=false;
+    std::array<bool,2> memoryBase_{};
+    std::array<juraic::GameField,2> memoryFields_;
+#endif
     int round = 0;
     struct Told {
         int pair = -1;
@@ -248,6 +328,10 @@ private:
     void complete(juraic::ai::Observation& o, int64_t at) const {
         for (int s = 0; s < 2; ++s) {
             juraic::Player& p = o.player[s];
+#if JURAIC_REALGAME_MEMORY
+            const auto ownBefore=p.field;
+            const bool currentOwn=s==o.me && p.moves==tracker.side[s].pairs-1 && (p.phase==juraic::Phase::Control || p.phase==juraic::Phase::Next);
+#endif
             p.field = withHidden(p.field, model[s].core.field); // (the 13th and 14th rows as the moves followed put them)
             if (s != o.me && model[s].running) {
                 const juraic::Player run = runTo(model[s], at);
@@ -258,6 +342,14 @@ private:
             p.incoming = {};
             (tracker.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = notice[s];
             if (model[s].known) p.scoring = model[s].core.scoring;
+#if JURAIC_REALGAME_MEMORY
+            if(s==o.me && memoryCurrent_){
+                // The input engine may already have locked this pair (including an entirely hidden
+                // placement). A fresh earlier picture is still not the base of that future state.
+                if(const auto* field=memoryField(s);currentOwn && field && shown(ownBefore)==shown(*field))p.field=*field;
+                else p.field=ownBefore;
+            }else if(const auto* field=memoryRestingField(s);field && shown(p.field)==shown(*field))p.field=*field;
+#endif
         }
     }
 

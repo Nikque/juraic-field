@@ -1,11 +1,17 @@
 cmake_minimum_required(VERSION 3.16)
-project(juraic_field VERSION 0.9.8 LANGUAGES CXX)
+project(juraic_field VERSION 0.9.8.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 if(MSVC)
     add_compile_options(/utf-8)
+    # Do not embed checkout paths in C++/WinRT error information.
+    add_compile_definitions(WINRT_NO_SOURCE_LOCATION)
+    option(JURAIC_REALGAME_1P "Reserved option; keep OFF" OFF)
+    if(JURAIC_REALGAME_1P)
+        message(FATAL_ERROR "JURAIC_REALGAME_1P must be OFF")
+    endif()
     # Static runtime: the distributed executables need no extra DLL.
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
@@ -46,7 +52,7 @@ endif()
 
 if(MSVC)
     # The playable game (Direct2D, XAudio2). One self-contained executable.
-    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_capture_win.h play/realgame_pad_win.h play/realgame_film.h play/realgame_log.h play/realgame_menu.h play/realgame_pace.h play/start_beat.h game/link.h)
+    add_executable(juraic_field_game WIN32 play/main.cpp play/session.h play/view.h play/view_state.h play/canvas.h play/gfx.h play/gfx_d2d.h play/audio.h play/media.h play/settings.h play/pad.h play/input.h play/replay.h play/net.h play/udp.h play/netplay.h play/realgame_win.h play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_capture_win.h play/realgame_pad_win.h play/realgame_film.h play/realgame_topfilm.h play/realgame_log.h play/realgame_menu.h play/realgame_pace.h play/start_beat.h game/link.h)
     set_target_properties(juraic_field_game PROPERTIES OUTPUT_NAME JuraicField)
     target_link_libraries(juraic_field_game PRIVATE juraic_engine d2d1 dwrite windowscodecs xaudio2 mfplat mfreadwrite mfuuid ole32 shell32 comdlg32 user32 windowsapp xinput ws2_32 d3d11 dxgi dwmapi winmm)
     # The pad the mode of the real game presses 2P with: the client of the driver ViGEmBus (third_party/ViGEmClient, MIT).
@@ -59,6 +65,16 @@ if(MSVC)
     # With them, the watch over the window's thread (play/stall_win.h): where every thread is when the window stops
     # answering, named from the PDB built next to the program.
     option(JURAIC_REALGAME_DEBUG "Build the parts of the mode of the real game for finding faults" OFF)
+    option(JURAIC_REALGAME_MEMORY "Read offline 2P fields from a read-only process handle" ON)
+    if(JURAIC_REALGAME_MEMORY)
+        target_compile_definitions(juraic_field_game PRIVATE JURAIC_REALGAME_MEMORY=1)
+        # (play/main.cpp with the memory-first play in it has more sections than an object file holds otherwise)
+        if(MSVC)
+            target_compile_options(juraic_field_game PRIVATE /bigobj)
+        endif()
+        target_sources(juraic_field_game PRIVATE play/realgame_memory.h play/realgame_memory_win.h
+            play/memory/runtime14_win.h play/memory/sample14.h play/memory/service14.h)
+    endif()
     if(JURAIC_REALGAME_DEBUG)
         target_sources(juraic_field_game PRIVATE play/stall_win.h)
         target_compile_definitions(juraic_field_game PRIVATE JURAIC_REALGAME_DEBUG=1)
@@ -139,6 +155,7 @@ add_executable(ai_tune tools/ai_tune.cpp tools/toko_game.h ai/build.h ai/detect.
 target_link_libraries(ai_tune PRIVATE Threads::Threads)
 
 include(CTest)
+
 if(BUILD_TESTING)
     # Bitboard core and generator against cell-by-cell references, once with
     # the SSE implementation and once with the portable 64-bit one.
@@ -184,11 +201,15 @@ if(BUILD_TESTING)
     add_test(NAME arena_lines_on_this_machine COMMAND arena_tests)
     # Versus AI (ai/).
     add_executable(ai_tests tests/ai_tests.cpp ai/observe.h ai/duel.h ai/input.h ai/detect.h ai/params.h ai/build.h ai/gaze.h ai/value.h ai/exchange.h ai/pace.h ai/tactics.h ai/level.h)
-    target_link_libraries(ai_tests PRIVATE Threads::Threads)
+target_link_libraries(ai_tests PRIVATE Threads::Threads)
+    # (the tests keep many agents in one function: more than the megabyte a thread has on Windows; as much as elsewhere)
     if(MSVC)
         target_link_options(ai_tests PRIVATE /STACK:8388608)
     endif()
     add_test(NAME ai COMMAND ai_tests)
+    # The ways over soonest among the buttons of every frame (ai/fastest.h).
+    add_executable(fastest_tests tests/fastest_tests.cpp ai/fastest.h ai/input.h)
+    add_test(NAME ai_fastest_ways COMMAND fastest_tests)
     # The reading of the real game's screen (play/realgame_read.h, realgame_follow.h), with pictures drawn from rounds of this program.
     add_executable(realgame_tests tests/realgame_tests.cpp play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_film.h play/realgame_log.h play/realgame_menu.h play/realgame_pace.h ai/observe.h ai/agents.h)
     target_link_libraries(realgame_tests PRIVATE Threads::Threads)
@@ -232,6 +253,29 @@ if(BUILD_TESTING)
             add_test(NAME game_pads COMMAND pad_tests)
         endif()
         if(MSVC)
+            add_executable(realgame_memory_tests tests/realgame_memory_tests.cpp)
+            if(JURAIC_REALGAME_MEMORY)
+                target_compile_definitions(realgame_memory_tests PRIVATE JURAIC_REALGAME_MEMORY=1)
+                target_compile_definitions(realgame_tests PRIVATE JURAIC_REALGAME_MEMORY=1)
+                add_executable(realgame_predictive_input_tests tests/realgame_predictive_input_tests.cpp)
+                add_test(NAME realgame_predictive_input COMMAND realgame_predictive_input_tests)
+                add_executable(realgame_keys_tests tests/realgame_keys_tests.cpp play/realgame_keys_win.h)
+                target_include_directories(realgame_keys_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+                target_link_libraries(realgame_keys_tests PRIVATE user32)
+                add_test(NAME realgame_keys COMMAND realgame_keys_tests)
+                add_executable(realgame_memory_round_tests tests/realgame_tests.cpp)
+                target_compile_definitions(realgame_memory_round_tests PRIVATE JURAIC_REALGAME_MEMORY=1 JURAIC_MEMORY_ROUNDS_ONLY=1)
+                target_link_libraries(realgame_memory_round_tests PRIVATE Threads::Threads)
+                add_test(NAME realgame_memory_simulated_pad COMMAND realgame_memory_round_tests)
+                set_tests_properties(realgame_memory_simulated_pad PROPERTIES TIMEOUT 300)
+                foreach(part follow lifecycle data driver pagequery owner owned_pose owned_pose_gate motion published_next primary primary_play)
+                    add_executable(realgame_memory_${part}_tests tests/realgame_memory_${part}_tests.cpp)
+                    target_compile_definitions(realgame_memory_${part}_tests PRIVATE JURAIC_REALGAME_MEMORY=1)
+                    target_link_libraries(realgame_memory_${part}_tests PRIVATE Threads::Threads)
+                    add_test(NAME realgame_memory_${part} COMMAND realgame_memory_${part}_tests)
+                endforeach()
+            endif()
+            add_test(NAME realgame_memory_rights COMMAND realgame_memory_tests $<TARGET_FILE:juraic_field_game>)
             # The virtual pad of the mode of the real game (play/realgame_win.h): plugged in only with
             # JURAIC_TEST_VIRTUAL_PAD=1 set, skipped otherwise.
             add_executable(realgame_pad_tests tests/realgame_pad_tests.cpp play/realgame_win.h play/realgame_pad_win.h)

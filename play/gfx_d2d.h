@@ -3,6 +3,7 @@
 // (play/gfx.h builds the pieces of them).
 #include "canvas.h"
 #include <dwrite.h>
+#include <algorithm>
 #include <string>
 
 namespace play {
@@ -10,6 +11,7 @@ namespace play {
 struct GfxBase {
     ID2D1RenderTarget* rt = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
+    IDWriteFactory* textFactory = nullptr;
     IDWriteTextFormat* font[4]{}; // 0 small, 1 normal, 2 large, 3 huge
     bool shadow = false;          // text is drawn with a dark edge (a picture is behind it)
 
@@ -51,6 +53,31 @@ struct GfxBase {
         }
         brush->SetColor(c);
         rt->DrawText(s.c_str(), UINT32(s.size()), f, D2D1::RectF(x, y, x + w, y + h), brush);
+    }
+    void fitText(const std::wstring& s, float x, float y, float w, float h, int size, ColorF c, int align = -1) {
+        if (s.empty() || w <= 4 || h <= 0) return;
+        IDWriteTextLayout* layout = nullptr;
+        const float width = w - 4;
+        const UINT32 length = UINT32(s.size());
+        if (FAILED(textFactory->CreateTextLayout(s.c_str(), length, font[size], width, h, &layout))) return;
+        layout->SetTextAlignment(align < 0 ? DWRITE_TEXT_ALIGNMENT_LEADING : align == 0 ? DWRITE_TEXT_ALIGNMENT_CENTER : DWRITE_TEXT_ALIGNMENT_TRAILING);
+        DWRITE_TEXT_METRICS metrics{};
+        if (SUCCEEDED(layout->GetMetrics(&metrics))) {
+            const float scale = std::min({1.0f, width / metrics.widthIncludingTrailingWhitespace, h / metrics.height});
+            if (scale < 1.0f) layout->SetFontSize(font[size]->GetFontSize() * scale, DWRITE_TEXT_RANGE{0, length});
+        }
+        clip(D2D1::RectF(x, y, x + w, y + h));
+        if (shadow) {
+            brush->SetColor(D2D1::ColorF(0, 0, 0, 0.7f * c.a));
+            for (int k = 0; k < 4; ++k) {
+                const float dx = k & 1 ? 1.5f : -1.5f, dy = k & 2 ? 1.5f : -1.5f;
+                rt->DrawTextLayout(D2D1::Point2F(x + 2 + dx, y + dy), layout, brush);
+            }
+        }
+        brush->SetColor(c);
+        rt->DrawTextLayout(D2D1::Point2F(x + 2, y), layout, brush);
+        unclip();
+        layout->Release();
     }
 };
 
