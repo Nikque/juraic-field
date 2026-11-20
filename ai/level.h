@@ -19,7 +19,8 @@
 
 namespace juraic::ai {
 
-constexpr int LEVELS = 36;
+constexpr int LEVELS = 36; // calibrated legacy levels; x3 remains level 36
+constexpr int LAST_LEVEL = 37;
 
 struct LevelSettings {
     int handWait, seeLate, beamWidth, beamDepth, beamQueues, trialMaxAdd, keyRuns, thinkAgain, x2Depth, b0Noise;
@@ -77,6 +78,20 @@ constexpr int levelGroup(int level) { return level <= 9 ? 0 : level <= 20 ? 1 : 
 
 // `p` with the settings of a level. Level LEVELS, and any number that is no level, leaves p as it is.
 inline Params levelParams(Params p, int level) {
+    if (level == LAST_LEVEL) {
+        p.pokeExchange = 2;
+        p.pokeExchangeDepth = 3;
+        p.pokeExchangeMin = 6;
+        p.pokeExchangeLeft = 250;
+        p.pokeExchangeRoom = 58;
+        p.knownPairs = MAX_KNOWN;
+        p.checkKnownExchange = true;
+        p.readMidgame = true;
+        if (p.setupSpeedNear < 0) p.setupSpeedNear = 35;
+        if (p.setupSideNear < 0) p.setupSideNear = 20;
+        p.equivalentSetupRoute = true;
+        return p;
+    }
     if (level < 1 || level >= LEVELS) return p;
     const LevelSettings& l = LEVEL_SETTINGS[level - 1];
     p.handWait = l.handWait, p.seeLate = l.seeLate;

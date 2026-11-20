@@ -11,9 +11,13 @@
 // shown is a pair the other one will get. (Not in a match for measuring in
 // which each draws from his own: Round::ownTsumo, Observation::pairsOf.)
 #include "../game/match.h"
+#include <optional>
 #include <vector>
 
 namespace juraic::ai {
+
+// Are two pairs the same, piece by piece?
+inline bool samePair(Pair a, Pair b) { return a.axis == b.axis && a.child == b.child; }
 
 // The pairs shown so far: 0 .. count() - 1, numbered as the players draw them.
 // The numbers are not folded at TSUMO_PAIRS: a pair that has not been shown is
@@ -40,6 +44,14 @@ struct Observation {
     // is shown tells of the other's pairs. The game: false, and tsumo1 is empty.
     bool ownTsumo = false;
     SeenTsumo tsumo1;
+    // Order of the six columns for the next drop, only when the memory reader observed it for this seat.
+    std::array<std::optional<std::array<uint8_t, W>>, 2> nextGarbageOrder{};
+    // The game read from memory (play/memory/primary_play14.h): a seat shown as Next whose field is still busy - the
+    // frames to the end of its landing, its chain or its garbage's fall (0: none, as observe() has it), and whether that
+    // is a chain. The reading ends that first (Duel): the garbage sure above the seat falls before its next pair, and
+    // what its chain sent is sure when the chain ends.
+    int busyLeft[2] = {0, 0};
+    bool busyChain[2] = {false, false};
 
     const Player& self() const { return player[me]; }
     const Player& opponent() const { return player[1 - me]; }
@@ -47,6 +59,18 @@ struct Observation {
     const SeenTsumo& pairsOf(int seat) const { return ownTsumo && seat == 1 ? tsumo1 : tsumo; }
     const SeenTsumo& mine() const { return pairsOf(me); }
 };
+
+// The pair in hand precedes nextPair in a controlling seat; when pondering its
+// successor the caller instead starts directly at nextPair.
+inline int copySearchPairs(const Observation& o, int seat, bool withHand, Pair* out, int capacity) {
+    if (capacity <= 0) return 0;
+    const Player& player = o.player[seat];
+    const SeenTsumo& visible = o.pairsOf(seat);
+    int count = 0;
+    if (withHand && player.phase == Phase::Control) out[count++] = player.colors;
+    for (int i = player.nextPair; count < capacity && visible.known(i); ++i) out[count++] = visible.pair(i);
+    return count;
+}
 
 // Number of pairs shown so far. The screen shows, for each player, the pairs
 // nextPair and nextPair + 1 (play/view.h drawNext), in every phase; and in the
@@ -63,6 +87,8 @@ inline int seenPairs(const Round& r) {
 // Fills `o` (its memory is used again: this is called every frame).
 inline void observe(const Round& r, int me, Observation& o) {
     o.rules = r.rules;
+    o.nextGarbageOrder = {};
+    o.busyLeft[0] = o.busyLeft[1] = 0, o.busyChain[0] = o.busyChain[1] = false;
     o.timing = r.timing;
     o.players = r.players;
     o.me = me;

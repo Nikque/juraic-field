@@ -65,6 +65,14 @@ struct Rules {
     // on from where the direction was pressed. Off: a button held from before
     // does nothing until it is pressed again, and the auto-repeat starts anew.
     bool preInput = true;
+    // The cancel of the real game, as records of it show it (game/timing.h: recordedRules()): a pair lies a frame
+    // before the down button locks it, so it can be slid along the ground; the next pair comes sooner by the frames the
+    // pair lay with both pieces standing on something, up to eight; a turn keeps the pair from locking for seven
+    // frames. Off: the rules of this engine as they have been.
+    bool cancel = false;
+    // Garbage in the 13th row right above a coloured piece that clears is cleared with it (it adds no points).
+    // Off: garbage in the 13th row never clears (replays of version 14 or before were played so: play/replay.h).
+    bool clearTopGarbage = true;
     // Rounds needed to win a match.
     int winsNeeded = 2;
     // Sets needed to win a match: a set is won with winsNeeded rounds, and the rounds are counted
@@ -85,5 +93,12 @@ struct Rules {
         return rate < 1 ? 1 : rate;
     }
 };
+
+// The rules the real game is played by: the defaults (the garbage of the 13th row cleared as there).
+inline Rules realGameRules() {
+    Rules r;
+    r.clearTopGarbage = true;
+    return r;
+}
 
 } // namespace juraic

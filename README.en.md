@@ -151,13 +151,13 @@ During a match, the number won is shown between the two fields: up to five as a 
 - There are two kinds, with different play styles:
   - **Juraic 催促（小）**: once its field fills up, it attacks with small chains while keeping its main chain (the default).
   - **Juraic 催促（極小）**: it hardly attacks on its own, and grows its main chain before firing it.
-- There are 36 levels (the default is Lv 36).
+- There are 37 levels (the default is Lv 36). Lv 37 reads the opponent's possible replies before making a midgame poke.
   - Lv 1 to 9: for complete beginners
   - Lv 10 to 20: for beginners
   - Lv 21 to 25: beginner to intermediate
   - Lv 26 to 30: intermediate to advanced
   - Lv 31 to 35: advanced to expert
-  - Lv 36: for experts
+  - Lv 36 and 37 are for experts
 - The lower the level, the slower it places pairs, the later it sees the opponent's field, and the less it reads ahead.
 - Neighbouring levels were set by matches of 催促（小） against itself, so that the higher level wins about six rounds in ten. The levels of 催促（極小） use the same settings and were not measured.
 - In matches against the AI and in AI-versus-AI matches, you can change the kind and the level of the AI with mouse clicks on the screen shown after the match. The change applies from the next match. Holding the button down on a level keeps changing it.

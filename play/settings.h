@@ -2,6 +2,7 @@
 // What the settings screen changes, and the file it is kept in
 // (JuraicField.ini next to the executable; plain "name=value" lines).
 #include "../ai/level.h"
+#include "level_ex.h"
 #include "../game/rules.h"
 #include <cstdlib>
 #include <filesystem>
@@ -55,6 +56,12 @@ struct Settings {
     // aiLevel: the 2P side, aiLevel1: the 1P side when two AIs are watched. On the screen the levels come in six
     // groups, each with a name and a colour (LEVEL_GROUP_NAMES, LEVEL_GROUP_COLORS below).
     int aiLevel = juraic::ai::LEVELS, aiLevel1 = juraic::ai::LEVELS;
+    // With Rules::cancel the levels from LEVEL_EX_FROM up come twice (play/level_ex.h): 1 = the seat plays the "Ex" of
+    // its level - the way to a placement that is over soonest among the buttons of every frame (ai/agent.h,
+    // PlacementAgent::fastestWays: a pair moved on the ground before it locks, turns that push the pair aside) -,
+    // 0 = the level as it is, the straight way. No part without the cancel or below that level. aiEx: the 2P side,
+    // aiEx1: the 1P side when two AIs are watched. The screens change it together with the level (Lv 36 → Lv 36Ex).
+    int aiEx = 1, aiEx1 = 1;
     // How the buttons of a person reach the game (play/input.h). Not rules: a replay holds the
     // buttons as these have made them.
     // A match over a network, the host's side: the frames by which garbage is late (game/link.h); 0 = set by the
@@ -83,7 +90,8 @@ struct Settings {
 // 10 to 20, 21 to 25, 26 to 30, 31 to 35, and 36. The colours are 0xRRGGBB, chosen to be told apart on the dark screen.
 inline const wchar_t* const LEVEL_GROUP_NAMES[juraic::ai::LEVEL_GROUPS] = {L"超初心者用", L"初心者用", L"初〜中級者用", L"中〜上級者用", L"上級〜超級者用", L"超級者用"};
 inline constexpr unsigned LEVEL_GROUP_COLORS[juraic::ai::LEVEL_GROUPS] = {0x8FD694, 0x6EC6FF, 0xFFD966, 0xFFA24D, 0xFF6B6B, 0xD18CFF};
-inline std::wstring levelText(int level) { return L"Lv " + std::to_wstring(level) + L"　" + LEVEL_GROUP_NAMES[juraic::ai::levelGroup(level)]; }
+// (ex: the level plays as its Ex - levelEx of play/level_ex.h says when)
+inline std::wstring levelText(int level, bool ex = false) { return L"Lv " + levelNumber(level, ex) + L"　" + LEVEL_GROUP_NAMES[juraic::ai::levelGroup(level)]; }
 inline unsigned levelColor(int level) { return LEVEL_GROUP_COLORS[juraic::ai::levelGroup(level)]; }
 
 // The parts of the settings screen.
@@ -102,6 +110,9 @@ struct SettingItem {
     std::function<bool(const Settings&)> enabled;
     // The colour its value is written in, 0xRRGGBB (empty = white, as every value but the AI's levels).
     std::function<unsigned(int)> color;
+    // Empty: a step on the screen adds `step` to the value, round past either end. Otherwise this makes the step (the
+    // levels of the AI, which take the mark of the Ex with them).
+    std::function<void(Settings&, int by)> change;
 };
 
 inline std::wstring number(int v) { return std::to_wstring(v); }
@@ -109,12 +120,13 @@ inline std::wstring onOff(int v) { return v ? L"あり" : L"なし"; }
 
 // bool members are edited through an int; the screen writes them back.
 struct SettingsTable {
-    int softDrop = 1, prediction = 1, ghost = 1, correction = 1, preInput = 1;
+    int softDrop = 1, prediction = 1, ghost = 1, correction = 1, preInput = 1, cancel = 0;
     std::vector<SettingItem> items;
 
     explicit SettingsTable(Settings& s) {
         softDrop = s.rules.softDropBonus, prediction = s.prediction, ghost = s.ghost, correction = int(s.rules.tsumoCorrection);
         preInput = s.rules.preInput;
+        cancel = s.rules.cancel;
         const auto member = [](int juraic::Rules::*m) { return [m](Settings& x) -> int& { return x.rules.*m; }; };
         const auto picture = [&s](int place) {
             return std::function<std::wstring(int)>([&s, place](int v) {
@@ -142,6 +154,8 @@ struct SettingsTable {
             {L"落下ボーナス", "softDropBonus", 0, 1, 1, [this](Settings&) -> int& { return softDrop; }, onOff},
             {L"先行入力", "preInput", 0, 1, 1, [this](Settings&) -> int& { return preInput; },
              [](int v) { return std::wstring(v ? L"あり（出る直前の回転・横移動が効く）" : L"なし"); }},
+            {L"キャンセル", "cancel", 0, 1, 1, [this](Settings&) -> int& { return cancel; },
+             [](int v) { return std::wstring(v ? L"あり（接地後も固定まで操作でき、接地中に動かした分だけ次の組が早く出ます）" : L"なし（従来どおり）"); }},
             {L"斜め入力", "diagonal", 0, 1, 1, [](Settings& x) -> int& { return x.diagonal; },
              [](int v) { return std::wstring(v ? L"あり（下と横を同時に入れられる）" : L"なし（4 方向レバー: 後から入れた方向だけ）"); }},
             {L"クイックドロップ", "quickDrop", 0, 1, 1, [](Settings& x) -> int& { return x.quickDrop; },
@@ -173,10 +187,16 @@ struct SettingsTable {
             // (each AI seat: which of the two AIs it is, and right below it its level - either AI plays at every level)
             {L"AI（2P 側）", "aiStyle", 0, 1, 1, [](Settings& x) -> int& { return x.aiStyle; },
              [](int v) { return std::wstring(v ? L"Juraic 催促（極小）" : L"Juraic 催促（小）"); }},
-            {L"AI のレベル（2P 側）", "aiLevel", 1, juraic::ai::LEVELS, 1, [](Settings& x) -> int& { return x.aiLevel; }, levelText},
+            // (with the cancel the levels from LEVEL_EX_FROM up come twice, the second time as "Ex": the row steps through
+            //  both and keeps the mark in aiEx, which has no row of its own - play/level_ex.h)
+            {L"AI のレベル（2P 側）", "aiLevel", 1, juraic::ai::LAST_LEVEL, 1, [](Settings& x) -> int& { return x.aiLevel; },
+             [this, &s](int v) { return levelText(v, levelEx(v, s.aiEx != 0, cancel != 0)); }},
+            {L"AI の Ex（2P 側）", "aiEx", 0, 1, 1, [](Settings& x) -> int& { return x.aiEx; }, onOff},
             {L"AI（観戦の 1P 側）", "aiStyle1", 0, 1, 1, [](Settings& x) -> int& { return x.aiStyle1; },
              [](int v) { return std::wstring(v ? L"Juraic 催促（極小）" : L"Juraic 催促（小）"); }},
-            {L"AI のレベル（観戦の 1P 側）", "aiLevel1", 1, juraic::ai::LEVELS, 1, [](Settings& x) -> int& { return x.aiLevel1; }, levelText},
+            {L"AI のレベル（観戦の 1P 側）", "aiLevel1", 1, juraic::ai::LAST_LEVEL, 1, [](Settings& x) -> int& { return x.aiLevel1; },
+             [this, &s](int v) { return levelText(v, levelEx(v, s.aiEx1 != 0, cancel != 0)); }},
+            {L"AI の Ex（観戦の 1P 側）", "aiEx1", 0, 1, 1, [](Settings& x) -> int& { return x.aiEx1; }, onOff},
             // (the pictures: one for each field and one for the rest of the screen; toko's field is the first player's)
             {L"背景（1P 側のフィールド）", PICTURE_KEYS[PICTURE_FIELD1], 0, int(s.backgroundFiles[PICTURE_FIELD1].size()), 1, [](Settings& x) -> int& { return x.background[PICTURE_FIELD1]; }, picture(PICTURE_FIELD1)},
             {L"背景（2P 側のフィールド）", PICTURE_KEYS[PICTURE_FIELD2], 0, int(s.backgroundFiles[PICTURE_FIELD2].size()), 1, [](Settings& x) -> int& { return x.background[PICTURE_FIELD2]; }, picture(PICTURE_FIELD2)},
@@ -194,10 +214,22 @@ struct SettingsTable {
                 for (const char* key : keys)
                     if (item.key == key) item.section = section;
         };
-        in(SEC_CONTROLS, {"preInput", "diagonal", "quickDrop"});
+        in(SEC_CONTROLS, {"preInput", "cancel", "diagonal", "quickDrop"});
         in(SEC_AI, {"aiAuto", "aiLead", "aiBudget", "aiThreads", "aiWidth", "aiDepth", "aiQueues", "aiBuildHold", "aiStyle", "aiStyle1", "aiLevel", "aiLevel1"});
-        for (SettingItem& item : items)
+        in(SETTING_SECTIONS, {"aiEx", "aiEx1"}); // (on no part of the screen: kept in the settings file, changed by the rows of the levels)
+        for (SettingItem& item : items) {
             if (item.key == "aiLevel" || item.key == "aiLevel1") item.color = levelColor;
+            if (item.key == "aiLevel")
+                item.change = [this](Settings& x, int by) {
+                    const LevelPick pick = levelStep(x.aiLevel, x.aiEx != 0, by, cancel != 0);
+                    x.aiLevel = pick.level, x.aiEx = pick.ex;
+                };
+            if (item.key == "aiLevel1")
+                item.change = [this](Settings& x, int by) {
+                    const LevelPick pick = levelStep(x.aiLevel1, x.aiEx1 != 0, by, cancel != 0);
+                    x.aiLevel1 = pick.level, x.aiEx1 = pick.ex;
+                };
+        }
         in(SEC_VIEW, {"volume", "prediction", "ghost", "background1P", "background2P", "backgroundOther", "backgroundDim", "bgmVersus", "bgmToko", "bgmOther", "bgmVolume"});
         const auto when = [this](const char* key, std::function<bool(const Settings&)> enabled) {
             for (SettingItem& item : items)
@@ -213,6 +245,7 @@ struct SettingsTable {
     void apply(Settings& s) const {
         s.rules.softDropBonus = softDrop != 0;
         s.rules.preInput = preInput != 0;
+        s.rules.cancel = cancel != 0;
         s.prediction = prediction != 0;
         s.ghost = ghost != 0;
         s.rules.tsumoCorrection = juraic::TsumoCorrection(correction);

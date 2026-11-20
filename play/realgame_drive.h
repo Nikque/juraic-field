@@ -1,6 +1,6 @@
 #pragma once
 // The mode in which Juraic plays 2P of the real game (play/realgame_win.h): the AI plays one side of the real game
-// through the buttons of a pad (play/realgame_pad_win.h on Windows), frame after frame. Plain C++, tested on every system
+// through the buttons of a pad (on Windows sent as keys or by a virtual pad: play/realgame_input_win.h), frame after frame. Plain C++, tested on every system
 // (tests/realgame_tests.cpp, against rounds of this program drawn, read and played through a pad that is late).
 //
 // The own pair is followed with the engine (game/player.h): from the frame its new pair is seen (Tracker), as the game
@@ -53,7 +53,7 @@ public:
     // fits the pictures best (fit) from the next pair on, unless takeLag is false.
     int lag = 2;
     bool takeLag = true;
-    juraic::Rules rules;                      // the real game's
+    juraic::Rules rules = juraic::realGameRules(); // the real game's
     std::unique_ptr<juraic::ai::Agent> agent; // a PlacementAgent
     uint64_t seed = 1;                        // of the agent's rounds
     int played = 0;                           // pairs played
@@ -61,6 +61,7 @@ public:
     int explained = 0;                        // ... of the others, those a cell of the 13th or 14th row not sure of explained (explain)
     long walledHeld = 0;                      // frames a turn was not sent for a pair not shown yet, to come between two columns twelve high (play)
     int replans = 0;                          // ways to the placement planned again from where the engine had the pair (steer)
+    int begunByFrame = 0;                     // pairs begun early by the frame the engine foresaw them in (beginEarly)
     bool unsureWays = true; // the AI plans its ways with the cells not sure of (tellUnsure), and a picture can tell them (explain)
     std::vector<int> lags;                    // the lag the pictures of each pair fitted best, the last ones (at most 15)
     // The buttons of the two turns are sent the other way round: the game turns its pair so (fit).
@@ -120,6 +121,12 @@ public:
         prepare(given.get());
         nextAgent = std::move(given);
     }
+    // The agent kept when the driver is let go: the one waiting to take over (replaceAgent), otherwise the one playing.
+    std::unique_ptr<juraic::ai::Agent> takeAgent() {
+        if (!nextAgent) return std::move(agent);
+        if (agent) std::thread([before = std::move(agent)]() mutable { before.reset(); }).detach();
+        return std::move(nextAgent);
+    }
 
     // An AI that plays 2P of the real game: while its second choice is on its way, the pair goes straight down in every
     // frame in which that loses nothing (PlacementAgent::holdSecond, Params::thinkHold). The third pair is known only as
@@ -152,6 +159,8 @@ public:
     bool early = true;
     // The number of the pair last begun (as Tracker counts the pairs of a round: the first 1), in play or put.
     int begunPair() const { return pairsSeen; }
+    // The engine has had that pair in the 13th row (for the film of the top of the field, play/realgame_topfilm.h).
+    bool beenAloft() const { return wentHigh; }
 
     // The middle of the lags the pictures of the last pairs fitted best; -1: none yet.
     int measuredLag() const {
@@ -288,6 +297,7 @@ private:
         windowReadAt = windowPauseAt = -1;
         own = juraic::Player{};
         past.clear();
+        lockedHigh = -1;
         round = t.rounds, pairsSeen = 0, blindFor = -1, earlyFor = -1, againFor = -1, stoppedFor = -1, shiftBegun = -1, spawnTaken = -1, putAim = -1, unsure13 = unsure14 = 0;
         whyFor = lightFor = lightChecked = -1;
         found.clear();
@@ -472,6 +482,7 @@ private:
     struct Shot {
         int64_t frame;           // a clear picture of the pair in play
         juraic::PairControl at;  // ... where it shows it
+        bool native=false;
     };
     juraic::Player own;
     juraic::Tsumo tsumo;
@@ -530,6 +541,7 @@ private:
     bool sentFor = false;   // a frame of buttons has been sent for the pair in play (play)
     int lockedPair = -1;                 // the number (from 0) of the pair the engine locked last in the round (-1: none),
     juraic::Placement lockedPlacement{}; // ... and where (told to Follower: tick)
+    int lockedHigh = -1;                 // the pair (as pairsSeen) the engine locked with a piece in the 12th row or above (earlyDue)
     int64_t airSeenAt = -1; // overdue: the last clear picture that showed the pair put in the air,
     int airHeight = 0;      // ... the half cells of its axis then
     int liftedFor = -1; // the pair held down again as a clear picture showed pieces of a colour in the air after it was put
@@ -561,11 +573,12 @@ private:
         return uint8_t((b & ~(juraic::BTN_CW | juraic::BTN_CCW)) | (b & juraic::BTN_CW ? juraic::BTN_CCW : 0) | (b & juraic::BTN_CCW ? juraic::BTN_CW : 0));
     }
     // The buttons held as they go to the pad (the two turns the other way round when the game turns so), kept for the fit.
+    static constexpr size_t PADS_KEPT = 600;
     uint8_t press(int64_t now, uint8_t b) {
         const uint8_t out = turnsSwapped ? swapTurns(b) : b;
         if (!pads.empty() && pads.back().first >= now) pads.back() = {now, out};
         else pads.emplace_back(now, out);
-        while (pads.size() > 600) pads.pop_front();
+        while (pads.size() > PADS_KEPT) pads.pop_front();
         return out;
     }
     // A turn or a move held in the frame before, for fewer frames than a tap is held
@@ -591,7 +604,9 @@ private:
         return b;
     }
     // The buttons decided for the frame `now` of the clock as they go out (gate).
-    uint8_t sendable(int64_t now, uint8_t decided) const { return gate ? gate(now, decided) : decided; }
+    uint8_t sendable(int64_t now, uint8_t decided) const {
+        return gate ? gate(now, decided) : decided;
+    }
     // The buttons the pad held in the frame `at` of the clock (0 before any). (pads: by the frame, one after the other)
     uint8_t padAt(int64_t at) const {
         const auto after = std::upper_bound(pads.begin(), pads.end(), at, [](int64_t frame, const std::pair<int64_t, uint8_t>& p) { return frame < p.first; });
@@ -605,7 +620,7 @@ private:
     static size_t indexIn(const std::deque<Past>& in, int64_t frame) {
         if (in.empty() || frame < in.front().frame || frame > in.back().frame) return in.size();
         const size_t i = size_t(frame - in.front().frame);
-        if (in[i].frame == frame) return i;
+        if (i < in.size() && in[i].frame == frame) return i;
         for (size_t k = 0; k < in.size(); ++k)
             if (in[k].frame == frame) return k;
         return in.size();
@@ -621,6 +636,9 @@ private:
         const auto* placing = placer();
         if (!notes || !placing) return;
         const int aim = placing->targetPlacement();
+        juraic::inputdiag::trace.emit(juraic::inputdiag::DRIVER_TARGET,{round,now,pairsSeen,aim,int64_t(placing->diagnosticAgent),
+            int64_t(placing->diagnosticRound),int64_t(placing->diagnosticTargetDecision),placing->diagnosticTargetPair,
+            placing->diagnosticTargetPair==pairsSeen,placing->steered,placing->againSwitched});
         if (aim != noted) {
             std::string why;
             if (noted >= 0 && aim >= 0)
@@ -735,7 +753,8 @@ private:
     // The kind of the AI's last choice (ai::X3Pace::kind) and the garbage coming as it was shown, for the note of a
     // placement (REASONS).
     std::string choiceText() const {
-        static constexpr const char* KIND_WORDS[juraic::ai::X3Pace::KINDS] = {"none", "win", "answer", "answer-build", "poke", "build", "fire", "clear"};
+        static constexpr const char* KIND_WORDS[] = {"none", "win", "answer", "answer-build", "poke", "build", "fire", "clear", "crush", "crush-build"};
+        static_assert(std::size(KIND_WORDS) == size_t(juraic::ai::X3Pace::KINDS), "a word for every kind of choice");
         const auto* pace = dynamic_cast<const juraic::ai::X3Pace*>(agent.get());
         const std::string coming = "coming " + std::to_string(shownIncoming.pending) + " pending " + std::to_string(shownIncoming.confirmed) + " confirmed";
         if (!pace) return " [" + coming + "]";
@@ -760,7 +779,8 @@ private:
         begunRound = t.rounds;
         own = juraic::Player{};
         own.field = f.model[me].known ? f.model[me].core.field : side.under; // (with the 13th and 14th rows the moves followed put there)
-        if (sameRound) own.field = hiddenFromEngine(own.field, engine);
+        if (sameRound
+        ) own.field = hiddenFromEngine(own.field, engine);
         shareHidden(f, side.pairs, 0);
         own.phase = juraic::Phase::Next;
         own.wait = 1;
@@ -938,6 +958,13 @@ private:
         if (!early || pairsSeen == 0 || blindFor >= 0 || earlyFor >= 0 || !following || own.phase != juraic::Phase::Next || own.wait > 2) return false;
         if (f.notice[me] != 0 || side.loose != 0 || side.pairs != pairsSeen || side.unseen != 0) return false;
         if (now - unclearAt < EARLY_CLEAR || !t.still(1 - me)) return false;
+        // (nor after a pair locked with a piece in the 12th row or above: the game shows the next pair later than the
+        //  engine has it - three records of the real game: of 41 pairs begun early that appeared five to nine frames
+        //  after the frame foreseen, 32 came after a pair with a piece in the 13th row or above, and in a fourth the
+        //  two that still came so late after pairs whose highest piece lay in the 12th; a quick turn sent for one, its
+        //  first press before the pair and lost, turned it once, and it locked as it appeared, the down button held.
+        //  The window tells when it comes: beginByWindow.)
+        if (lockedHigh == pairsSeen) return false;
         // (nor before the pictures have told the lag and the way of the turns as the driver has them: the first turn of a
         //  pair begun early is taken in the frame it appears in and shown late, and a turn the other way round, or a frame
         //  late, was put right too late - pairs begun so went down turned otherwise, 3 of 77 in rounds drawn with the turns
@@ -955,6 +982,7 @@ private:
         const Tracker& t = f.tracker;
         const int64_t appears = next + own.wait - 2;
         pairsSeen = t.side[me].pairs + 1;
+        ++begunByFrame;
         // (the pair before, whose pictures are all in, kept before start clears its engine - fitted after, as begin does,
         //  its pictures were set against the engine of the pair begun, and the lag of a pad 5 late was taken as 6 -, and
         //  fitted as the next pair is begun: the screen shows where it lies only later)
@@ -1091,6 +1119,9 @@ private:
     // The pair in play begun (begin, beginBlind, beginEarly) with the engine as it is set, noted so (`line`): the frames
     // of the game before `at` have passed - the agent decides them, the game took what the pad held.
     void start(const Follower& f, int64_t at, const std::string& line) {
+        {const auto* a=placer();juraic::inputdiag::trace.emit(juraic::inputdiag::DRIVER_START,{
+            f.tracker.rounds,pairsSeen,f.tracker.frame,at,next,a?a->targetPlacement():-1,
+            a?a->diagnosticTargetPair:-1,a?int64_t(a->diagnosticTargetDecision):0});}
         startOwn = own, startNext = next, shiftBegun = seen.movedAt, putAim = -1, sentFor = false, retaking = false;
         wentHigh = false, stripped = 0;
         past.clear();
@@ -1138,6 +1169,7 @@ private:
         const auto* placing = placer();
         const int64_t revisions = placing ? placing->revisedChoices : 0;
         const uint8_t wanted = uint8_t(agent->frame(o) & ~juraic::BTN_DROP);
+        const auto diagnosticNext=next;
         if (placing && placing->revisedChoices != revisions)
             note(next, "2P pair " + std::to_string(pairsSeen) + " choice renewed: the field or known pairs changed");
         // (a tap the agent lets go before its end - its way planned again, a picture put right - is held to its end: one
@@ -1186,6 +1218,9 @@ private:
         past.push_back({next, own, took});
         if (past.size() > 240) past.pop_front();
         ++next;
+        {const auto* a=placer();juraic::inputdiag::trace.emit(juraic::inputdiag::AGENT_FRAME,{f.tracker.rounds,pairsSeen,o.frame,
+            a?int64_t(a->diagnosticAgent):0,a?int64_t(a->diagnosticRound):0,a?int64_t(a->diagnosticTargetDecision):0,
+            a?a->diagnosticTargetPair:-1,a?a->targetPlacement():-1,wanted,took,send,diagnosticNext,next});}
         if (own.phase != juraic::Phase::Next && own.phase != juraic::Phase::Control) lockEngine(f.tracker.frame);
         return wanted == took;
     }
@@ -1199,6 +1234,7 @@ private:
         putAim = placing && sentFor ? placing->targetPlacement() : -1;
         stop(), following = true, untilLocked = true, lockedAt = at;
         lockedPair = pairsSeen - 1, lockedPlacement = own.pair.placement();
+        lockedHigh = own.pair.y >= juraic::CLEAR_H - 1 || own.pair.childY() >= juraic::CLEAR_H - 1 ? pairsSeen : -1;
     }
 
     // Between the own pairs the AI is shown each frame all the same, the own side waiting for its pair; nothing it
@@ -1535,6 +1571,10 @@ private:
         };
         for (const Shot& s : fitted.shots) {
             const juraic::Player* row = at(s.frame);
+            if(s.native){
+                if(row)out.pictures+=row->pair.x==s.at.x && row->pair.y==s.at.y && row->pair.upper==s.at.upper && row->pair.dir==s.at.dir;
+                continue;
+            }
             const juraic::Player* column = at(s.frame - MOVE_SHOWN);
             const juraic::Player* way = at(s.frame - TURN_SHOWN);
             if (!row || !column || !way) continue;
@@ -1813,6 +1853,53 @@ private:
                 if (past[k].frame <= t.frame + 2 && past[k].state.phase == juraic::Phase::Control && past[k - 1].state.phase == juraic::Phase::Control &&
                     past[k].state.pair.dir != past[k - 1].state.pair.dir)
                     return;
+        }
+        // (a picture up to TURN_ROUND frames after the engine's pair turned quickly - its child from above to below in
+        //  one frame, the axis lifted -: the game draws the child round the side for some pictures, the axis on its way
+        //  up, and the pair reads as it was, a little higher, its child not shown. On a record of the real game the
+        //  engine had the pair where the pictures after showed it - in the 12th row half up, child down -, two
+        //  pictures of it on its way read "in the 12th row, child up" put it right, its way was planned from there,
+        //  and the placement chosen was out of reach when the next picture put it back.)
+        for (size_t k = past.size(); k-- > 1 && past[k].frame > t.frame - TURN_ROUND;)
+            if (past[k].frame <= t.frame + 2 && past[k].state.phase == juraic::Phase::Control && past[k - 1].state.phase == juraic::Phase::Control &&
+                ((past[k].state.pair.dir - past[k - 1].state.pair.dir) & 3) == 2)
+                return;
+        // (a picture read as the pair with its child up above the screen - one piece of the axis's colour, the place
+        //  above it beyond the screen: PairSeen::childHidden - puts nothing right
+        //  - while the engine's pair is in the 13th row, or was up to TURN_ROUND frames before: a pair up there is
+        //    above the screen, and turning or moving it is drawn for a picture or two with one piece in the upper half
+        //    of the 12th row, which reads so. On a record of the real game pairs on their way over a column twelve
+        //    high were put right "in the 12th row, child up" for it, where they had appeared or a column beside, their
+        //    way sent again from there - with nothing put right, the pair after each appeared as the engine foresaw;
+        //  - in the cell of the game's mark, the 12th row of the third column, with no piece of the engine's pair in
+        //    that column in the 12th row or above: the mark is read as a piece of a colour now and then - of the
+        //    axis's, it reads so. On that record a pair that had left the column eight frames before was put right
+        //    there, turned again and went down turned otherwise than the AI chose.)
+        if (side.pair.childHidden) {
+            for (size_t k = past.size(); k-- > 0 && past[k].frame > t.frame - TURN_ROUND;)
+                if (past[k].frame <= t.frame + 2 && past[k].state.phase == juraic::Phase::Control && past[k].state.pair.y >= 12) return;
+            if (seen.x == juraic::DEATH_X && seen.y == juraic::DEATH_Y && !seen.upper) {
+                bool there = false;
+                for (size_t k = past.size(); k-- > 0 && past[k].frame >= t.frame - 2 && !there;) {
+                    const juraic::PairControl& p = past[k].state.pair;
+                    there = past[k].frame <= t.frame + 2 && past[k].state.phase == juraic::Phase::Control &&
+                            ((p.x == juraic::DEATH_X && p.y >= juraic::DEATH_Y) || (p.childX() == juraic::DEATH_X && p.childY() >= juraic::DEATH_Y));
+                }
+                if (!there) return;
+            }
+        }
+        // (a picture that shows the pair turned, and no turn asked of it can show yet - none since the frames before it
+        //  appeared in which the game keeps one for it (Timing::preFrames) up to the last button the picture can show,
+        //  sent `lag` frames before it, or a frame later: the pair is as it appeared, its child up, and what reads as
+        //  its child beside it is something else. On a record of the real game the light of an attack of
+        //  the other side crossed the top of the field as a pair of its colour appeared: read "child right" in the
+        //  frame it appeared in, the pair was put right, turned back and moved from there, and locked a column aside.)
+        if (seen.dir != had.dir && !(either && other.dir == had.dir)) {
+            // (the buttons of those frames no longer kept - a pair in hand for long, the round standing still -: not known)
+            const int64_t from = startNext - lag - t.timing.preFrames - 2;
+            bool asked = pads.size() >= PADS_KEPT && pads.front().first > from;
+            for (int64_t g = from; g <= t.frame - lag + 1 && !asked; ++g) asked = givenAt(g) & (juraic::BTN_CW | juraic::BTN_CCW);
+            if (!asked) return;
         }
         if ((shownAt >= 0 && t.frame - shownAt <= DOUBT_FRAMES) || (begunAt >= 0 && t.frame - begunAt <= DOUBT_FRAMES && seen.y >= 12)) {
             const bool twice = doubtAt >= 0 && t.frame - doubtAt <= DOUBT_FRAMES && alike(doubt, seen, c, int(t.frame - doubtAt));

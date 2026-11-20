@@ -7,6 +7,7 @@
 // chosen, with the other values as they were then.
 #include <cstdint>
 #include <istream>
+#include <algorithm>
 #include <ostream>
 #include <fstream>
 #include <sstream>
@@ -14,7 +15,20 @@
 
 namespace juraic::ai {
 
+inline constexpr int MAX_KNOWN = 16;
+
 struct Params {
+    // The explicit Lv 37 profile can use a longer known prefix in the beam.
+    int knownPairs = 3;
+    int checkKnownExchange = 0;
+    int readMidgame = 0; // Keep tactical alternatives and read pressure with observed pairs.
+    // -1 uses the level's setting, 0 disables it. Limits are per thousand of the original build sum.
+    int setupSpeedNear = -1; // Ordinary build only: accept a faster quiet placement.
+    int setupSideNear = -1;  // Keep an executable side chain.
+    int equivalentSetupRoute = 0; // Allow the other orientation of a same-colour pair at Lv 37.
+    int searchKnownLimit(int planDepth) const {
+        return knownPairs > 3 ? std::min(knownPairs, MAX_KNOWN) : std::min(3, planDepth);
+    }
     // Trial drops (detect.h): the most pieces of one colour added on a column.
     int trialMaxAdd = 3;
 
@@ -28,7 +42,7 @@ struct Params {
     // for 157, the largest chain 93,034 points on average for 85,455. A move tries 18 % more placements. The levels
     // below the strongest keep the six fixed sequences.
     int beamQueues = 8;       // made-up sequences of pairs
-    int beamShare = 1;      // 1: the layers of the known pairs are searched once for all queues (the same answer; 0: by every queue)
+    int beamShare = 1;        // 1: the layers of the known pairs are searched once for all queues (the same answer; 0: by every queue)
     int beamFixedQueues = 4;  // 4: rounds of eight pairs, six of two colours and two of one colour, each queue from another start, for any number of queues - meant for beamQueues=8 (build.h mixPair); 1: the six fixed sequences of four colours (Ama's); 0: random ones; 2: shuffled bags of every pair of two colours, the same for every seed (build.h bagPair); 3: the six pairs of two different colours in turn, each queue from another start (build.h turnPair)
     int beamEndPoints = 5000; // a chain of this many points ends a line of the search
     int beamSift = 0;         // lighter search: the fields of a layer are first valued without key pieces, and only the best beamSift x beamWidth of them in full (0 = every field in full)
@@ -110,6 +124,12 @@ struct Params {
     // at 0; the game sets it for its AI seats, where a pair must not wait long for its choice.
     int thinkBudget = 0;
     int thinkRival = 50;    // ... and the search of the opponent's field, which comes first, after this many percent of that time
+    // with thinkBudget (the game): 1 = the search of the opponent's field for a "win" (x3WinCheck) is made as wide as
+    // the search of the own field may get (thinkWidthMax; the width the AI is measured with) and as deep as he may have
+    // moves, on a thread of its own, begun in the frame his field is known; a choice waits for it up to thinkRival
+    // percent of its time and takes no "win" without it. (0: in the time of the choice, beamWidth wide - on the screen
+    // that is the narrow width a search begins with, and what he can build is then found too small.)
+    int thinkRivalFull = 0;
     int thinkFit = 1;       // with thinkBudget: 1 = a search that would not end in its time is made narrower (it keeps its depth), from what earlier searches took on this machine; 2 = the search of the opponent's field too; 0 = searches are only stopped
     int thinkWidthMin = 4;  // ... and not narrower than this
     int thinkWidthMax = 0;  // with thinkBudget and thinkFit: a search that would end well within its time is made wider, up to this (0 = never wider than beamWidth)
@@ -263,6 +283,58 @@ struct Params {
     int x3PokeMainFrom = 0; // ... and only when the own main chain is worth this many points or more (0 = always)
     int x3PokeMost = 0;   // a poke sends at most this many garbage pieces (0 = any number). "Keeps the main chain" compares what a trial drop starts before and after: when that is small before, any chain passes, the main chain too (counted: one poke in ten sent 85 pieces or more).
     int x3PokeAt = 0;     // from this many cells on the opponent's field: a chain fired now that sends x3MinPoke or more and keeps x3PokeKeep percent of the main chain is fired, whatever he can answer (0 = off). The opponent to measure answers against.
+    // Crush (tactics.h X3Agent::crush): nothing is on its way, and a chain the pair in hand fires leaves x3Crush garbage
+    // pieces or more above the opponent's field after every reply of his that keeps his main chain - standing still, or
+    // any of his plans on the screen; it lands before pairs that are not on the screen can help him, but for the
+    // one-in-xWildEvery pair the reading gives him. It keeps the own main chain, and every chain he may fire at it that
+    // is larger than it - a plan on the screen that spends his main chain, or the chain that stands on his field, which
+    // a pair not on the screen may fire - is offset by the own main chain built on while his runs (he fires first, X3
+    // second), by the margin x3Enough asks of an answer that is to be large enough. An attack he
+    // answers and keeps his chain only gives him the move; a chain that spends the own main chain is fired first into
+    // his; garbage he takes is what saturates his field (two rows, twelve: from there taking garbage mostly loses).
+    // Unlike the pokes, the own number of cells plays no part. 0 = off.
+    int x3Crush = 0;
+    int x3CrushKeep = 70;  // ... "keeps the main chain": this many percent of its points (buildValue, key pieces counted), for both players
+    // The chain of a crush seldom stands ready (counted in a small match: of 2,550 choices no chain of the pair in hand
+    // sent twelve in 65 percent, and every one that did spent the main chain in 32). With x3CrushPairs 2 or 3 it is
+    // also built: a plan of the pairs on the screen that fires such a chain with its second or third pair is read as
+    // one of the pair in hand is - against every reply of his on the screen, to the same ends - and its first
+    // placement is made (kind CrushBuild). The next choice reads it again with what is then on the screen; the chain is
+    // fired when it passes as one of the pair in hand, and stands on the field as an answer when it does not.
+    int x3CrushPairs = 1;  // ... the chain is fired by the pair in hand (1), or by one of the first two (2) or three (3) pairs on the screen
+    // Exchange poke (tactics.h X3Agent::exchangePoke): nothing waits above either field, nobody's chain runs and neither
+    // player holds an all clear bonus. A chain of one to three waves fired by the pair in hand, that sends
+    // pokeExchangeMin garbage or more and keeps pokeExchangeKeep percent of the own main chain, is fired when each of
+    // his three ways of meeting it is read from his field and none of them is bad for the own side: (1) he offsets it
+    // with a small chain that keeps his main chain - none of his plans on the screen does so (less than pokeExchangeMin
+    // left above his field, or garbage back on the own field), and the chance that the chains standing on his field
+    // do so with the pairs he places before the own chain is confirmed is below pokeExchangeAnswer (parts of a
+    // million); (2) he fires his main chain at it - the own main chain built on while his runs, with the garbage of
+    // the poke, reaches pokeExchangeMargin percent of his and leaves pokeExchangeLeft garbage or more above him;
+    // (3) he takes it - his field holds pokeExchangeRoom cells or more with the garbage of the poke.
+    // 0 = off; 1 = read before the poke of X3Agent::poke; 2 = as 1, and X3Agent::poke is left out.
+    // pokeExchangeDepth (1 to 3): the chain may also be fired by the second or third pair on the screen, the pairs
+    // before it clearing nothing; then the first placement of that plan is made (kind CrushBuild), and the next choice
+    // reads again. A chain of the pair in hand comes first.
+    int pokeExchange = 0;
+    int pokeExchangeDepth = 1;
+    int pokeExchangeMin = 4;
+    int pokeExchangeMargin = 110;
+    int pokeExchangeLeft = 66;
+    int pokeExchangeAnswer = 250000;
+    int pokeExchangeRoom = 50;
+    int pokeExchangeKeep = 50;
+    // About to choke (tactics.h X3Agent::buildMove): nothing is on its way, and the own field has room for the pairs on
+    // the screen and x3ChokeRoom more at most (X3Agent::roomPairs). Then a chain the pair in hand fires that sends
+    // x3MinPoke or more and keeps x3PokeKeep percent of the main chain is fired, whatever he answers (near a full
+    // field one pokes; not at an answer of the same size, unless about to choke). Without one, when his field has room
+    // for more than x3ChokeRoom pairs more than the own - he can wait until the own field closes - the largest chain the
+    // pairs on the screen fire is fired when the pair in hand fires it and no later pair on the screen does
+    // (x3ChokeKeep percent of it; whatever its size); a later pair that fires it is waited for, among the placements
+    // that keep it. Against an opponent whose field is as full nothing changes: he must move as soon, and firing second
+    // is better (x3ChokeFrom, which fires whatever room he has, lost against the fixed Ama even from 72 cells: 184 of
+    // 240 rounds for 189, five won ones lost and none gained). 0 = off.
+    int x3ChokeRoom = 0;
     // Guard: nothing is on its way, but the opponent holds an attack his pair in hand fires. Where the pair goes is then also a question of what can be answered with.
     int x3Guard = 10;       // n: when a chain one of his first x3GuardPairs pairs fires leaves n garbage pieces or more above this field, the placement that builds is chosen among those whose plans answer that chain about as well as the best of them (0 = off). The levels below the top play with 0 (level.h)
     int x3GuardMost = 50;   // ... and at most this many pieces (0 = however many: his main chain too)
@@ -311,6 +383,8 @@ struct Params {
 
     // The three numbers of the beam search as the code uses them: never fewer than one.
     int queues() const { return beamQueues < 1 ? 1 : beamQueues; }
+    int depth() const { return beamDepth < 1 ? 1 : beamDepth; }
+    int width() const { return beamWidth < 1 ? 1 : beamWidth; }
     // The frames that `pairs` pairs that do not help take on a field of `cells` cells (each adds a pair to it).
     int64_t wildFrames(int pairs, int cells) const {
         const int mid = xWildFramesMid > 0 ? xWildFramesMid : xWildFrames, late = xWildFramesLate > 0 ? xWildFramesLate : mid;
@@ -332,8 +406,6 @@ struct Params {
             frames -= one;
         }
     }
-    int depth() const { return beamDepth < 1 ? 1 : beamDepth; }
-    int width() const { return beamWidth < 1 ? 1 : beamWidth; }
 };
 
 struct ParamItem {
@@ -394,6 +466,7 @@ inline constexpr ParamItem PARAM_ITEMS[] = {
     {"searchThreads", &Params::searchThreads},
     {"thinkBudget", &Params::thinkBudget},
     {"thinkRival", &Params::thinkRival},
+    {"thinkRivalFull", &Params::thinkRivalFull},
     {"thinkFit", &Params::thinkFit},
     {"thinkWidthMin", &Params::thinkWidthMin},
     {"thinkWidthMax", &Params::thinkWidthMax},
@@ -482,6 +555,18 @@ inline constexpr ParamItem PARAM_ITEMS[] = {
     {"x3AirRest", &Params::x3AirRest},
     {"x3AnswerFire", &Params::x3AnswerFire},
     {"x3PokeAt", &Params::x3PokeAt},
+    {"x3Crush", &Params::x3Crush},
+    {"x3CrushKeep", &Params::x3CrushKeep},
+    {"x3CrushPairs", &Params::x3CrushPairs},
+    {"pokeExchange", &Params::pokeExchange},
+    {"pokeExchangeDepth", &Params::pokeExchangeDepth},
+    {"pokeExchangeMin", &Params::pokeExchangeMin},
+    {"pokeExchangeMargin", &Params::pokeExchangeMargin},
+    {"pokeExchangeLeft", &Params::pokeExchangeLeft},
+    {"pokeExchangeAnswer", &Params::pokeExchangeAnswer},
+    {"pokeExchangeRoom", &Params::pokeExchangeRoom},
+    {"pokeExchangeKeep", &Params::pokeExchangeKeep},
+    {"x3ChokeRoom", &Params::x3ChokeRoom},
     {"x3PokeNet", &Params::x3PokeNet},
     {"x3PokeFrom", &Params::x3PokeFrom},
     {"x3PokeMainFrom", &Params::x3PokeMainFrom},
@@ -494,6 +579,12 @@ inline constexpr ParamItem PARAM_ITEMS[] = {
     {"x3ValueMix", &Params::x3ValueMix},
     {"x3PokeRead", &Params::x3PokeRead},
     {"x2Depth", &Params::x2Depth},
+    {"knownPairs", &Params::knownPairs},
+    {"checkKnownExchange", &Params::checkKnownExchange},
+    {"readMidgame", &Params::readMidgame},
+    {"setupSpeedNear", &Params::setupSpeedNear},
+    {"setupSideNear", &Params::setupSideNear},
+    {"equivalentSetupRoute", &Params::equivalentSetupRoute},
     {"xWildEvery", &Params::xWildEvery},
     {"xWildChance", &Params::xWildChance},
     {"xWildFrames", &Params::xWildFrames},

@@ -27,7 +27,7 @@ inline int levelOf(const std::string& name) {
         if (name[i] < '0' || name[i] > '9') return 0;
         level = level * 10 + (name[i] - '0');
     }
-    return level >= 1 && level <= LEVELS ? level : 0;
+    return level >= 1 && level <= LAST_LEVEL ? level : 0;
 }
 // Is that name the AI that hardly pokes, at its top (x3q) or at a level (lv1q to lv36q)?
 inline bool quietOf(const std::string& name) { return name == "x3q" || (levelOf(name) && name.back() == 'q'); }
@@ -46,6 +46,6 @@ inline std::unique_ptr<Agent> makeAgent(const std::string& name, const Params& p
     if (name == "random") return std::make_unique<RandomAgent>();
     return nullptr;
 }
-inline const char* agentNames() { return "x3, x3q, lv1 to lv36, lv1q to lv36q, random"; }
+inline const char* agentNames() { return "x3, x3q, lv1 to lv37, lv1q to lv37q, random"; }
 
 } // namespace juraic::ai

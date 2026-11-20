@@ -6,9 +6,9 @@
 // changed here is not written back to the settings.
 // And the reading of the real game's screen: the pictures of the window the person chooses (play/realgame_capture_win.h)
 // read with the table (play/realgame_read.h) and followed frame after frame with the rules of the game
-// (play/realgame_follow.h). And the play: the AI plays 2P (play/realgame_drive.h) through a pad of the driver ViGEmBus
-// (play/realgame_pad_win.h), plugged in when the AI first plays or the person first presses it by hand to pick it for 2P
-// in the real game's menus, and kept plugged in until the mode is left.
+// (play/realgame_follow.h). And the play: the AI plays 2P by the real game's memory (play/memory/primary_drive14_win.h)
+// or by its pictures (play/realgame_drive.h), the buttons sent the way chosen (play/realgame_input_win.h: keys of the
+// keyboard, or a pad of the driver ViGEmBus), made ready as reading begins and stopped when the mode is left.
 // The parts for finding faults are built only with JURAIC_REALGAME_DEBUG=1 (CMake: JURAIC_REALGAME_DEBUG=ON): the
 // record of each reading (play/realgame_log.h), a table read from LAYOUT_FILE, a picture of the real game kept when
 // asked for (the key S), and the counters of the reading and the play on the screen of the mode.
@@ -20,13 +20,16 @@
 #define JURAIC_REALGAME_REASONS JURAIC_REALGAME_DEBUG
 #endif
 #include "../ai/level.h"
+#include "level_ex.h"
 #include "realgame_capture_win.h"
 #include "realgame_drive.h"
 #include "realgame_film.h"
+#include "realgame_topfilm.h"
 #include "realgame_follow.h"
 #include "realgame_log.h"
 #include "realgame_menu.h"
 #include "realgame_pace.h"
+#include "realgame_input_win.h"
 #include "realgame_pad_win.h"
 #include <mmsystem.h>
 #include <atomic>
@@ -80,10 +83,16 @@ inline HWND findProgramWindow(const std::wstring& program) {
 }
 
 struct RealGameMode {
-    enum Row { ROW_STYLE, ROW_LEVEL, ROW_READ, ROW_PLAY, ROW_PRESS, ROW_BACK, ROWS };
+    enum Row { ROW_STYLE, ROW_LEVEL,
+        ROW_READ, ROW_PLAY, ROW_PRESS,
+        ROW_BACK, ROWS };
     int row = ROW_STYLE;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LEVELS; // 1 .. LEVELS (as Settings::aiLevel)
+    // The seat is marked "Ex" (as Settings::aiEx, play/level_ex.h): from Lv 36 up, with the real game read by its memory
+    // first and the row of the screen on the cancels, the AI takes the ways over soonest; the same level without the
+    // mark takes the straight ways there. The row of the level steps through both.
+    bool ex = true;
     // Settings laid over those of the AI that plays 2P (realgame::overlayParams: name=value,...); "": the AI's as a match
     // against it has them.
     std::string aiSettings;
@@ -115,7 +124,7 @@ struct RealGameMode {
         autoRead = true, notTheGame = nullptr;
         stopPlaying(), stopPress();
         style = settingsStyle ? 1 : 0;
-        level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LEVELS ? juraic::ai::LEVELS : settingsLevel;
+        level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LAST_LEVEL ? juraic::ai::LAST_LEVEL : settingsLevel;
         stopReading();
     }
     // The value of the row under the cursor changed by `by` steps; past either end it comes in again at the other
@@ -123,7 +132,11 @@ struct RealGameMode {
     bool change(int by) {
         const Hold hold(state);
         if (row == ROW_STYLE) style = ((style + by) % 2 + 2) % 2;
-        else if (row == ROW_LEVEL) level = ((level - 1 + by) % juraic::ai::LEVELS + juraic::ai::LEVELS) % juraic::ai::LEVELS + 1;
+        else if (row == ROW_LEVEL) {
+            // (with the cancels: Lv 36, then Lv 36Ex)
+            const LevelPick to = levelStep(level, ex, by, cancelOffered());
+            level = to.level, ex = to.ex;
+        }
         else if (row == ROW_PRESS) pressButton = ((pressButton + by) % PRESS_BUTTONS + PRESS_BUTTONS) % PRESS_BUTTONS;
         else return false;
         return true;
@@ -137,7 +150,9 @@ struct RealGameMode {
     // that fit the pictures (Driver::fit).
     int lag = 4;
     bool turnsSwapped = true;
-    VirtualPad pad;
+    // The buttons go to the real game by the virtual pad or by keys with no driver (play/realgame_input_win.h: the row
+    // ROW_WAY); the mode presses one pad whichever way it is.
+    RealPad pad;
     realgame::Driver driver;
     bool playing = false; // the AI plays 2P
 
@@ -155,42 +170,72 @@ struct RealGameMode {
 
     // The real game's menus read from its screen (play/realgame_menu.h): the pad of 2P presses A where 2P has to pick
     // its row, its character and its way of play, so that the person need not.
-    bool autoMenus = true;
+    // Keyboard menu confirmation is shared and cannot be sent to just the second seat.
+    bool automaticMenuInput() const { return !pad.byKeys(); }
     bool padOnReading = true; // the pad is plugged in as reading begins (a test of the reading alone plugs in none)
     const realgame::MenuLayout menus = realgame::measuredMenus();
     realgame::Menu menu = realgame::Menu::None; // as last read
     realgame::MenuPresser presser;
     std::wstring padError; // (the pad could not be plugged in as reading began)
 
-    // The AI `agent` begins to play 2P. False, with the reason in `error`, when it cannot.
-    bool startPlaying(std::unique_ptr<juraic::ai::Agent> agent, std::wstring& error) {
-        const Hold hold(state);
-        if (reading != Reading::On) return error = L"先に「読み始める」で実機の窓を選んでください", false;
-        if (!pad.running() && !pad.start(error)) return false;
+    // The driver of the pictures takes `agent` and is made ready to play (the caller holds `state`).
+    void beginDriver(std::unique_ptr<juraic::ai::Agent> agent) {
         driver = realgame::Driver{};
         told = {};
         realgame::Driver::prepare(agent.get());
         driver.lag = lag, driver.turnsSwapped = turnsSwapped, driver.agent = std::move(agent);
         driver.notes = &notes;
+        juraic::inputdiag::trace.seat=driver.me;
+        const int64_t memoryOn=0;
+        juraic::inputdiag::trace.emit(juraic::inputdiag::CONFIG,{2,driver.me,memoryOn,1,automaticMenuInput()});
         // (no picture for long, or a menu read: the pad holds nothing, and the driver's engine takes so - holdNothing)
-        driver.gate = [this](int64_t, uint8_t b) { return holdNothing ? uint8_t(0) : b; };
+        driver.gate = [this](int64_t now, uint8_t b) {
+            ++diagnosticGateCalls;int reasons=0;
+            if(holdNothing)reasons|=4;
+            const auto output=reasons?uint8_t(0):b;
+            juraic::inputdiag::trace.emit(juraic::inputdiag::GATE,{tracker.rounds,now,driver.begunPair(),0,b,output,reasons,
+                0,0,0,0,driver.lag,driver.turnsSwapped,-1,-1,0,0});
+            return output;
+        };
+    }
+    // The AI `agent` begins to play 2P. False, with the reason in `error`, when it cannot. `spare`: with the play by the
+    // memory first, an agent like it for the driver of the pictures, which takes over while the memory cannot be read
+    // (watchPrimary); none: nothing takes over.
+    bool startPlaying(std::unique_ptr<juraic::ai::Agent> agent, std::wstring& error, std::unique_ptr<juraic::ai::Agent> spare = nullptr) {
+        const Hold hold(state);
+        if (reading != Reading::On) return error = L"先に「読み取り開始」で実機のウィンドウを選択してください", false;
+        if (!pad.running() && !pad.start(error)) return false;
+        if(!juraic::inputdiag::trace.active())return error=L"診断ログが開始されていないため、画面認識の方式では AI を開始できません",false;
+        beginDriver(std::move(agent));
         playing = true;
         record.event(tracker.frame, "the AI plays 2P: lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are"));
         return true;
     }
+    // The AI plays by the real game's memory first (not by its pictures).
+    bool memoryFirst() const {
+        return false;
+    }
     // The AI changed on the screen while it plays (its kind, its level): `agent` plays 2P from the next pair on.
-    void replaceAgent(std::unique_ptr<juraic::ai::Agent> agent) {
+    void replaceAgent(std::unique_ptr<juraic::ai::Agent> agent, std::unique_ptr<juraic::ai::Agent> spare = nullptr) {
         const Hold hold(state);
         if (!playing) return;
         driver.replaceAgent(std::move(agent));
-        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level));
+        record.event(tracker.frame, std::string("the AI from the next pair on: ") + (style ? "x3q" : "x3") + ", level " + std::to_string(level) + (cancels() ? "Ex (the ways over soonest)" : ""));
     }
     void stopPlaying() {
         const Hold hold(state);
-        if (playing) record.event(tracker.frame, "the AI stops");
+        if (playing) {
+            juraic::inputdiag::trace.emit(juraic::inputdiag::MARKER,{1,tracker.frame,driver.begunPair()});
+            record.event(tracker.frame, "the AI stops");
+        }
         playing = false;
+        // (the agents are let go on threads of their own, as Driver::replaceAgent does: one may wait for a search it has
+        //  begun, and the thread that draws the screen is not to wait for that)
+        const auto letGo = [](std::unique_ptr<juraic::ai::Agent>& agent) {
+            if (agent) std::thread([a = std::move(agent)]() mutable { a.reset(); }).detach();
+        };
         driver.stop();
-        driver.agent.reset();
+        letGo(driver.agent);
         pad.press(0);
     }
     // A press asked for (the pad plugged in if it is not). False, with the reason in `error`, when the pad cannot be.
@@ -229,6 +274,9 @@ struct RealGameMode {
     // reading; otherwise each frame of this program.
     void drive(int64_t now, uint8_t why = 0) {
         const Hold hold(state);
+        const auto diagnosticBegin=juraic::inputdiag::clock();const auto costBefore=juraic::inputdiag::trace.cost100ns();
+        diagnosticGateCalls=0;int64_t diagnosticDriverTime=0;
+        const auto diagnosticRefreshEnd=juraic::inputdiag::clock();
         realgame::PadRecord held{now, 0, 0, 0};
         realgame::SentRecord sent{0, 0, why};
         if (pressLeft >= 0) {
@@ -238,7 +286,9 @@ struct RealGameMode {
         } else if (playing) {
             const int corrected = driver.corrected;
             holdNothing = why == 3 || why == 4;
+            const auto diagnosticDriverBegin=juraic::inputdiag::clock();
             held.buttons = driver.tick(follow, now);
+            diagnosticDriverTime=juraic::inputdiag::clock()-diagnosticDriverBegin;
             sent.driven = clockTime();
             pad.press(held.buttons);
             sent.set = clockTime();
@@ -246,6 +296,7 @@ struct RealGameMode {
             for (const auto& [at, line] : notes) record.event(at, line);
             notes.clear();
             if (driver.corrected != corrected) record.ask("put-right");
+            if (DEBUG_PARTS) topFilm.follow(driver.begunPair(), driver.beenAloft(), driver.corrected != corrected, now);
             if (driver.toldPair() >= 0 && (driver.toldPair() != told.pair || juraic::placementId(driver.toldPlacement()) != told.placement))
                 told = {driver.toldPair(), uint8_t(juraic::placementId(driver.toldPlacement()))}, record.tell(told);
         }
@@ -255,6 +306,11 @@ struct RealGameMode {
             if (held.by == 1) record.sent(sent);
         }
         record.flush();
+        const int64_t memoryOn=0,memoryTaken=0;
+        juraic::inputdiag::trace.emit(juraic::inputdiag::DRIVE,{tracker.rounds,now,tracker.frame,driver.begunPair(),diagnosticGateCalls,
+            memoryOn,memoryTaken,diagnosticDriverTime/10,(diagnosticRefreshEnd-diagnosticBegin)/10,held.buttons,held.pad,why,
+            diagnosticBegin,sent.driven,sent.set,juraic::inputdiag::clock(),int64_t((juraic::inputdiag::trace.cost100ns()-costBefore)/10),
+            int64_t(juraic::inputdiag::trace.dropped())});
     }
 
     // ---- the reading of the real game's screen ----
@@ -268,6 +324,8 @@ struct RealGameMode {
     // has been read (confirmed: its program is kept in WINDOW_FILE); one in which neither is read for NOT_THE_GAME frames
     // is let go, and another is looked for.
     static constexpr const wchar_t* WINDOW_FILE = L"realgame_window.txt";
+    // The way the buttons go to the real game as it was last chosen (RealPad::WAY_RECORD_NAMES), in the same folder.
+    static constexpr const wchar_t* INPUT_FILE = L"realgame_input.txt";
     static constexpr int NOT_THE_GAME = 20 * 60;
     bool autoRead = true;
     bool confirmed = false;
@@ -282,6 +340,9 @@ struct RealGameMode {
     bool layoutOwn = false;
     std::wstring layoutError; // (the file is there and a line of it is not understood: the table built in is used)
     realgame::Follower follow;
+    int64_t diagnosticGateCalls=0;
+    bool cancelOffered() const { return false; }
+    bool cancels() const { return false; }
     const realgame::Tracker& tracker = follow.tracker;
     WindowCapture capture;
     int width = 0, height = 0;  // of the last picture
@@ -294,6 +355,7 @@ struct RealGameMode {
     realgame::Record record;
     std::wstring recordError; // (it could not be made: the reading goes on without it)
     realgame::WindowFilm film; // (of the two windows, play/realgame_film.h: with DEBUG_PARTS, in the record's folder)
+    realgame::TopFilm topFilm; // (of the top of the field of 2P, play/realgame_topfilm.h: with DEBUG_PARTS, there too)
 
     // Begins to read the window `w` with the table of `folder` (or the one built in); `about` begins the record.
     bool startReading(HWND w, const std::filesystem::path& folder, const std::string& about, std::wstring& error) {
@@ -310,7 +372,7 @@ struct RealGameMode {
         }
         follow.reset();
         follow.tracker.stillFrames = layout.stillFrames;
-        pace.reset(), nextDue = -1, menuFor = 0, holdNothing = false, told = {};
+        told = {};
         // (with DEBUG_PARTS, PlayPace::sendAfter from JURAIC_SEND_AFTER_US - microseconds after a picture was shown -, for
         //  trying it on the real game)
         pace.sendAfter = realgame::PlayPace::SEND_AFTER;
@@ -318,7 +380,8 @@ struct RealGameMode {
         if (DEBUG_PARTS && GetEnvironmentVariableW(L"JURAIC_SEND_AFTER_US", after, 32) > 0) pace.sendAfter = _wtoll(after) * 10;
         // (the pad of 2P is there from the menus on: the real game gives it the row of 2P)
         padError.clear();
-        if (padOnReading && !pad.running() && !pad.start(padError)) padError = L"仮想のパッドを差せません: " + padError;
+        pad.aim(w, windowProgram(w)); // (keys go to this window, and are those of this program's settings)
+        if (padOnReading && !pad.running() && !pad.start(padError)) padError = L"入力方式を開始できません: " + padError;
         menu = realgame::Menu::None, presser = realgame::MenuPresser{};
         const realgame::Layout table = layout; // (the capture's own copy: it reads on its thread)
         recordError.clear();
@@ -333,14 +396,19 @@ struct RealGameMode {
                   std::to_string(layout.baseHeight) + "\n";
         header += "lag " + std::to_string(lag) + " to begin with, the press " + PRESS_RECORD_NAMES[pressButton] + "\n";
         header += "each line: the frame of the clock (1/60 s), then what happened\n";
-        if (DEBUG_PARTS && !record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作れませんでした（" + (folder / L"realgame").wstring() + L"）";
-        if (DEBUG_PARTS && record.isOpen()) film.open(record.folder() / L"film");
+        if (DEBUG_PARTS && !record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作成できませんでした（" + (folder / L"realgame").wstring() + L"）";
+        if(record.isOpen() && !juraic::inputdiag::trace.open(folder / L"realgame" / stamp / L"input-diagnostics.tsv",&RealGameMode::clockTime))
+            recordError=L"診断ログを作成できません（画面認識の方式では AI を開始できません）";
+        if (DEBUG_PARTS && record.isOpen()) film.open(record.folder() / L"film"), topFilm.open(record.folder() / L"film");
         notes.clear();
         const bool started = capture.start(w, [this, table](const realgame::Picture& p, int64_t time) { took(p, time, table, menus); }, error);
         reading = started ? Reading::On : Reading::Off;
         if (started) startPlayer();
-        else if (DEBUG_PARTS) film.close(), record.close();
-        else record.close();
+        else {
+            juraic::inputdiag::trace.close();
+            if (DEBUG_PARTS) film.close(), topFilm.close();
+            record.close();
+        }
         return started;
     }
     // (the threads of the capture and of the play end first, this holding nothing they wait for)
@@ -349,7 +417,8 @@ struct RealGameMode {
         stopPlayer();
         const Hold hold(state);
         if (playing) stopPlaying();
-        if (DEBUG_PARTS) film.close();
+        juraic::inputdiag::trace.close();
+        if (DEBUG_PARTS) film.close(), topFilm.close();
         record.close(); // (after the capture: its thread offers the record pictures)
         reading = Reading::Off;
         std::lock_guard<std::mutex> handed(lock);
@@ -367,6 +436,8 @@ struct RealGameMode {
 
     // The next picture kept as it is, to be saved (savedPicture). Nothing without DEBUG_PARTS.
     void keepNext() {
+        const Hold held(state);
+        juraic::inputdiag::trace.emit(juraic::inputdiag::MARKER,{0,tracker.frame,driver.begunPair()});
         if (!DEBUG_PARTS) return;
         std::lock_guard<std::mutex> hold(lock);
         saveWanted = true, savedReady = false;
@@ -455,7 +526,7 @@ private:
             menuFor = menu == realgame::Menu::None ? 0 : menuFor + 1;
         }
         // (in the menus the pad of 2P presses A where 2P has to; a press asked for by hand comes first)
-        if (!now.empty() && autoMenus && pad.running() && pressLeft < 0 && presser.step(menu)) {
+        if (!now.empty() && automaticMenuInput() && pad.running() && pressLeft < 0 && presser.step(menu)) {
             pressLeft = PRESS_HOLD, pressBits = XUSB_GAMEPAD_A;
             record.event(now.back().frame, std::string("the pad of 2P presses A: ") + realgame::menuName(menu));
         }
@@ -583,7 +654,7 @@ private:
         Taken t{realgame::read(p, table), realgame::frameShown(time), p.width, p.height, realgame::readMenu(p, menuTable), time, came, 0};
         t.read = clockTime();
         record.offer(p, t.frame);
-        if (DEBUG_PARTS) film.take(p, t.frame, t.reading, table);
+        if (DEBUG_PARTS) film.take(p, t.frame, t.reading, table), topFilm.take(p, t.frame, t.reading, table);
         std::lock_guard<std::mutex> hold(lock);
         if (taken.size() >= 600) taken.pop_front(); // (no one takes them: the oldest go)
         taken.push_back(std::move(t));

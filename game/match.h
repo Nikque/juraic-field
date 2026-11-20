@@ -27,7 +27,9 @@ struct Round {
     RoundState state = RoundState::Playing;
 
     void start(const Rules& r, uint64_t roundSeed, int playerCount = 2, const Timing& t = DEFAULT_TIMING) {
-        rules = r, timing = t, players = playerCount, seed = roundSeed;
+        // (Rules::cancel: the rules read off records of the real game on top of the frame counts given, and the
+        //  garbage of the 13th row cleared as there)
+        rules = r, timing = r.cancel ? recordedRules(t) : t, players = playerCount, seed = roundSeed;
         tsumo = makeTsumo(rules, seed);
         ownTsumo = false;
         frame = 0;

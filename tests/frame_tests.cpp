@@ -632,11 +632,28 @@ static void testStartBeat() {
               << gap << " and " << 2 * gap << " frames before it\n";
 }
 
+static void testRecordedLockDelay() {
+    const Timing timing = recordedRules(Timing{});
+    Player player;
+    player.phase = Phase::Control;
+    player.colors = Pair{Cell(1), Cell(2)};
+    player.pair = spawnPair(timing);
+    player.pair.y = 0;
+    player.pair.upper = false;
+    player.pair.grounded = player.pair.owned = true;
+    player.pair.ownFrames = 9;
+    Incoming opponent;
+    const PlayerEvents events = advancePlayer(player, opponent, BTN_DOWN, Tsumo{}, Rules{}, timing, 0);
+    check(events.locked && player.phase == Phase::Land && player.wait == 6,
+          "a recorded pair resting nine frames before lock leaves six frames of landing");
+}
+
 int main(int argc, char** argv) {
     try {
         testStartBeat();
         testFall();
         testMeasuredInput();
+        testRecordedLockDelay();
         testPlacementTimes();
         testAgainstTurns();
         testSameFrame();

@@ -72,8 +72,10 @@ namespace play {
 //     answer will be large enough, and guards against an attack the pair in his hand fires where that costs next
 //     to nothing (Params::x3Enough 110, x3Guard 10, x3GuardNear 20, x3GuardMost 50). The tool plays a replay of
 //     version 13 or before with x3Enough 0 and x3Guard 0.
+//  15: the rules of 5 to 14, and garbage in the 13th row right above a coloured piece that clears is cleared with it
+//     (Rules::clearTopGarbage). A replay of version 14 or before is played without that.
 // Replays of the versions before 5 are refused, and so is a file that begins with another first word.
-constexpr int TIMING_VERSION = 14;
+constexpr int TIMING_VERSION = 15;
 constexpr int OLDEST_VERSION = 5; // the oldest version that is read
 
 // One choice of an AI seat, and the AI of a seat in a round (name empty = a person, or a replay without AI lines).
@@ -171,6 +173,8 @@ inline bool loadReplay(const std::filesystem::path& path, Replay& r) {
     if (!(in >> word >> version >> r.timingVersion) || word != "JURAIC_FIELD_REPLAY" || (version != 1 && version != 2) || r.timingVersion < OLDEST_VERSION) return false;
     r = Replay{r.settings, 1, r.timingVersion, {}};
     r.settings.rules.setsNeeded = 1; // (a replay from before there were sets does not name them: its match was one set)
+    r.settings.rules.cancel = false; // (... nor the cancel: its rounds were played without)
+    r.settings.rules.clearTopGarbage = r.timingVersion >= 15; // (before: garbage in the 13th row never cleared)
     SettingsTable table(r.settings);
     while (in >> word) {
         if (word == "players") {

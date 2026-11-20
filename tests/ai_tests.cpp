@@ -11,6 +11,7 @@
 // "ai_tests bench" measures instead of testing; a number is the number of
 // high fields of test 3.
 #include "../ai/agents.h"
+#include "../ai/answer.h"
 #include "../ai/duel.h"
 #include "../ai/build.h"
 #include "../ai/detect.h"
@@ -72,7 +73,7 @@ static bool samePlayer(const Player& a, const Player& b) {
 }
 
 static bool sameObservation(const Observation& a, const Observation& b) {
-    if (!sameRules(a.rules, b.rules) || std::memcmp(&a.timing, &b.timing, sizeof(Timing)) || a.players != b.players ||
+    if (!sameRules(a.rules, b.rules) || !(a.timing == b.timing) || a.players != b.players ||
         a.me != b.me || a.frame != b.frame || a.state != b.state || a.tsumo.count() != b.tsumo.count())
         return false;
     for (int i = 0; i < 2; ++i)
@@ -88,7 +89,7 @@ static void checkObservation(const Round& r, int shown, Observation& o, const st
     for (int me = 0; me < r.players; ++me) {
         ai::observe(r, me, o);
         check(o.me == me && o.frame == r.frame && o.players == r.players && o.state == r.state, "header differs" + at);
-        check(sameRules(o.rules, r.rules) && !std::memcmp(&o.timing, &r.timing, sizeof(Timing)), "rules differ" + at);
+        check(sameRules(o.rules, r.rules) && o.timing == r.timing, "rules differ" + at);
         check(samePlayer(o.player[0], r.player[0]) && samePlayer(o.player[1], r.player[1]), "players differ" + at);
         check(&o.self() == &o.player[me] && &o.opponent() == &o.player[1 - me], "self / opponent" + at);
         check(o.tsumo.count() == shown, "pairs seen: " + std::to_string(o.tsumo.count()) + ", shown " + std::to_string(shown) + at);
@@ -469,6 +470,38 @@ static void testDuelOrder() {
 }
 
 static std::string describe(const GameField& g, int id); // (below, with the tests of the buttons)
+
+static void testTallSpawnInputCache() {
+    GameField field;
+    for (int y = 0; y < 12; ++y) field.f.set(1, y, GARBAGE);
+    ai::SpawnInputCache cache;
+    int reachable = 0, blocked = 0;
+    auto compare = [&](const Timing& timing, int speed) {
+        cache.configure(timing, speed);
+        for (int id = 0; id < PLACEMENTS; ++id) {
+            const auto direct = ai::tallSpawnInput(field, placement(id), timing, speed);
+            const auto saved = cache.get(field, placement(id));
+            check(saved.frames == direct.frames && saved.soft == direct.soft && saved.rested == direct.rested,
+                  "cached tall-field input differs from the button path");
+            if (direct.frames) ++reachable;
+            else ++blocked;
+        }
+    };
+    compare(TM, 100);
+    for (int y = 0; y < 12; ++y) field.f.set(1, y, Cell(1 + y % 4));
+    compare(TM, 100);
+    field.f.set(1, 10, EMPTY);
+    field.f.set(1, 12, GARBAGE);
+    field.row14[1] = GARBAGE;
+    compare(TM, 100);
+    Timing slower = TM;
+    slower.softDropPerFrame /= 2;
+    compare(slower, 100);
+    compare(slower, 150);
+    field.row14[1] = EMPTY;
+    compare(slower, 150);
+    check(reachable > 0 && blocked > 0, "cache fixture needs reachable and unreachable placements");
+}
 
 // (e) Duel::tallPaths (Params::x3TallPaths). Fields with columns up to thirteen
 //     high: player 0 plays the buttons InputPlanner finds for a random
@@ -1233,11 +1266,80 @@ static void testQuietPoke() {
 // it was measured (rows written out here once more), that a level changes its twelve settings and nothing else,
 // that the top level is X3 as it is, and that over a round against the random agent a level presses the buttons
 // of X3 given its settings.
+static void testKnownSearchPairs() {
+    ai::Observation o;
+    o.me = 1;
+    o.ownTsumo = true;
+    o.player[1].phase = Phase::Control;
+    o.player[1].nextPair = 1;
+    o.player[1].colors = {Cell(1), Cell(2)};
+    o.tsumo.pairs.assign(20, {Cell(1), Cell(1)});
+    o.tsumo1.pairs.assign(20, {Cell(3), Cell(4)});
+    o.tsumo1.pairs[0] = o.player[1].colors;
+    ai::Params p = ai::levelParams(ai::Params{}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet plans;
+    // Limit the exhaustive search to one placement. The beam still receives 16.
+    gaze.plans(o, 1, true, 1, p, 1, plans);
+    check(plans.pairCount == 1 && plans.knownCount == 16 && ai::samePair(plans.pair[0], o.player[1].colors) &&
+          ai::samePair(plans.pair[1], o.tsumo1.pair(1)) && ai::samePair(plans.pair[15], o.tsumo1.pair(15)),
+          "a pair in the hand appears once and the longer known prefix belongs to that seat");
+    gaze.plans(o, 1, true, 1, ai::Params{}, 1, plans);
+    check(plans.pairCount == 1 && plans.knownCount == 1, "the legacy beam uses exactly the pairs used by its exhaustive plans");
+    o.player[1].phase = Phase::Next;
+    o.player[1].nextPair = 0;
+    o.player[1].wait = 1;
+    o.tsumo1.pairs.resize(4);
+    gaze.plans(o, 1, true, 4, p, 1, plans);
+    check(plans.pairCount == 3 && plans.knownCount == 4, "four known pairs feed the beam, but exhaustive search stops at three");
+    for (const auto& plan : plans.plans) check(plan.count <= 3, "exhaustive plan over three placements");
+    o.tsumo1.pairs.resize(2);
+    gaze.plans(o, 1, true, 3, p, 1, plans);
+    check(plans.knownCount == 2, "a shortened observation exposes no previous fourth pair");
+
+    struct RivalProbe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        using X3Pace::beginRival;
+        using X3Pace::takeRival;
+    };
+    p.beamWidth = 2;
+    p.beamDepth = 4;
+    p.beamQueues = 1;
+    p.searchThreads = 1;
+    RivalProbe rival(p);
+    std::array<Pair, ai::MAX_KNOWN> known;
+    known.fill({Cell(1), Cell(2)});
+    const GameField empty;
+    check(!rival.beginRival(empty, known.data(), 17, o.rules, o.timing, p, 1, true),
+          "the rival search rejects a count beyond the captured array");
+    for (int count : {4, 11, 16}) {
+        auto caller = known;
+        check(rival.beginRival(empty, caller.data(), count, o.rules, o.timing, p, 1, true),
+              "begin a rival search with the entire known prefix");
+        caller[count - 1] = {Cell(3), Cell(4)};
+        ai::BuildResult actual;
+        const auto end = ai::Builder::Clock::now() + std::chrono::seconds(3);
+        check(!rival.takeRival(empty, caller.data(), count, p, 1, end, actual),
+              "a correction at the end of a known prefix invalidates the cached answer");
+        check(rival.takeRival(empty, known.data(), count, p, 1, end, actual),
+              "the worker owns a copy of the entire original prefix");
+        ai::Builder direct;
+        const auto expected = direct.search(empty, known.data(), count, o.rules, o.timing, p, 1, 1);
+        check(actual.best == expected.best && actual.alive == expected.alive &&
+              std::equal(actual.sum, actual.sum + PLACEMENTS, expected.sum),
+              "the asynchronous and direct searches use the same known pairs");
+    }
+}
+
 static void testLevelTable() {
     const ai::Params standard;
+    check(ai::levelOf("lv37") == 37 && ai::levelOf("lv37q") == 37 &&
+          ai::agentParams("lv37", standard).knownPairs == ai::MAX_KNOWN &&
+          ai::agentParams("lv36", standard).knownPairs == 3 && ai::agentParams("x3", standard).knownPairs == 3,
+          "only the selected level 37 uses the longer known prefix");
     check(ai::LEVELS == 36 && ai::levelOf("lv1") == 1 && ai::levelOf("lv9") == 9 && ai::levelOf("lv36") == 36 && ai::levelOf("lv1q") == 1 && ai::levelOf("lv12q") == 12 && ai::levelOf("lv36q") == 36,
           "the names of the levels are not read");
-    for (const char* name : {"lv", "lv0", "lv01", "lv37", "lv100", "lv1a", "x3", "x3q", "random", "", "LV1", "q", "lvq", "lv0q", "lv37q", "lv100q", "lv1qq"})
+    for (const char* name : {"lv", "lv0", "lv01", "lv38", "lv100", "lv1a", "x3", "x3q", "random", "", "LV1", "q", "lvq", "lv0q", "lv38q", "lv100q", "lv1qq"})
         check(!ai::levelOf(name), std::string("a level is read from the name ") + name);
     check(!ai::quietOf("x3") && ai::quietOf("x3q") && !ai::quietOf("lv12") && ai::quietOf("lv12q") && ai::quietOf("lv36q") && !ai::quietOf("random") && !ai::quietOf("q"), "which names are the AI that hardly pokes");
     const auto text = [](const ai::Params& p) {
@@ -1249,7 +1351,7 @@ static void testLevelTable() {
           "the top level is not X3 as it is");
     // (the two switches of the top level, which the levels below it play without: level.h)
     check(standard.x3Enough == 110 && standard.x3Guard == 10 && standard.x3GuardNear == 20 && standard.x3GuardMost == 50, "the top level does not play with x3Enough 110 and the guard 10, 20, 50");
-    check(text(ai::levelParams(standard, 0)) == text(standard) && text(ai::levelParams(standard, 37)) == text(standard), "a number that is no level changes the settings");
+    check(text(ai::levelParams(standard, 0)) == text(standard) && text(ai::levelParams(standard, 38)) == text(standard), "a number that is no level changes the settings");
     check(text(ai::agentParams("x3q", standard)) == text(ai::quietPoke(standard)) && text(ai::agentParams("lv36q", standard)) == text(ai::quietPoke(standard)),
           "agentParams does not give x3q the settings of quietPoke");
     // (either AI at every level: the level of the AI that hardly pokes is its eight settings and the fourteen of the level)
@@ -1937,6 +2039,364 @@ struct OutlastProbe : ai::X3Agent {
         return outlasts(o, id, o.rules.rateAt(o.frame), seed);
     }
 };
+static void testKnownExchange() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        void read(const ai::Observation& o, int depth) {
+            gaze.plans(o, o.me, true, depth, p, 7, mine);
+            gaze.plans(o, 1 - o.me, false, depth, p, 7, theirs);
+        }
+        ai::Plan immediate(int minimum) const {
+            for (const auto& s : mine.plans)
+                if (s.fireDepth == 1 && !s.allClear && s.sent >= minimum) return s;
+            throw std::runtime_error("test field has no eligible immediate chain");
+        }
+        using X3Agent::knownCounter;
+        bool judged(const ai::Observation& o, int id) { return outlasts(o, id, o.rules.rateAt(o.frame), 7); }
+        int protect(const ai::Observation& o, int hold, const ai::Plan& fire) {
+            return protectAnswer(o, hold, (1u << hold) | (1u << fire.id[0]), 7, fire);
+        }
+        int answerFor(const ai::Observation& o, int hold, int fire) {
+            const unsigned legal = (1u << hold) | (1u << fire);
+            std::erase_if(mine.plans, [&](const ai::Plan& s) { return !(legal >> s.id[0] & 1); });
+            const ai::Duel d(o, 7);
+            return answer(o, legal, o.rules.rateAt(o.frame), 7, d, false, o.self().incoming.total());
+        }
+    };
+    ai::Params baseline;
+    check(!baseline.checkKnownExchange && !ai::levelParams(baseline, 35).checkKnownExchange &&
+          !ai::levelParams(baseline, 36).checkKnownExchange && ai::levelParams(baseline, 37).checkKnownExchange,
+          "verified exchanges are enabled only by explicit Lv37");
+    Rules rules;
+    rules.targetPoints = 10;
+    for (int i = 0; i < rules.marginSteps; ++i) rules.marginRates[size_t(i)] = 10;
+    baseline.x3OutlastScale = 0; // Isolate the case of a beam estimate that missed his reply.
+    baseline.x3OutlastSettled = 0;
+    baseline.beamDepth = 1, baseline.beamWidth = 2, baseline.beamQueues = 1;
+    GameField equal;
+    stairs(equal, 0, 3);
+    equal.f.set(5, 0, 4); // A chain remains an ordinary fire even when the stairs clear.
+    const Pair key{4, 3};
+    Round match = situation(rules, equal, equal, key);
+    const auto o = ai::observe(match, 0);
+    Probe legacy(baseline), checked(ai::levelParams(baseline, 37));
+    legacy.read(o, 1), checked.read(o, 1);
+    const ai::Plan attack = checked.immediate(72);
+    check(checked.knownCounter(o, attack, 7) && legacy.judged(o, attack.id[0]) && !checked.judged(o, attack.id[0]),
+          "a known counter cancels this exact main chain despite an optimistic beam estimate");
+    match.player[1].field = {};
+    const auto undefended = ai::observe(match, 0);
+    checked.read(undefended, 1);
+    check(!checked.knownCounter(undefended, attack, 7) && checked.judged(undefended, attack.id[0]),
+          "without the concrete counter the estimate retains its result");
+
+    // A holding move takes one whole row over the three reds on the floor.
+    // Neither colour of the following pair can then start a chain. A red in
+    // the fourth column now starts one and offsets all six pieces.
+    rules.targetPoints = 1;
+    for (int i = 0; i < rules.marginSteps; ++i) rules.marginRates[size_t(i)] = 1;
+    GameField reds;
+    for (int x = 0; x < 3; ++x) reds.f.set(x, 0, 1);
+    Round defence = situation(rules, reds, GameField{}, Pair{1, 2});
+    const int hold = placementId({5, UP});
+    baseline.x3AnswerShape = 0;
+    baseline.x3Fall = baseline.x3Main = baseline.x3Surplus = baseline.x3Danger = baseline.x3Close = 0;
+    baseline.x3Crowd = baseline.x3Crowd2 = baseline.x3Crowd3 = baseline.x3Crowd4 = 0;
+    baseline.x3Used = 1; // Isolate a score that would otherwise prefer the non-firing move.
+    Probe waiting(baseline), saving(ai::levelParams(baseline, 37));
+    auto obs = [&](int confirmed) {
+        defence.player[0].incoming.confirmed = confirmed;
+        return ai::observe(defence, 0);
+    };
+    const auto row = obs(W);
+    waiting.read(row, 2), saving.read(row, 2);
+    const ai::Plan counter = saving.immediate(0);
+    check(saving.protect(row, hold, counter) == counter.id[0] &&
+          waiting.answerFor(row, hold, counter.id[0]) == hold && saving.answerFor(row, hold, counter.id[0]) == counter.id[0],
+          "fire the known offset before a complete row buries the available answer");
+    for (int incoming : {W - 1, W + 1}) {
+        auto partial = obs(incoming);
+        partial.nextGarbageOrder[0].reset();
+        saving.read(partial, 2);
+        check(saving.protect(partial, hold, counter) == hold, "a partial or undetermined fall must not force a fire");
+    }
+    saving.read(row, 1);
+    check(saving.protect(row, hold, counter) == hold, "a missing next pair does not prove a lost firing opportunity");
+    for (int y = 1; y <= 3; ++y) defence.player[0].field.f.set(0, y, 2);
+    const auto sideways = obs(W);
+    saving.read(sideways, 2);
+    check(saving.protect(sideways, hold, saving.immediate(0)) == hold,
+          "the next blue can still join a tall column from the side after a complete row");
+}
+
+static void testExchangePoke() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+
+        int exchange(const ai::Observation& o, unsigned legal, uint64_t seed, bool expired = false) {
+            gaze.plans(o, o.me, true, p.x2Depth, p, seed, mine);
+            gaze.plans(o, 1 - o.me, false, p.x2Depth, p, seed, theirs);
+            ai::MidgameBeam::extend(o, p, seed, mine, [] { return false; });
+            ai::MidgameBeam::extend(o, p, seed, theirs, [] { return false; });
+            if (expired) {
+                budgetNow = p.thinkBudget;
+                began = ai::Builder::Clock::now() - std::chrono::milliseconds(budgetNow);
+            }
+            return exchangePoke(o, legal, o.rules.rateAt(o.frame), seed);
+        }
+    };
+    auto p = ai::agentParams("lv37", {});
+    check(p.pokeExchange == 2 && !ai::agentParams("lv36", {}).pokeExchange && !ai::agentParams("x3", {}).pokeExchange,
+          "the exchange poke is enabled by explicit Lv37");
+    p.beamWidth = 250;
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.beamFixedQueues = 4;
+    p.searchThreads = 1;
+    p.thinkBudget = 0;
+
+    Round round;
+    Rules rules;
+    rules.cancel = false;
+    rules.colors = 4;
+    round.start(rules, 1);
+    auto o = ai::observe(round, 1);
+    o.frame = 1173;
+    o.ownTsumo = true;
+    const auto board = [](std::string_view rows, GameField& field) {
+        int y = ROW_14, x = 0;
+        for (const char c : rows) {
+            if (c == '/') { --y; x = 0; continue; }
+            const Cell cell = Cell(c - '0');
+            if (y == ROW_14) field.row14[size_t(x)] = cell;
+            else field.f.set(x, y, cell);
+            ++x;
+        }
+    };
+    board("000000/200000/400000/100001/100004/400023/110043/130043/420022/413032/434414/141142/433414/432244", o.player[1].field);
+    board("000000/000000/000000/000004/000004/000004/330012/140443/142311/311331/224122/113442/131411/243331", o.player[0].field);
+    o.player[1].phase = Phase::Next;
+    o.player[1].wait = 1;
+    o.player[1].moves = 25;
+    o.player[1].scoring.pool = 224;
+    o.player[0].phase = Phase::Control;
+    o.player[0].wait = 0;
+    o.player[0].moves = 24;
+    o.player[0].scoring.pool = 228;
+    o.player[0].colors = {2, 2};
+    o.player[0].pair.x = 1;
+    o.player[0].pair.y = 10;
+    o.tsumo.pairs = {{4, 3}, {1, 2}};
+    o.tsumo1.pairs = {{1, 2}, {3, 3}, {3, 4}};
+
+    constexpr uint64_t seed = 8551104070121336641ull + 25;
+    constexpr unsigned route = 1u << 3;
+    Probe safe(p);
+    check(safe.exchange(o, route, seed) == 3 && safe.exchangeNote.chosen && safe.exchangeNote.depth == 1,
+          "the side chain is fired when the exchange leaves enough for the main chain");
+
+    auto mirror = o;
+    mirror.player[0] = mirror.player[1];
+    mirror.tsumo = mirror.tsumo1;
+    auto readsPartial = p;
+    readsPartial.x3PokeKeep = 1;
+    Probe defended(readsPartial);
+    check(defended.exchange(mirror, route, seed) < 0 && !defended.exchangeNote.chosen,
+          "the same side chain is declined when the opponent can offset it");
+    check(defended.exchangeCounts.smallReply > 0 || defended.exchangeCounts.chance > 0,
+          "the side chain was refused by the small reply reading");
+
+    p.thinkBudget = 180;
+    Probe expired(p);
+    check(expired.exchange(o, route, seed, true) < 0 && !expired.exchangeNote.chosen,
+          "an expired exchange does not commit the side chain");
+}
+
+static void testMidgamePressure() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        unsigned fires(const ai::Observation& o, int waves = 2) {
+            gaze.plans(o, o.me, true, 1, p, 7, mine);
+            gaze.plans(o, 1 - o.me, false, 1, p, 7, theirs);
+            unsigned fire = 0;
+            for (const ai::Plan& s : mine.plans)
+                if (s.chains == waves && !s.allClear && s.sent >= 2 * W) fire |= 1u << s.id[0];
+            return fire;
+        }
+        bool extraReply() const { return !theirs.tactical.empty(); }
+        int pressure(const ai::Observation& o, unsigned legal) { return midgamePressure(o, legal, 7); }
+    };
+    const ai::Params legacy;
+    ai::Params midgame = ai::levelParams(legacy, 37);
+    check(!legacy.readMidgame && !ai::levelParams(legacy, 36).readMidgame && midgame.readMidgame,
+          "only explicit Lv37 enables the midgame reading");
+    // Keep the optimistic turn estimate fixed while checking actual input and garbage timing.
+    midgame.x3MoveFrames = midgame.x3MoveFramesMid = midgame.x3MoveFramesLate = 200;
+
+    Rules rules;
+    rules.targetPoints = 20;
+    for (int i = 0; i < rules.marginSteps; ++i) rules.marginRates[size_t(i)] = 20;
+    GameField mine, crowded;
+    stairs(mine, 0, 2);
+    mine.f.set(5, 0, Cell(3));
+    for (int x = 0; x < W; ++x)
+        for (int y = 0; y < 9; ++y) crowded.f.set(x, y, GARBAGE);
+    Round match = situation(rules, mine, crowded, Pair{4, 2});
+    auto open = ai::observe(match, 0);
+    Probe newAgent(midgame), oldAgent(legacy);
+    const unsigned early = newAgent.fires(open);
+    check(early && newAgent.pressure(open, early) < 0, "a fourth rival pair can offset the attack before it lands");
+    // With the later rival spawn the same attack can land within the visible window.
+    open.player[1].wait = 94;
+    const unsigned fire = newAgent.fires(open);
+    const int hit = newAgent.pressure(open, fire);
+    check(hit >= 0 && (fire >> hit & 1), "Lv37 fires a confirmed two-row attack into an undefended crowded field");
+
+    GameField counter;
+    for (int x = 0; x < W; ++x)
+        for (int y = 0; y < (x >= 3 ? 9 : 6); ++y) counter.f.set(x, y, Cell(3 + (x + y) % 2));
+    for (int x = 0; x < 2; ++x)
+        for (int y = 0; y < 4; ++y)
+            if (const Cell color = mine.f.get(x, y)) counter.f.set(x, y + 6, color);
+    match.player[1].field = counter;
+    const auto defended = ai::observe(match, 0);
+    oldAgent.fires(defended);
+    newAgent.fires(defended);
+    check(!oldAgent.extraReply() && newAgent.extraReply(), "the small-reply slot keeps alternative first placements for Lv37");
+    check(newAgent.pressure(defended, 1u << hit) < 0, "the same attack is rejected when the opponent can offset it");
+
+    GameField doubleGroup;
+    for (int x : {1, 3}) for (int y = 0; y < 3; ++y) doubleGroup.f.set(x, y, Cell(2));
+    doubleGroup.f.set(5, 0, Cell(1));
+    auto single = ai::observe(situation(rules, doubleGroup, crowded, Pair{2, 3}), 0);
+    single.player[1].wait = open.player[1].wait;
+    const unsigned shortFire = newAgent.fires(single, 1);
+    const int singleHit = newAgent.pressure(single, shortFire);
+    check(singleHit >= 0 && (shortFire >> singleHit & 1), "a fast single can crush when it sends a full two rows");
+}
+
+static void testMidgameBeam() {
+    Rules rules;
+    rules.targetPoints = 20;
+    for (int i = 0; i < rules.marginSteps; ++i) rules.marginRates[size_t(i)] = 20;
+    GameField mine;
+    stairs(mine, 0, 2);
+    mine.f.set(5, 0, Cell(3));
+    const auto match = situation(rules, mine, GameField{}, Pair{4, 3});
+    auto o = ai::observe(match, 0);
+    o.tsumo.pairs = {{4, 3}, {4, 3}, {4, 3}, {4, 2}};
+    const ai::Params p = ai::levelParams(ai::Params{}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet own, rival;
+    gaze.plans(o, 0, true, 3, p, 7, own);
+    gaze.plans(o, 1, false, 3, p, 7, rival);
+    const auto later = [](const ai::Plan& s) { return s.fireDepth == 4 && s.chains == 2 && s.sent >= 2 * W; };
+    ai::MidgameBeam::extend(o, p, 7, own, [] { return false; });
+    const auto target = std::find_if(own.tactical.begin(), own.tactical.end(), later);
+    check(target != own.tactical.end(), "the shorter beam retains an attack with the fourth observed pair");
+    const ai::Duel exchange = ai::playOut(o, own, &*target, rival, nullptr, p, 7, true);
+    check(exchange.player[0].moves == o.self().moves + 4 && exchange.player[0].chain.chains == 2 &&
+          exchange.player[1].incoming.total() >= 2 * W, "the attack found by the beam works with concrete input paths");
+
+    o.tsumo.pairs.resize(3);
+    gaze.plans(o, 0, true, 3, p, 7, own);
+    ai::MidgameBeam::extend(o, p, 7, own, [] { return false; });
+    check(std::none_of(own.tactical.begin(), own.tactical.end(), later), "an unseen fourth pair cannot create an attack");
+
+    // This stack keeps the second pair above the trigger. A weak single with the
+    // first pair makes the second pair fire, although the exhaustive tree stops
+    // at the single. Both pairs are already visible.
+    for (int y = 0; y < 3; ++y) o.player[0].field.f.set(2, y, Cell(3));
+    o.tsumo.pairs = {{4, 3}, {4, 2}};
+    gaze.plans(o, 0, true, 3, p, 7, own);
+    gaze.plans(o, 1, false, 3, p, 7, rival);
+    const auto reshape = [](const ai::Plan& s) { return s.fireDepth == 2 && s.chains == 2 && s.sent >= 2 * W; };
+    check(std::none_of(own.plans.begin(), own.plans.end(), reshape), "the normal gaze stops at the earlier single");
+    ai::MidgameBeam::extend(o, p, 7, own, [] { return false; });
+    const auto cleared = std::find_if(own.tactical.begin(), own.tactical.end(), reshape);
+    check(cleared != own.tactical.end(), "the extra beam can clear a blocking single and fire the follow-up");
+    const ai::Duel shaped = ai::playOut(o, own, &*cleared, rival, nullptr, p, 7, true);
+    check(shaped.player[0].moves == o.self().moves + 2 && shaped.player[0].chain.chains == 2,
+          "reshaping and the following fire both have concrete input paths");
+}
+
+static void testMidgamePoke() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        bool readsMainReply(const ai::Observation& o) {
+            gaze.plans(o, 0, true, 1, p, 7, mine);
+            gaze.plans(o, 1, false, 1, p, 7, theirs);
+            for (const ai::Plan& fire : mine.plans) {
+                if (fire.chains != 2 || fire.sent != 2 * W) continue;
+                const ai::Duel quiet = ai::playOut(o, mine, &fire, theirs, nullptr, p, 7, true);
+                for (const auto* list : {&theirs.plans, &theirs.tactical}) for (const ai::Plan& reply : *list)
+                    if (reply.chains == 3 && reply.points == 1180 && !pressureFollowUp(o, fire, quiet, reply, false, 7) &&
+                        pressureFollowUp(o, fire, quiet, reply, true, 7)) return true;
+            }
+            return false;
+        }
+    };
+    ai::Observation o;
+    o.rules.colors = 5;
+    o.rules.targetPoints = 30;
+    o.rules.softDropBonus = false;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{1, 2}, {5, 1}, {3, 4}};
+    o.tsumo1.pairs = {{3, 5}, {4, 2}, {3, 5}};
+    o.player[0].phase = o.player[1].phase = Phase::Next;
+    o.player[0].wait = 1;
+    o.player[1].wait = 100;
+    stairs(o.player[0].field, 0, 2);
+    for (int k = 0; k < 3; ++k) {
+        for (int y = 0; y < 3; ++y) o.player[0].field.f.set(5 - k, y, Cell(3 + k));
+        if (k) o.player[0].field.f.set(5 - k, 3, Cell(2 + k));
+    }
+    stairs(o.player[1].field, 0, 3);
+    o.player[1].field.f.set(2, 4, Cell(2));
+    o.player[1].field.f.set(5, 0, Cell(5));
+    Probe agent(ai::levelParams(ai::Params{}, 37));
+    check(agent.readsMainReply(o), "forcing the larger reply can leave one row after a verified second fire");
+}
+
+static void testMidgameShelter() {
+    ai::Observation o;
+    o.rules.colors = 5;
+    o.rules.targetPoints = 20;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{3, 4}, {4, 2}, {4, 5}};
+    o.tsumo1.pairs = {{2, 3}, {3, 5}, {4, 5}};
+    o.player[0].phase = o.player[1].phase = Phase::Next;
+    o.player[0].wait = 130;
+    o.player[1].wait = 1;
+    GameField& own = o.player[0].field;
+    GameField& rival = o.player[1].field;
+    for (int x = 0; x < W; ++x)
+        for (int y = 0; y < 4; ++y) own.f.set(x, y, Cell((x < 3 ? 3 : 1) + (x + y) % 2));
+    GameField left;
+    stairs(left, 0, 2);
+    stairs(rival, 0, 2);
+    rival.f.set(5, 0, Cell(1));
+    for (int x = 0; x < 2; ++x) for (int y = 0; y < 4; ++y)
+        if (const Cell c = left.f.get(x, y)) own.f.set(x, y + 4, c);
+    for (int k = 0; k < 3; ++k) {
+        for (int y = 4; y < 7; ++y) own.f.set(5 - k, y, Cell(3 + k));
+        if (k) own.f.set(5 - k, 7, Cell(2 + k));
+    }
+    const ai::Params p = ai::levelParams(ai::Params{}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet a, b;
+    gaze.plans(o, 1, false, 3, p, 7, b);
+    gaze.plans(o, 0, true, 3, p, 7, a);
+    const unsigned legal = legalPlacements(own);
+    const auto shelter = ai::findMidgameShelter(o, a, b, legal, p, 7, [] { return false; });
+    check((shelter.safe & (1u << 2)) && (shelter.buried & (1u << 7)),
+          "a quiet first move can leave an offset where another move takes two rows");
+    o.tsumo.pairs.resize(1);
+    gaze.plans(o, 0, true, 3, p, 7, a);
+    const auto unseen = ai::findMidgameShelter(o, a, b, legal, p, 7, [] { return false; });
+    check(!unseen.safe && !unseen.buried, "an unknown key pair cannot justify a defensive replacement");
+}
+
 static void testOutlast() {
     Rules rules;
     rules.targetPoints = 40;
@@ -2238,6 +2698,16 @@ static void testSecondChoice() {
         }
     }
     {
+        // holdLevel: the pair that waits for its second choice does not go down behind the wall, and is taken there
+        // fourteen frames after it appeared too.
+        auto a = probe(12, 14, true);
+        a->fixed = placementId({SPAWN_X, UP}), a->secondFixed = left, a->holdSecond = true, a->holdLevel = true;
+        const auto h = play(*a, 1, nullptr, 10);
+        check(h[0] == 2 && h[SPAWN_X] == 0 && a->againSwitched == 1 && a->againNoPath == 0 && a->againLevel > 0,
+              "a pair waiting for a second choice behind a wall stays above it: heights " + std::to_string(h[0]) + " and " + std::to_string(h[SPAWN_X]) + ", switched " +
+                  std::to_string(a->againSwitched) + ", no path " + std::to_string(a->againNoPath) + ", left alone in " + std::to_string(a->againLevel) + " frames");
+    }
+    {
         // No second choice: when again() says no; when the choice is made in the frame of the pair;
         // when it is begun with the third pair on the screen already.
         auto no = probe(12, 0, false), late = probe(1, 0, true), four = probe(4, 0, true);
@@ -2514,9 +2984,49 @@ struct SwitchProbe : ai::X3Agent {
     using ai::X3Agent::guardChoices;
     using ai::X3Agent::pickBuild;
     using ai::X3Agent::soonSum;
+    using ai::X3Agent::roomPairs;
     const ai::PlanSet& plans() const { return mine; }
 };
 // Switches of X3, each on what it was made for.
+// Params::thinkRivalFull: the search of the opponent's field made on a thread of its own is the search itself, taken
+// once, and only for the field, the pairs, the depth and the width it was begun with.
+static void testRivalAhead() {
+    struct Open : ai::X3Agent {
+        using ai::X3Agent::X3Agent;
+        using ai::X3Pace::beginRival;
+        using ai::X3Pace::takeRival;
+    };
+    using Clock = ai::Builder::Clock;
+    Rng rng(20261118, 7);
+    Rules rules;
+    ai::Params p;
+    p.beamWidth = 30, p.beamDepth = 6, p.beamQueues = 3;
+    Open agent(p);
+    const GameField f = randomField(rng, rules, 20), other = randomField(rng, rules, 22);
+    const Pair known[2] = {{rules.palette[0], rules.palette[1]}, {rules.palette[2], rules.palette[2]}};
+    ai::Params q = p;
+    q.beamLastValues = 0; // (as a search of a choice that does not read the values of the last layer)
+    ai::Builder plain;
+    const ai::BuildResult direct = plain.search(f, known, 2, rules, TM, q, 5, 1);
+    ai::BuildResult got;
+    check(!agent.takeRival(f, known, 2, p, 5, Clock::now(), got), "thinkRivalFull: nothing to take before a search is begun");
+    check(agent.beginRival(f, known, 2, rules, TM, p, 5, true), "thinkRivalFull: a search begun");
+    check(!agent.takeRival(other, known, 2, p, 5, Clock::now() + std::chrono::seconds(60), got), "thinkRivalFull: not taken for another field");
+    ai::Params deeper = p;
+    deeper.beamDepth = 7;
+    check(!agent.takeRival(f, known, 2, deeper, 5, Clock::now() + std::chrono::seconds(60), got), "thinkRivalFull: not taken for another depth");
+    check(agent.beginRival(f, known, 2, rules, TM, p, 5, false), "thinkRivalFull: asked for again while at work - the same search");
+    check(agent.takeRival(f, known, 2, p, 5, Clock::now() + std::chrono::seconds(60), got), "thinkRivalFull: taken when done");
+    bool same = got.best == direct.best && !got.cut;
+    for (int i = 0; i < PLACEMENTS; ++i) same = same && got.sum[i] == direct.sum[i] && got.sumBy[i][2] == direct.sumBy[i][2];
+    check(same, "thinkRivalFull: the search made on its own thread is the search made at once");
+    check(!agent.takeRival(f, known, 2, p, 5, Clock::now(), got), "thinkRivalFull: taken once");
+    // (another field: the search at work is stopped and the new one begun)
+    check(agent.beginRival(f, known, 2, rules, TM, p, 5, true) && agent.beginRival(other, known, 2, rules, TM, p, 5, true), "thinkRivalFull: a search for another field begun");
+    check(!agent.takeRival(f, known, 2, p, 5, Clock::now() + std::chrono::seconds(60), got) && agent.takeRival(other, known, 2, p, 5, Clock::now() + std::chrono::seconds(60), got),
+          "thinkRivalFull: the search of the field asked for last is the one at work");
+}
+
 static void testSwitches() {
     Rules rules;
     rules.targetPoints = 40; // a clear of four is one garbage piece
@@ -2842,6 +3352,186 @@ static void testSwitches() {
         check(ai::buildValue(g, plain, TM, q) == ai::buildValue(g, plain, TM, one), "keyNoneFrom above the cells of the field changes the value");
         q.keyNoneFrom = cells;
         check(ai::buildValue(g, plain, TM, q) == ai::buildValue(g, plain, TM, none), "keyNoneFrom: not the value without key pieces");
+    }
+
+    // x3Crush: the clear of four that leaves the chain of three standing (one garbage piece here, so x3Crush 1)
+    // crushes an opponent who has nothing to answer it with; not with a threshold above what it leaves; not one who
+    // answers it with a clear of his own and keeps his chain; not one whose main chain, fired at it, is larger than
+    // the own main chain built on while his runs; never with the switch off. The chain of three is no crush: it
+    // spends the own main chain. (Without the pairs nobody can see yet - xWildEvery 0 - each case turns on one rule.)
+    {
+        GameField mine;
+        stairs(mine, 0, 3);
+        for (int y = 0; y < 3; ++y) mine.f.set(5, y, 4);
+        GameField small; // (the own main chain of two waves, which the pair cannot fire)
+        stairs(small, 0, 2);
+        for (int y = 0; y < 3; ++y) small.f.set(5, y, 4);
+        GameField answers;
+        stairs(answers, 0, 2);
+        for (int y = 0; y < 3; ++y) answers.f.set(5, y, 4);
+        GameField larger; // (a chain of four his pair fires, and nothing else: far more than the own chain of two can become in the moves it runs)
+        stairs(larger, 0, 4);
+        const Pair pair{4, 3};
+        struct Case {
+            const GameField* own;
+            const GameField* his;
+            int crush;
+            bool fires;
+            const char* what;
+        };
+        const Case cases[] = {
+            {&mine, nullptr, 1, true, "no crush at an opponent who has nothing"},
+            {&mine, nullptr, 2, false, "a crush that leaves less than x3Crush"},
+            {&mine, &answers, 1, false, "a crush at an opponent who answers it and keeps his chain"},
+            {&small, &larger, 1, false, "a crush whose answer by his main chain the own main chain does not offset"},
+            {&small, nullptr, 1, true, "no crush with the smaller own main chain at an opponent who has nothing"},
+            {&mine, nullptr, 0, false, "a crush with the switch off"},
+        };
+        for (const Case& c : cases) {
+            ai::Params q = p;
+            q.x3Crush = c.crush, q.xWildEvery = 0;
+            ai::X3Agent agent(q);
+            Round r = situation(rules, *c.own, c.his ? *c.his : GameField{}, pair);
+            const int id = choose(r, agent);
+            GameField after = *c.own;
+            place(after, placement(id), pair);
+            ai::Trial chain;
+            ai::runTrialChain(after.f, rules, TM, chain);
+            const bool crushed = agent.kind == ai::X3Agent::Crush;
+            check(crushed == c.fires && (!crushed || chain.chains == 1),
+                  std::string(c.what) + " (kind " + std::to_string(agent.kind) + ", " + std::to_string(chain.chains) + " waves)");
+        }
+    }
+
+    // x3CrushPairs: two of the crush's colour stand on the sixth column, and every pair brings one more. The pair in
+    // hand fires only the main chain, which is no crush; the clear of four is fired by the second pair. With one pair
+    // nothing is done about it; with two the pair in hand builds it (kind CrushBuild) and fires nothing.
+    {
+        GameField mine;
+        stairs(mine, 0, 3);
+        mine.f.set(5, 0, 4), mine.f.set(5, 1, 4);
+        const Pair pair{4, 3};
+        for (int pairs = 1; pairs <= 2; ++pairs) {
+            ai::Params q = p;
+            q.x3Crush = 1, q.x3CrushPairs = pairs, q.xWildEvery = 0;
+            ai::X3Agent agent(q);
+            Round r = situation(rules, mine, GameField{}, pair);
+            const int id = choose(r, agent);
+            GameField after = mine;
+            place(after, placement(id), pair);
+            ai::Trial chain;
+            ai::runTrialChain(after.f, rules, TM, chain);
+            const std::string at = " (kind " + std::to_string(agent.kind) + ", placement " + std::to_string(id) + ", " + std::to_string(chain.chains) + " waves)";
+            if (pairs == 1) check(agent.kind != ai::X3Agent::Crush && agent.kind != ai::X3Agent::CrushBuild, "a crush of the pair in hand where only the next pair fires one" + at);
+            else check(agent.kind == ai::X3Agent::CrushBuild && chain.chains == 0 && agent.crushCounts.built > 0, "x3CrushPairs 2: the crush the next pair fires is not built" + at);
+        }
+    }
+
+    // x3Crush and what stands on his field. One clear of four that a single piece fires, and nothing else: firing it
+    // spends all he has and offsets no more than the crush sends, so the crush stands. Two of them: he fires one at the
+    // crush and keeps the other - an answer that leaves his main chain, though no pair on the screen holds its colour.
+    {
+        GameField mine;
+        stairs(mine, 0, 3);
+        for (int y = 0; y < 3; ++y) mine.f.set(5, y, 4);
+        GameField one, two;
+        for (int y = 0; y < 3; ++y) one.f.set(0, y, 1), two.f.set(0, y, 1), two.f.set(5, y, 2);
+        const Pair pair{4, 3};
+        for (const GameField* his : {&one, &two}) {
+            ai::Params q = p;
+            q.x3Crush = 1, q.xWildEvery = 0;
+            ai::X3Agent agent(q);
+            Round r = situation(rules, mine, *his, pair);
+            choose(r, agent);
+            const bool crushed = agent.kind == ai::X3Agent::Crush;
+            check(crushed == (his == &one), std::string(his == &one ? "no crush at an opponent whose one clear answers nothing more than it" : "a crush at an opponent who holds an answer one piece fires") +
+                                                " (kind " + std::to_string(agent.kind) + ")");
+        }
+    }
+
+    // x3ChokeRoom. The pairs a field still takes; and on a field with room for four (every column ten high, the second
+    // and the fourth eleven, no two neighbours of one colour but for three of colour 4 on top of the sixth column and
+    // three of colour 3 on top of the first): a poke, when a chain the pair fires keeps the main chain (the other
+    // three) and sends enough; without one the chain in hand is fired at an opponent with room to wait, when no later
+    // pair on the screen fires it; it is waited for when one does; and it is not fired at an opponent whose field is as
+    // full. (The pairs {1, 2} that follow in two of the cases clear nothing: no three pieces of one of their colours
+    // come together with them.)
+    {
+        GameField tall;
+        for (int y = 0; y < 12; ++y) tall.f.set(0, y, Cell(1 + y % 2));
+        check(SwitchProbe::roomPairs(GameField{}) == 35 && SwitchProbe::roomPairs(tall) == 29, "the room of a field is not counted as its open cells below the top (" +
+                                                                                                    std::to_string(SwitchProbe::roomPairs(GameField{})) + ", " +
+                                                                                                    std::to_string(SwitchProbe::roomPairs(tall)) + ")");
+        GameField full;
+        for (int x = 0; x < W; ++x)
+            for (int y = 0; y < 10; ++y) full.f.set(x, y, Cell(1 + (x + 2 * y) % 4));
+        full.f.set(5, 8, 4), full.f.set(0, 8, 3);
+        full.f.set(1, 10, 2), full.f.set(3, 10, 4);
+        check(SwitchProbe::roomPairs(full) == 4 && !full.f.hasClear(), "the full field of the test is not what it expects");
+        const Pair hand{4, 3}, other{1, 2};
+        struct Case {
+            int room, minPoke;
+            bool othersNext; // the two pairs after the one in hand hold neither colour of it
+            const GameField* his;
+            int kind;        // the kind expected; -1: neither a poke nor a chain fired first
+            const char* what;
+        };
+        const GameField none{};
+        const Case cases[] = {
+            {2, 1, false, &none, ai::X3Agent::Poke, "about to choke, a chain that keeps the main chain is not fired as a poke"},
+            {2, 4, true, &none, ai::X3Agent::Fire, "about to choke, no poke, an opponent with room: the chain in hand is not fired"},
+            {2, 4, false, &none, -1, "about to choke: the chain is fired though a later pair on the screen fires it too"},
+            {2, 4, true, &full, -1, "about to choke: the chain is fired first at an opponent whose field is as full"},
+            {0, 1, true, &none, -1, "x3ChokeRoom 0: a poke or a chain fired first by the rule that is switched off"},
+        };
+        for (const Case& c : cases) {
+            ai::Params q = p;
+            q.x3Poke = 0, q.x3ChokeRoom = c.room, q.x3MinPoke = c.minPoke;
+            ai::X3Agent agent(q);
+            Round r = situation(rules, full, *c.his, hand);
+            if (c.othersNext) pairAt(r, r.player[0].nextPair + 1, other), pairAt(r, r.player[0].nextPair + 2, other);
+            const int id = choose(r, agent);
+            GameField after = full;
+            place(after, placement(id), hand);
+            ai::Trial chain;
+            ai::runTrialChain(after.f, rules, TM, chain);
+            const bool fired = agent.kind == ai::X3Agent::Poke || agent.kind == ai::X3Agent::Fire;
+            check(c.kind < 0 ? !fired : agent.kind == c.kind && chain.chains == 1,
+                  std::string(c.what) + " (kind " + std::to_string(agent.kind) + ", placement " + std::to_string(id) + ", " + std::to_string(chain.chains) + " waves)");
+        }
+    }
+
+    // x3Crush: the plans of a player are the same with the switch on, and for every plan that fires, the list the crush
+    // reads (PlanSet::keeping) holds one of its slot that keeps as much of the main chain or more (a slot keeps one plan
+    // by another rule, and the answer that keeps the main chain can be the one it drops).
+    {
+        GameField g;
+        stairs(g, 0, 3);
+        for (int y = 0; y < 3; ++y) g.f.set(5, y, 4);
+        const Round r = situation(rules, GameField{}, g, Pair{4, 3});
+        const ai::Observation o = ai::observe(r, 0);
+        ai::Params on = p;
+        on.x3Crush = 12;
+        ai::Gaze gaze;
+        ai::PlanSet off, with;
+        gaze.plans(o, 1, false, 3, p, 7, off);
+        gaze.plans(o, 1, false, 3, on, 7, with);
+        bool same = off.plans.size() == with.plans.size() && off.keeping.empty();
+        for (size_t i = 0; same && i < off.plans.size(); ++i)
+            same = off.plans[i].id[0] == with.plans[i].id[0] && off.plans[i].fireDepth == with.plans[i].fireDepth && off.plans[i].sent == with.plans[i].sent &&
+                   off.plans[i].mainAfter == with.plans[i].mainAfter;
+        check(same, "x3Crush changes the plans of a player");
+        int fires = 0;
+        for (const ai::Plan& x : with.plans) {
+            if (!x.fireDepth) continue;
+            ++fires;
+            bool covered = false;
+            for (const ai::Plan& k : with.keeping)
+                covered = covered || (k.fireDepth == x.fireDepth && k.allClear == x.allClear && (x.allClear || ai::attackSize(k.sent) == ai::attackSize(x.sent)) &&
+                                      k.mainAfter >= x.mainAfter);
+            check(covered, "a plan that fires has no plan of its slot that keeps as much of the main chain in the list of the crush");
+        }
+        check(fires > 0, "no plan fires in the test of the list of the crush");
     }
 
     // x3PokeUnanswered: the clear of four that leaves the chain of three standing is a poke at an
@@ -3472,7 +4162,1909 @@ static void benchDuel() {
     }
 }
 
+// The answers a field holds, and the chance that its player has the pieces for one (ai/answer.h).
+static void testAnswer() {
+    // Unseen pieces, four colours: none of two has one colour (9/16), or one of two colours (1/4); one of two has it (7/16), both (1/16).
+    check(ai::chanceNone(1, 2, 4) == 562500 && ai::chanceNone(2, 2, 4) == 250000 && ai::chanceNone(4, 1, 4) == 0 && ai::chanceNone(1, 0, 4) == ai::CHANCE_SURE,
+          "the chance that no unseen piece has one of the colours");
+    check(ai::chanceAtLeast(1, 2, 4) == 437500 && ai::chanceAtLeast(2, 2, 4) == 62500 && ai::chanceAtLeast(0, 0, 4) == ai::CHANCE_SURE && ai::chanceAtLeast(3, 2, 4) == 0,
+          "the chance of so many unseen pieces of one colour");
+    // Three red pieces on the floor: one red piece more clears them, 40 points, and nothing is left.
+    static const char* const ROWS[1] = {"RRR..."};
+    const GameField field = fieldOf(ROWS, 1);
+    const Rules rules;
+    const ai::Params p;
+    ai::Replies r;
+    ai::repliesOf(field, rules, DEFAULT_TIMING, p, r);
+    bool red = r.count > 0;
+    for (int i = 0; i < r.count; ++i) red = red && r.item[i].color == 1 && r.item[i].added == 1 && r.item[i].points == 40 && r.item[i].mainAfter == 0;
+    check(red, "the answers of three red pieces on the floor: one red piece each, 40 points, " + std::to_string(r.count) + " found");
+    const Pair withRed{1, 2}, without{2, 3};
+    check(ai::answerChance(r, 40, 0, 1, &withRed, 1, rules) == ai::CHANCE_SURE, "a red piece in the pair on the screen: the answer is sure");
+    check(ai::answerChance(r, 40, 0, 1, &without, 1, rules) == 0, "no red piece in the only pair he places: no answer");
+    check(ai::answerChance(r, 40, 0, 1, nullptr, 0, rules) == 437500, "one unseen pair: a red piece in it 7 times of 16");
+    check(ai::answerChance(r, 40, 0, 2, &without, 1, rules) == 437500, "a pair without and one unseen pair: 7 times of 16");
+    check(ai::answerChance(r, 40, 0, 3, &without, 1, rules) == ai::CHANCE_SURE - ai::chanceNone(1, 4, 4), "a pair without and two unseen pairs: one of four pieces");
+    check(ai::answerChance(r, 41, 0, 3, &withRed, 1, rules) == 0, "an attack larger than any chain of the field: no answer");
+    check(ai::answerChance(r, 40, 1, 3, &withRed, 1, rules) == 0, "a main chain to be kept that the answer does not leave: no answer");
+    check(ai::answerChance(r, 40, 0, 0, &withRed, 1, rules) == 0, "no pair placed in time: no answer");
+    check(ai::largestAnswer(r, 0) == 40 && ai::largestAnswer(r, 1) == 0, "the largest answer, and the largest that leaves a main chain");
+}
+
+static void testSetupSpeed() {
+    ai::Observation o;
+    o.player[0].phase = o.player[1].phase = Phase::Next;
+    o.player[0].wait = o.player[1].wait = 1;
+    for (int y = 0; y < 4; ++y) o.player[0].field.f.set(2, y, GARBAGE);
+    ai::PlanSet mine;
+    mine.pairCount = mine.knownCount = 1;
+    mine.pair[0] = {1, 2};
+    ai::Params p = ai::levelParams(ai::Params{}, 37);
+    ai::BuildResult b;
+    constexpr int torn = 8, upright = 2;
+    constexpr unsigned choices = (1u << torn) | (1u << upright);
+    b.alive = choices;
+    b.sum[torn] = 10000;
+    b.sum[upright] = 9900;
+    const auto pick = [&](unsigned mask) { return ai::pickFasterSetup(o, mine, b, torn, mask, p, [] { return false; }); };
+    check(pick(choices) == upright, "a nearby upright build frees the next pair earlier");
+    b.sum[upright] = 9000;
+    check(pick(choices) == torn, "a faster path cannot override the main chain margin");
+    b.sum[upright] = 9900;
+    check(pick(1u << torn) == torn, "a faster build cannot bypass the tactical mask");
+    check(ai::pickFasterSetup(o, mine, b, torn, choices, p, [] { return true; }) == torn, "keep the original build at the deadline");
+    b.cut = true;
+    check(pick(choices) == torn, "a partial beam cannot certify comparable main chains");
+    b.cut = false;
+    p = ai::levelParams(ai::Params{}, 36);
+    check(pick(choices) == torn && !p.equivalentSetupRoute, "legacy level retains the original route and build");
+    p.setupSpeedNear = 0;
+    p.setupSideNear = 5;
+    p = ai::levelParams(p, 37);
+    check(p.setupSpeedNear == 0 && p.setupSideNear == 5, "explicit setup settings survive level selection");
+}
+
+static void testMidgameAttackRetention() {
+    ai::Plan quick;
+    quick.count = quick.fireDepth = 3;
+    quick.endFrame = 120;
+    quick.sent = 25;
+    quick.mainAfter = 3000;
+    ai::Plan reserve = quick, strong = quick;
+    reserve.id[2] = 1;
+    reserve.endFrame = 150;
+    reserve.mainAfter = 4500;
+    strong.id[2] = 2;
+    strong.endFrame = 165;
+    strong.sent = 41;
+    ai::MidgameAttacks bucket;
+    for (const auto& plan : {quick, reserve, strong, strong}) bucket.consider(plan);
+    std::vector<ai::Plan> plans;
+    bucket.appendTo(plans);
+    check(plans.size() == 3 && plans[2].sent == 41, "a stronger offset survives a faster and a better-preserved attack");
+    bucket = {};
+    bucket.consider(quick);
+    plans.clear();
+    bucket.appendTo(plans);
+    check(plans.size() == 1, "the same plan is appended only once");
+}
+static void testMidgamePreparation() {
+    ai::Observation o;
+    o.rules.colors = 5;
+    o.rules.targetPoints = 20;
+    o.rules.softDropBonus = false;
+    for (int i = 0; i < o.rules.marginSteps; ++i) o.rules.marginRates[size_t(i)] = 20;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{4, 5}, {1, 2}};
+    o.tsumo1.pairs = {{1, 2}, {3, 4}};
+    o.player[0].phase = o.player[1].phase = Phase::Next;
+    o.player[0].wait = o.player[1].wait = 1;
+    GameField& own = o.player[0].field;
+    stairs(own, 0, 2);
+    for (int k = 0; k < 3; ++k) {
+        const int x = 5 - k;
+        for (int y = 0; y < 3; ++y) own.f.set(x, y, Cell(3 + k));
+        if (k) own.f.set(x, 3, Cell(2 + k));
+    }
+    for (int y = 0; y < 6; ++y) own.f.set(2, y, GARBAGE);
+
+    ai::Params p = ai::levelParams(ai::Params{}, 37);
+    p.setupSideNear = 20;
+    ai::Gaze gaze;
+    ai::PlanSet mine, theirs;
+    gaze.plans(o, 1, false, 2, p, 7, theirs);
+    gaze.plans(o, 0, true, 2, p, 7, mine);
+    constexpr unsigned blocked = 1u << 0, prepared = 1u << 2, both = blocked | prepared;
+    ai::BuildResult built;
+    built.alive = both;
+    built.sum[0] = 1000;
+    built.sum[2] = 990;
+    const auto keep = [&] {
+        return ai::preparationChoices(o, mine, theirs, built, 0, both, p, 7, [] { return false; });
+    };
+    check(ai::quietSetupChoices(o, mine, both) == both, "both setup placements leave the first pair quiet");
+    check(keep() == prepared, "a nearby build keeps a concrete side fire and the larger main chain");
+    built.sum[2] = 970;
+    check(keep() == both, "side fire cannot buy a build outside the main-chain margin");
+    built.sum[2] = 990;
+    check(ai::preparationChoices(o, mine, theirs, built, 0, both, p, 7, [] { return true; }) == 0,
+          "an interrupted preparation read does not narrow the build");
+    o.tsumo.pairs.resize(1);
+    gaze.plans(o, 0, true, 2, p, 7, mine);
+    check(keep() == both, "the unseen second pair cannot justify preparing a fire");
+    // Open the approach to the right-hand staircase. Its leftmost column
+    // starts with colour 5, which the second pair adds beside that column.
+    for (int y = 0; y < 6; ++y) own.f.set(2, y, EMPTY);
+    o.tsumo.pairs = {{3, 4}, {5, 5}};
+    gaze.plans(o, 0, true, 2, p, 7, mine);
+    check(std::any_of(mine.plans.begin(), mine.plans.end(), [](const ai::Plan& plan) {
+        return plan.id[0] == 2 && plan.fireDepth == 2 && plan.chains == 3 && plan.sent >= W;
+    }), "the known pair can fire the main chain");
+    ai::Plan main;
+    main.count = 2;
+    main.id[0] = main.id[1] = 2;
+    const ai::Duel fired = ai::playOut(o, mine, &main, theirs, nullptr, p, 7, true);
+    check(fired.player[0].moves == o.self().moves + 2 && fired.player[0].chain.chains == 3 && fired.player[1].incoming.total() >= W,
+          "the main chain has concrete input paths");
+    check(keep() == both, "the fire that consumes the main chain is not a preparation advantage");
+}
+
+static void testEquivalentSetupRoute() {
+    constexpr int wanted = 7, reversed = 18;
+    const Pair mono{1, 1};
+    const Rules rules;
+    const GameField field;
+    const PairControl from = spawnPair(TM);
+    ai::InputPlanner planner;
+    ai::InputPath original, faster;
+    const auto choose = [&](const GameField& g, const Rules& r, Pair pair, int target, unsigned mask) {
+        check(planner.planEquivalent(g, from, target, mask, pair, TM, r, faster), "the placement has an input route");
+        return target;
+    };
+    const unsigned legal = legalPlacements(field);
+    check(planner.plan(field, from, placement(wanted), TM, rules.speedPercent, original), "the original orientation is reachable");
+    check(choose(field, rules, mono, wanted, legal) == reversed && replays(field, from, placement(reversed), faster),
+          "the alternate orientation is replayable");
+
+    struct Playback {
+        GameField field;
+        int score, lock, next;
+    };
+    const auto play = [&](const ai::InputPath& path) {
+        Round round;
+        round.start(rules, 1, 1);
+        round.tsumo.piece[0] = mono.axis, round.tsumo.piece[1] = mono.child;
+        PlayerEvents events[2];
+        const uint8_t idle[] = {0, 0};
+        while (!aboutToSpawn(round.player[0])) round.step(idle, events);
+        int frames = 0, lock = -1;
+        do {
+            const uint8_t buttons[] = {frames < path.frames() ? path.buttons[size_t(frames)] : uint8_t(0), 0};
+            round.step(buttons, events);
+            if (events[0].locked) lock = frames;
+            ++frames;
+        } while (!aboutToSpawn(round.player[0]) && frames < 100);
+        const Player& player = round.player[0];
+        return Playback{player.field, player.scoring.score, lock, frames};
+    };
+    const Playback base = play(original), fast = play(faster);
+    check(base.field == fast.field && base.score == fast.score && fast.lock == faster.frames() - 1 &&
+              fast.lock < base.lock && fast.next < base.next,
+          "the alternate locks and exposes the next pair earlier with the same field and score");
+    check(choose(field, rules, {1, 2}, wanted, legal) == wanted && faster.buttons == original.buttons,
+          "different colours retain the selected orientation");
+    check(choose(field, rules, mono, wanted, 1u << wanted) == wanted, "an unavailable alternate cannot replace the original");
+    check(choose(field, rules, mono, wanted, 1u << reversed) == reversed, "the valid alternate preserves an otherwise unavailable placement");
+
+    int vertical = 2;
+    check(choose(field, rules, mono, vertical, legal) == vertical, "a faster orientation cannot give up scored soft-drop points");
+    Rules noSoftBonus = rules;
+    noSoftBonus.softDropBonus = false;
+    check(choose(field, noSoftBonus, mono, vertical, legal) == ai::reversePlacement(vertical),
+          "unscored soft-drop points do not constrain the faster orientation");
+
+    GameField splitField;
+    addGarbage(splitField, 1, 10);
+    addGarbage(splitField, 2, 9);
+    check(choose(splitField, rules, mono, wanted, legalPlacements(splitField)) == wanted,
+          "the faster lock must also account for the alternate split animation");
+
+    GameField firingField;
+    firingField.f.set(1, 0, 1), firingField.f.set(1, 1, 1);
+    check(choose(firingField, rules, mono, wanted, legalPlacements(firingField)) == wanted,
+          "an immediate chain retains the original timing");
+
+    class FixedSetupAgent final : public ai::PlacementAgent {
+    public:
+        bool build = true;
+        int choose(const Observation&, Pair, unsigned) override { return 7; }
+        bool setupChoice() const override { return build; }
+    };
+    const auto target = [&](const Observation& o, bool enabled = true, bool build = true) {
+        FixedSetupAgent agent;
+        agent.equivalentSetupRoute = enabled;
+        agent.build = build;
+        agent.startRound(0, 1);
+        agent.frame(o);
+        return agent.targetPlacement();
+    };
+    Observation o;
+    o.player[0].wait = 1;
+    o.tsumo.pairs.push_back(mono);
+    check(target(o) == reversed && target(o, false) == wanted && target(o, true, false) == wanted,
+          "only enabled setup decisions route to the faster orientation");
+    o.player[0].incoming.pending = 1;
+    check(target(o) == wanted, "pending garbage preserves the original route");
+    o.player[0].incoming.pending = 0;
+    o.player[1].phase = Phase::Land;
+    for (int y = 0; y < 4; ++y) o.player[1].field.f.set(0, y, 2);
+    check(target(o) == wanted, "an opponent about to start a chain preserves the original route");
+
+    const auto lv36 = ai::makeAgent("lv36"), lv37 = ai::makeAgent("lv37");
+    const ai::X3Agent direct(ai::levelParams(ai::Params{}, 37));
+    check(!dynamic_cast<const ai::PlacementAgent&>(*lv36).equivalentSetupRoute &&
+              dynamic_cast<const ai::PlacementAgent&>(*lv37).equivalentSetupRoute && direct.equivalentSetupRoute &&
+              dynamic_cast<const ai::PlacementAgent&>(*lv36).holdDown == 1 && direct.holdDown == 1,
+          "both Lv37 construction paths enable reversal and preserve Lv36 and holdDown");
+}
+
+static void testGazeDeadline() {
+    GameField field, rival;
+    stairs(field, 0, 2);
+    const auto o = ai::observe(situation(Rules{}, field, rival, Pair{1, 2}), 0);
+    ai::Params p = ai::levelParams({}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet mine, theirs;
+    gaze.plans(o, 0, true, 2, p, 7, mine);
+    gaze.plans(o, 1, false, 2, p, 7, theirs);
+    const auto same = [](const ai::PlanSet& a, const ai::PlanSet& b) {
+        const auto equal = [](const auto& x, const auto& y) {
+            return x.size() == y.size() && std::equal(x.begin(), x.end(), y.begin(), [](const ai::Plan& l, const ai::Plan& r) {
+                return ai::samePlacements(l,r) && l.points == r.points && l.sent == r.sent && l.endFrame == r.endFrame;
+            });
+        };
+        return a.pairCount == b.pairCount && a.knownCount == b.knownCount && equal(a.plans,b.plans) && equal(a.tactical,b.tactical);
+    };
+    const auto shallowMine = mine, shallowTheirs = theirs;
+    check(!gaze.tryThirdPair(o,p,7,mine,theirs,ai::Builder::Clock::now()) && same(mine,shallowMine) && same(theirs,shallowTheirs),
+          "a deadline cannot publish a partial set of opponent replies");
+    check(gaze.tryThirdPair(o,p,7,mine,theirs,ai::Builder::Clock::time_point::max()), "the extra ply can finish");
+    ai::PlanSet fullMine, fullTheirs;
+    gaze.plans(o, 0, true, 3, p, 7, fullMine);
+    gaze.plans(o, 1, false, 3, p, 7, fullTheirs);
+    check(same(mine,fullMine) && same(theirs,fullTheirs), "a finished reading retains the ordinary plans of both seats");
+}
+static void testMidgameDig() {
+    static const char* const rowsP1[] = {"......", "o.....", "Y..ooR", "RoBGRR", "RYBGBB", "RYoGBY", "BYGBRY", "YGGBBR", "YYRYRR", "GBRRBB", "GBYYYB", "GRRGGG", "BBBYYY"};
+    static const char* const rowsP2[] = {"....YR", "....RY", "....BR", "....YR", "....BR", ".B..BY", "BBGBRY", "RRGBBR", "RGRYRR", "GBRRBB", "GBYYYB", "GRRGGG", "BBBYYY"};
+    ai::Observation o;
+    o.frame = 1839;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{1,4}, {1,3}, {3,4}};
+    o.tsumo1.pairs = {{1,1}, {1,4}};
+    o.player[0].field = fieldOf(rowsP1, 13);
+    o.player[1].field = fieldOf(rowsP2, 13);
+    for (auto& player : o.player) { player.phase = Phase::Next; player.moves = 43; }
+    o.player[0].wait = 1;
+    o.player[1].wait = 13;
+    o.player[0].scoring.score = 1302;
+    o.player[1].scoring.score = 1675;
+    ai::Params p = ai::levelParams({}, 37);
+    p.beamWidth = 40;
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.searchThreads = 1;
+    p.thinkBudget = 0;
+    struct Probe : ai::X3Agent { using X3Agent::X3Agent; using X3Agent::choose; };
+    Probe probe(p);
+    probe.startRound(0, 1);
+    const int first = probe.choose(o, o.tsumo.pair(0), legalPlacements(o.self().field));
+    check(first == 21, "the narrow beam finds the chain beyond a small digging clear");
+}
+
+static void testSmallReceive() {
+    static const char* const rows[] = {"YY....", "BGRG..", "GRRB..", "GBYRGB", "GRYGRB", "BBBGYG",
+                                      "RRGYRR", "YRGGYB", "BBRRYB", "BGRBBY", "YYYRRY"};
+    ai::Observation o;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{1, 4}, {1, 4}, {1, 4}};
+    o.tsumo1.pairs = {{1, 2}, {3, 4}};
+    o.player[0].phase = o.player[1].phase = Phase::Next;
+    o.player[0].wait = 1;
+    o.player[1].wait = 150;
+    o.player[0].field = fieldOf(rows, int(std::size(rows)));
+    o.player[0].incoming.confirmed = 3;
+    ai::Params p = ai::levelParams(ai::Params{}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet mine, theirs;
+    const auto read = [&] {
+        gaze.plans(o, 0, true, 1, p, 7, mine);
+        gaze.plans(o, 1, false, 1, p, 7, theirs);
+    };
+    const unsigned legal = legalPlacements(o.self().field);
+    const auto receive = [&](unsigned choices = 0, int preferred = -1) {
+        const auto fire = std::find_if(mine.plans.begin(), mine.plans.end(), [](const ai::Plan& s) {
+            return s.fireDepth == 1 && s.id[0] == 8;
+        });
+        check(fire != mine.plans.end() && fire->chains == 13 && !fire->allClear, "small receive fixture has an immediate 13-chain");
+        return ai::smallReceive(o, mine, theirs, *fire, choices ? choices : legal, o.self().incoming.confirmed, p, 7,
+                                [] { return false; }, preferred);
+    };
+    read();
+    check(receive() == 6, "a quiet placement leaves a larger chain under all 20 three-garbage drops");
+    check(receive(0, 1) == 6, "an unsafe quiet ordinary answer gives way to the robust receive");
+    check(receive(0, 12) == 12, "a quiet ordinary answer that already passes the proof is kept");
+    check(receive((1u << 8) | (1u << 1)) < 0, "a placement which depends on the drop columns is rejected");
+    o.nextGarbageOrder[0] = std::array<uint8_t, W>{0, 1, 3, 2, 4, 5};
+    check(receive((1u << 8) | (1u << 1)) == 1, "the same placement works for an actually observed favorable order");
+    o.nextGarbageOrder[0].reset();
+
+    o.player[1].field = o.player[0].field;
+    o.tsumo1.pairs = {{1, 2}, {1, 2}};
+    read();
+    check(receive() < 0, "a stronger visible opponent response rules out taking the small attack");
+    o.player[1].field = {};
+    o.tsumo1.pairs = {{1, 2}, {3, 4}};
+    o.player[0].incoming.confirmed = 1;
+    o.tsumo.pairs = {{1, 4}, {4, 4}, {1, 1}};
+    read();
+    check(receive() == 3, "a side chain can return the garbage and leave the main on the third visible pair");
+    o.tsumo.pairs.pop_back();
+    read();
+    check(receive() < 0, "the side chain is not selected when the main would depend on an unseen pair");
+
+    o.tsumo.pairs = {{1, 4}, {1, 4}};
+    o.tsumo1.pairs.pop_back();
+    read();
+    check(receive() < 0, "taking garbage requires two observed opponent pairs");
+    o.tsumo1.pairs.push_back({3, 4});
+    p.readMidgame = false;
+    read();
+    check(receive() < 0, "small receive is disabled without the Lv37 midgame setting");
+    p.readMidgame = true;
+    read();
+    const auto fire = std::find_if(mine.plans.begin(), mine.plans.end(), [](const ai::Plan& s) { return s.fireDepth == 1 && s.id[0] == 8; });
+    check(fire != mine.plans.end() && ai::smallReceive(o, mine, theirs, *fire, legal, 1, p, 7, [] { return true; }) < 0,
+          "small receive falls back when the deadline is reached");
+    struct Probe : ai::X3Agent { using X3Agent::X3Agent; using X3Agent::decide; };
+    o.player[1].field = o.player[0].field;
+    o.player[1].wait = 22;
+    o.tsumo.pairs = {{1,4},{1,4},{1,4}};
+    o.tsumo1.pairs = {{2,2},{2,2},{1,2}};
+    for (int garbage : {3, 6}) {
+        Probe probe(p);
+        probe.startRound(0, 7);
+        o.player[0].incoming.confirmed = garbage;
+        check(probe.decide(o, legal) == 6, "regular Lv37 chooses the quiet answer safe for each garbage drop");
+    }
+}
+
+static void testPressureFollowUp() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+
+        void read(const ai::Observation& o) {
+            gaze.plans(o, 0, true, 1, p, 7, mine);
+            gaze.plans(o, 1, false, 1, p, 7, theirs);
+        }
+
+        void inspectOffset(const ai::Observation& o, bool spentMain = false) {
+            read(o);
+            const auto attack = std::find_if(mine.plans.begin(), mine.plans.end(), [](const ai::Plan& s) {
+                return s.count == 1 && s.id[0] == 0 && s.points == 420;
+            });
+            const auto findReply = [&](const ai::Plan& s) {
+                return s.count == 1 && s.id[0] == (spentMain ? 9 : 0) && s.points == (spentMain ? 1000 : 420);
+            };
+            const ai::Plan* reply = nullptr;
+            for (const auto* list : {&theirs.plans, &theirs.tactical}) {
+                const auto found = std::find_if(list->begin(), list->end(), findReply);
+                if (found != list->end()) reply = &*found;
+            }
+            check(attack != mine.plans.end() && reply, "both initial fires are visible");
+
+            const ai::Duel quiet = ai::playOut(o, mine, &*attack, theirs, nullptr, p, 7, true);
+            if (spentMain) {
+                ai::Replies standing;
+                ai::repliesOf(o.opponent().field, o.rules, o.timing, p, standing);
+                int64_t firstCheck;
+                const ai::Duel initial = ai::playOut(o, mine, &*attack, theirs, reply, p, 7, true, &firstCheck);
+                const auto& rival = initial.player[1];
+                check(pressureReplyRevealed(o, quiet, *reply, initial, firstCheck) && rival.chain.chains == 3 &&
+                      !reply->allClear && !rival.scoring.allClear && !rival.fallen && reply->sent >= attack->sent + W &&
+                      atLeastPercent(reply->points, p.x3PokeKeep, standing.main) &&
+                      !atLeastPercent(reply->mainAfter, p.x3PokeKeep, reply->points),
+                      "the larger reply has actually spent its main chain");
+            }
+            ai::Plan second = *attack;
+            second.id[second.count++] = 8;
+            const ai::Duel still = ai::playOut(o, mine, &second, theirs, &*reply, p, 7, true);
+            check(pressureLands(o, second, still) && still.player[1].fallen == 0 &&
+                  still.player[1].incoming.total() == (spentMain ? 26 : 40),
+                  "standing still leaves enough unlanded garbage for the old pressure check");
+
+            ai::Plan counter = *reply;
+            counter.id[counter.count++] = int8_t(spentMain ? 3 : 2);
+            const ai::Duel exchange = ai::playOut(o, mine, &second, theirs, &counter, p, 7, true);
+            check(exchange.player[1].moves == o.opponent().moves + 2 && !exchange.player[1].incoming.total() &&
+                  !exchange.player[1].fallen && exchange.player[0].fallen == (spentMain ? 0 : 3) &&
+                  exchange.player[0].incoming.total() == (spentMain ? 8 : 0) &&
+                  !pressureFollowUp(o, *attack, quiet, *reply, spentMain, 7),
+                  "a reachable known response can remove the whole pending attack and send garbage back");
+
+            if (spentMain) return;
+            ai::Plan hold;
+            hold.id[hold.count++] = 5;
+            const ai::Duel direct = ai::playOut(o, mine, &*attack, theirs, &hold, p, 7, true);
+            check(pressureLands(o, *attack, direct) && direct.player[1].fallen == 0 &&
+                  !pressureAfterReply(o, *attack, hold, direct, 2 * W, 2, 7),
+                  "pending garbage after a quiet opposing move is subject to the same continuation check");
+        }
+
+        bool revealed(const ai::Observation& o, int64_t& firstCheck, int64_t& nextPair) {
+            read(o);
+            ai::Plan first;
+            first.id[first.count++] = 0;
+            first.fireDepth = 1;
+            const ai::Duel quiet = ai::playOut(o, mine, &first, theirs, nullptr, p, 7, true);
+            const ai::Duel exchange = ai::playOut(o, mine, &first, theirs, &first, p, 7, true, &firstCheck);
+            nextPair = quiet.player[0].spawnFrame;
+            return pressureReplyRevealed(o, quiet, first, exchange, firstCheck);
+        }
+
+        bool canExtend(const ai::Observation& o) {
+            read(o);
+            ai::Plan attack, reply;
+            attack.id[attack.count++] = 19;
+            attack.fireDepth = 1;
+            reply.id[reply.count++] = 19;
+            reply.fireDepth = 1;
+            reply.points = 1180;
+            const ai::Duel quiet = ai::playOut(o, mine, &attack, theirs, nullptr, p, 7, true);
+            int64_t firstCheck;
+            const ai::Duel exchange = ai::playOut(o, mine, &attack, theirs, &reply, p, 7, true, &firstCheck);
+            check(exchange.player[1].chain.chains == 3 && exchange.player[1].scoring.score == reply.points &&
+                  pressureReplyRevealed(o, quiet, reply, exchange, firstCheck),
+                  "the committed three-chain is visible in time to choose the extension");
+            return pressureFollowUp(o, attack, quiet, reply, true, 7);
+        }
+    };
+
+    ai::Observation o;
+    o.rules.colors = 5;
+    o.rules.targetPoints = 25;
+    o.rules.softDropBonus = false;
+    o.ownTsumo = true;
+    o.tsumo.pairs = o.tsumo1.pairs = {{1, 2}, {5, 5}, {1, 5}};
+    o.player[0].phase = o.player[1].phase = Phase::Next;
+    o.player[0].wait = o.player[1].wait = 1;
+    stairs(o.player[0].field, 0, 2);
+    for (int k = 0; k < 3; ++k) {
+        for (int y = 0; y < 3; ++y) o.player[0].field.f.set(5 - k, y, Cell(3 + k));
+        if (k) o.player[0].field.f.set(5 - k, 3, Cell(2 + k));
+    }
+    o.player[1].field = o.player[0].field;
+
+    ai::Params p = ai::levelParams(ai::Params{}, 37);
+    Probe reacting(p);
+    reacting.inspectOffset(o);
+
+    o.player[1].wait = 150;
+    int64_t firstCheck = -1, nextPair = -1;
+    check(reacting.revealed(o, firstCheck, nextPair) && firstCheck == 185 && nextPair == 189,
+          "the exact first wave is visible before a decision made at spawn");
+    p.thinkAhead = 12;
+    Probe ahead(p);
+    check(!ahead.revealed(o, firstCheck, nextPair), "the same fire is too late for the first decision with an eleven-frame lead");
+
+    o.rules.targetPoints = 16;
+    o.player[1].wait = 1;
+    o.tsumo1.pairs = {{3, 5}, {4, 5}, {1, 5}};
+    o.player[1].field = {};
+    stairs(o.player[1].field, 0, 3);
+    for (int y = 0; y < 3; ++y) {
+        o.player[1].field.f.set(5, y, Cell(4));
+        o.player[1].field.f.set(4, y, Cell(5));
+    }
+    o.player[1].field.f.set(4, 3, Cell(4));
+    // The 1,000-point reply spends the chain at a 55% retention threshold.
+    // The test keeps the default threshold for all other fixtures.
+    ai::Params mainReply = ai::levelParams(ai::Params{}, 37);
+    mainReply.x3PokeKeep = 55;
+    Probe mainReading(mainReply);
+    mainReading.inspectOffset(o, true);
+
+    o.rules.targetPoints = 30;
+    o.tsumo.pairs = {{1, 2}, {1, 3}, {1, 1}, {3, 4}};
+    o.tsumo1.pairs = {{3, 5}, {4, 2}, {3, 5}};
+    o.player[1].wait = 142;
+    o.player[1].field = {};
+    stairs(o.player[1].field, 0, 3);
+    o.player[1].field.f.set(2, 4, Cell(2));
+    o.player[1].field.f.set(5, 0, Cell(5));
+    check(reacting.canExtend(o), "two known setup moves can produce a verified follow-up behind a running chain");
+    o.tsumo.pairs.pop_back();
+    check(!reacting.canExtend(o), "the same follow-up is unavailable without the observed fourth pair");
+}
+
+static void testKnownMainReturn() {
+    static const char* const rows1[] = {"G.....", "R....G", "G..RYG", "BY.BYB", "BG.RYR", "YG.RRB", "YR.GYB", "YGBBYY", "BGGBRB", "RYYRRB", "RBGBBR", "YYYGBR", "RRRGGB"};
+    static const char* const rows0[] = {"......", "......", ".....B", "...GGY", "G..RGY", "RBYGRB", "RYGGBY", "BYYRBY", "RBBYBR", "RGRBYR", "GBRBYR", "GGBRBY", "BBRYBR"};
+    ai::Observation o;
+    o.me = 1;
+    o.ownTsumo = true;
+    o.frame = 1493;
+    o.player[0].field = fieldOf(rows0, 13);
+    o.player[1].field = fieldOf(rows1, 13);
+    o.player[1].field.row14[0] = Cell(4);
+    for (auto& side : o.player) side.phase = Phase::Next;
+    o.player[0].wait = 13;
+    o.player[1].wait = 10;
+    o.tsumo.pairs = {{1,4},{2,2},{1,4},{2,4},{4,1},{1,3},{2,2}};
+    o.tsumo1.pairs = {{4,1},{1,3},{2,2}};
+    ai::Params p = ai::levelParams({}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet mine, theirs;
+    gaze.plans(o, 1, true, 3, p, 7, mine);
+    gaze.plans(o, 0, false, 3, p, 7, theirs);
+    const auto fire = std::find_if(mine.plans.begin(), mine.plans.end(), [](const ai::Plan& s) {
+        return s.count == 1 && s.id[0] == 2 && s.chains == 11;
+    });
+    check(fire != mine.plans.end(), "the saved field can fire its 11-chain immediately");
+    const size_t before = theirs.tactical.size();
+    ai::MidgameBeam::extend(o, p, 7, theirs, [] { return false; });
+    bool counter = false;
+    for (size_t i = before; i < theirs.tactical.size(); ++i) {
+        const ai::Plan& reply = theirs.tactical[i];
+        if (reply.count < 4 || reply.chains < 5 || reply.sent < fire->sent) continue;
+        const auto d = ai::playOut(o, mine, &*fire, theirs, &reply, p, 7, true);
+        counter |= d.player[0].moves == reply.count && d.player[0].chain.chains == reply.chains &&
+                   !d.player[0].fallen && !d.player[0].incoming.total() && d.player[1].incoming.total() >= W;
+    }
+    check(counter, "a visible later main chain offsets the immediate fire with executable inputs");
+    o.tsumo.pairs.resize(3);
+    gaze.plans(o, 0, false, 3, p, 7, theirs);
+    ai::MidgameBeam::extend(o, p, 7, theirs, [] { return false; });
+    check(std::none_of(theirs.tactical.begin(), theirs.tactical.end(), [](const ai::Plan& s) { return s.count > 3; }),
+          "a fourth or fifth pair must be observed before it can supply a counter");
+}
+
+static void testMidairSameColorOffset() {
+    Rules rules;
+    rules.softDropBonus = false;
+    Round round;
+    round.start(rules, 7, 2);
+    Player& player = round.player[0];
+    round.player[1].wait = 1000;
+    for (int x : {1, 3}) for (int y = 0; y < 11; ++y) player.field.f.set(x, y, GARBAGE);
+    for (int y = 0; y < 9; ++y) player.field.f.set(2, y, y < 6 ? GARBAGE : Cell(1));
+    round.tsumo.piece[0] = round.tsumo.piece[1] = Cell(1);
+    player.incoming.confirmed = 1;
+    PlayerEvents events[2];
+    const auto step = [&](uint8_t key) {
+        const uint8_t buttons[2]{key, 0};
+        round.step(buttons, events);
+    };
+    while (player.phase != Phase::Control) step(0);
+    for (auto key : {int(BTN_CW), 0, int(BTN_CW | BTN_DOWN), int(BTN_DOWN)}) step(uint8_t(key));
+    for (int i = 0; i < 53; ++i) step(0);
+    const int only = placementId({2, DOWN});
+    check(player.phase == Phase::Control && player.pair.dir == DOWN, "the real inputs reach the child-down pose");
+    for (int keys = 0; keys < 64; ++keys) {
+        auto next = player.pair;
+        stepPair(next, player.field, uint8_t(keys), round.timing, rules.speedPercent);
+        check(next.locked && placementId(next.placement()) == only, "every input locks the same placement next frame");
+    }
+
+    const auto o = ai::observe(round, 1);
+    const auto p = ai::levelParams({}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet own, rival;
+    gaze.plans(o, 1, true, 1, p, 7, own);
+    gaze.plans(o, 0, false, 1, p, 7, rival);
+    check(rival.firstReach == (1u << only), "the only input path reaches the reversed orientation");
+    const auto fire = std::find_if(rival.plans.begin(), rival.plans.end(), [&](const ai::Plan& plan) {
+        return plan.count == 1 && plan.id[0] == only && plan.chains == 1;
+    });
+    check(fire != rival.plans.end(), "the rival still has a real offset with a same-colour pair in the air");
+    const auto d = ai::playOut(o, own, nullptr, rival, &*fire, p, 7, true);
+    check(d.player[0].moves == 1 && d.player[0].scoring.score == 100 && !d.player[0].fallen && !d.player[0].incoming.total(),
+          "the known input path cancels the confirmed garbage");
+    step(0);
+    while (player.moves == 1 && player.phase != Phase::Next) step(0);
+    check(player.moves == 1 && player.scoring.score == 100 && !player.incoming.total() &&
+          std::none_of(std::begin(player.dropped), std::end(player.dropped), [](int n) { return n > 0; }),
+          "the frame game confirms the same offset");
+}
+
+static GameField splitAttackField(const char* cells) {
+    GameField field;
+    for (int y = 13; y >= 0; --y) for (int x = 0; x < W; ++x) {
+        const Cell color = Cell(*cells++ - '0');
+        if (y == 13) field.row14[x] = color;
+        else if (color) field.f.set(x, y, color);
+    }
+    return field;
+}
+
+static ai::Observation splitPosition() {
+    ai::Observation o;
+    o.me = 1;
+    o.frame = 1472;
+    o.rules.palette = {5, 2, 3, 4, 1};
+    o.timing = recordedRules(Timing{});
+    o.timing.quickDownDrag = 32;
+    o.ownTsumo = true;
+    o.tsumo1.pairs = {{2, 5}, {3, 4}};
+    o.tsumo.pairs = {{2, 2}, {3, 4}};
+    o.player[1].field = splitAttackField("000000000003000004240022555342234234224555533322324523544255222445534534554334333445");
+    o.player[0].field = splitAttackField("000000000000000000000000442030352020225224254533325534544424222545534553553444334333");
+    o.player[1].moves = 33;
+    o.player[0].moves = 28;
+    o.player[1].wait = 10;
+    o.player[0].wait = 13;
+    return o;
+}
+
+struct SplitProbe : ai::X3Agent {
+    using X3Agent::X3Agent;
+
+    int chooseNow(const ai::Observation& o) {
+        startRound(o.me, 1);
+        return choose(o, o.mine().pair(o.self().nextPair), legalPlacements(o.self().field));
+    }
+
+    void prepare(const ai::Observation& o) {
+        const uint64_t seed = 1 + o.self().moves;
+        gaze.plans(o, o.me, true, 2, p, seed, mine);
+        gaze.plans(o, 1 - o.me, false, 2, p, seed, theirs);
+        ai::MidgameBeam::extend(o, p, seed, mine, [] { return false; });
+    }
+
+    int split(const ai::Observation& o) {
+        prepare(o);
+        return splitMainAttack(o, legalPlacements(o.self().field), 1 + o.self().moves);
+    }
+
+    ai::Duel replay(const ai::Observation& o, const ai::Plan* reply) {
+        prepare(o);
+        ai::Plan attack;
+        attack.count = 2;
+        attack.id[0] = 3;
+        attack.id[1] = 15;
+        return ai::playOut(o, mine, &attack, theirs, reply, p, 1 + o.self().moves, true);
+    }
+};
+
+static void testSplitMainAttack() {
+    auto p = ai::levelParams(ai::agentParams("x3", ai::Params{}), 37);
+    p.searchThreads = 1;
+    p.beamWidth = 40;
+    p.beamDepth = 10;
+    p.beamQueues = 3;
+    SplitProbe ai(p);
+    auto o = splitPosition();
+    check(ai.chooseNow(o) == 3 && ai.kind == ai::X3Agent::Win, "the normal Lv37 choice exposes the known fifteen-chain");
+
+    ai::Plan reply;
+    reply.count = 2;
+    reply.id[0] = 0;
+    reply.id[1] = 2;
+    const auto earlyEnd = ai.replay(o, &reply);
+    check(earlyEnd.state == RoundState::Won1 && earlyEnd.player[0].moves == o.opponent().moves + 2 &&
+          earlyEnd.player[1].chain.chains < 15, "an opponent self-loss cannot refute the unfinished own plan");
+
+    o.player[0].field = o.player[1].field;
+    o.player[0].wait = o.player[1].wait;
+    o.tsumo = o.tsumo1;
+    reply.id[0] = 3;
+    reply.id[1] = 15;
+    const auto matched = ai.replay(o, &reply);
+    check(matched.player[0].chain.chains == 15 && matched.player[1].chain.chains == 15 &&
+          !matched.player[0].incoming.total() && !matched.player[1].incoming.total(),
+          "the opponent has a physically reachable full offset with the same known horizon");
+    check(ai.split(o) < 0, "the matching opponent main prevents selecting the opening as a winning attack");
+}
+
+static void testWinImmediateFire() {
+    Observation o;
+    o.me = 1;
+    o.frame = 1543;
+    o.rules.palette = {5, 2, 3, 4, 1};
+    o.timing = recordedRules(Timing{});
+    o.timing.quickDownDrag = 32;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{2,2}, {3,4}, {5,4}, {3,5}};
+    o.tsumo1.pairs = {{2,5}, {3,4}, {4,4}, {2,2}, {4,5}};
+    o.player[0].field = splitAttackField("000000000000200000200000442034352023225224254533325534544424222545534553553444334333");
+    o.player[1].field = splitAttackField("000000000003250404240322555342234234224555533322324523544255222445534534554334333445");
+    o.player[0].nextPair = o.player[1].nextPair = 2;
+    o.player[0].phase = Phase::Land;
+    o.player[0].wait = 2;
+    o.player[0].moves = 30;
+    o.player[0].scoring = {6, 6, false};
+    o.player[1].wait = 1;
+    o.player[1].moves = 35;
+    o.player[1].scoring = {3, 3, false};
+
+    auto p = ai::levelParams(ai::agentParams("x3", {}), 37);
+    p.searchThreads = 1;
+    p.beamWidth = 250;
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.beamFixedQueues = 4;
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        int select(const Observation& view) {
+            startRound(view.me, 1);
+            return choose(view, view.mine().pair(view.self().nextPair), legalPlacements(view.self().field));
+        }
+        bool won() const { return kind == Win; }
+    };
+    Probe active(p);
+    const int chosen = active.select(o);
+    check(chosen == 2 && active.won(), "a stronger immediate Win is chosen ahead of the delayed Win");
+
+    const auto play = [&](const Observation& view, bool mirror) {
+        Round round;
+        round.start(view.rules, 34, 2, view.timing);
+        round.splitTsumo(35);
+        round.frame = view.frame;
+        for (int seat = 0; seat < 2; ++seat) {
+            round.player[seat] = view.player[seat];
+            auto& tsumo = seat ? round.tsumo1 : round.tsumo;
+            for (int i = 0; i < view.pairsOf(seat).count(); ++i) {
+                const Pair pair = view.pairsOf(seat).pair(i);
+                tsumo.piece[2 * i] = pair.axis;
+                tsumo.piece[2 * i + 1] = pair.child;
+            }
+        }
+        ai::InputPlanner planner;
+        ai::InputPath input;
+        check(planner.plan(view.self().field, appearingPair(view.self(), view.rules, view.timing), placement(chosen),
+                           view.timing, view.rules.speedPercent, input), "the immediate Win has an input path");
+        bool finished[2]{};
+        for (int t = 0; t < 1400 && !finished[1]; ++t) {
+            if (!mirror && round.player[0].phase == Phase::Next && round.player[0].wait == 1)
+                round.player[0].wait = 1500;
+            const uint8_t button = t < input.frames() ? input.buttons[size_t(t)] : 0;
+            const uint8_t buttons[2] = {mirror ? button : uint8_t(0), button};
+            PlayerEvents events[2];
+            round.step(buttons, events);
+            for (int seat = 0; seat < 2; ++seat) finished[seat] |= events[seat].chainEnded;
+        }
+        check(finished[1] && round.player[1].chain.chains == 14 && round.frame == 2703,
+              "the selected immediate Win really fires and completes its 14-chain");
+        if (mirror) {
+            check(finished[0] && !round.player[0].incoming.total() && !round.player[1].incoming.total(),
+                  "the visible mirrored reply offsets the immediate chain");
+        } else {
+            check(round.player[0].incoming.confirmed == 1517, "the immediate chain sends its confirmed garbage");
+        }
+    };
+    play(o, false);
+    auto counter = o;
+    counter.player[0] = counter.player[1];
+    counter.tsumo = counter.tsumo1;
+    Probe opposed(p);
+    check(opposed.select(counter) != 2, "the immediate Win does not override a visible full offset");
+    play(counter, true);
+    ai::Gaze gaze;
+    ai::PlanSet mine, rival;
+    const uint64_t seed = 1 + counter.self().moves;
+    gaze.plans(counter, 1, true, 3, p, seed, mine);
+    gaze.plans(counter, 0, false, 3, p, seed, rival);
+    ai::Plan fire;
+    fire.count = fire.fireDepth = 1;
+    fire.id[0] = int8_t(chosen);
+    fire.chains = 14;
+    const auto quiet = ai::playOut(counter, mine, &fire, rival, nullptr, p, seed, true);
+    check(!ai::knownWinFire(counter, mine, rival, fire, p, seed, quiet, [] { return false; }),
+          "the known-response check rejects the mirrored full offset");
+}
+
+static void testConfirmedOffsetCoverage() {
+    const char* const own[] = {
+        "BB....", "RG.B.G", "YR.R.G", "YB.RBB", "RRGBRB", "BGGBGG", "GRYRBR",
+        "BRRGRB", "BGBRYB", "BGYBYY", "GYYBRR", "GRGGRB", "GRGBYB"
+    };
+    const char* const rival[] = {
+        "......", "G...YY", "RB..YB", "GR..GY", "YY..GG", "YGRYBY", "YGBRGB",
+        "GRBYBB", "GRRBYR", "YYYBBR", "GRBGRB", "GGRBRG", "RRBBGG"
+    };
+    Observation o;
+    o.frame = 1734;
+    o.tsumo.pairs = {{2, 3}, {1, 2}, {1, 4}, {4, 1}};
+    o.player[0].field = fieldOf(own, 13);
+    o.player[0].field.row14[0] = Cell(4);
+    o.player[0].moves = 37;
+    o.player[0].nextPair = 1;
+    o.player[0].wait = 1;
+    o.player[0].scoring = {312, 32};
+    o.player[0].incoming.pending = 7;
+    o.player[1].field = fieldOf(rival, 13);
+    o.player[1].moves = 36;
+    o.player[1].phase = Phase::Wave;
+    o.player[1].wait = 79;
+    o.player[1].chain.chains = 2;
+    o.player[1].scoring = {806, 36};
+
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        void test(const Observation& o) {
+            constexpr uint64_t seed = 7;
+            const unsigned hold = 1u << 5, offset = 1u << 15, fire = 1u << 13;
+            gaze.plans(o, 0, true, 3, p, seed, mine);
+            gaze.plans(o, 1, false, 3, p, seed, theirs);
+            check(ai::quietSetupChoices(o, mine, hold | offset | fire) == (hold | offset),
+                  "the two quiet placements and the immediate chain must be available");
+            ai::Duel projected(o, seed);
+            check(ai::toPairOf(projected, 1, o.frame + 6000), "the running chain must resolve");
+            const int arriving = projected.player[0].incoming.confirmed;
+            check(projected.player[1].chain.chains == 15 && arriving == 1697 &&
+                  projected.player[1].spawnFrame == 2894, "the running fifteen-chain must confirm 1697 pieces");
+            ai::Plan first;
+            first.count = 1;
+            first.id[0] = 15;
+            const auto played = ai::playOut(o, mine, &first, theirs, nullptr, p, seed, true);
+            check(played.player[0].lockFrame == 1744 && played.player[0].spawnFrame == 1772 &&
+                  !played.player[0].fallen, "the alternate placement must reach the next decision before any fall");
+
+            const int rate = o.rules.rateAt(o.frame);
+            const int need = arriving * rate - o.self().scoring.pool;
+            const int surplus = arriving * rate * p.x3Enough / 100;
+            ai::BuildResult b;
+            b.told = p.queues();
+            b.depth = p.beamDepth;
+            b.alive = hold | offset;
+            b.each[0][5] = surplus;
+            b.each[1][5] = need;
+            for (int q = 0; q < 5; ++q) b.each[q][15] = need;
+            const auto rank = [&](const ai::Duel& d, const ai::BuildResult& scores) {
+                const unsigned ordinary = enoughChoices(scores, scores.alive, surplus);
+                return fullOffsetChoices(o, d, scores, scores.alive, ordinary, arriving, rate, surplus, seed);
+            };
+            check(enoughChoices(b, b.alive, surplus) == hold && rank(projected, b) == offset,
+                  "five full offsets should outrank one surplus when both placements build");
+            for (int q = 0; q < 5; ++q) --b.each[q][15];
+            check(rank(projected, b) == hold, "one missing point cannot offset the last of 1697 pieces");
+            for (int q = 0; q < 5; ++q) ++b.each[q][15];
+            auto forecast = projected;
+            forecast.player[0].incoming = {arriving, 0};
+            check(rank(forecast, b) == hold, "an unconfirmed forecast should leave the ordinary ordering in place");
+            b.alive = offset | fire;
+            b.each[0][13] = surplus;
+            check(rank(projected, b) == fire, "a speculative build should preserve an immediate fire chosen by the ordinary ordering");
+        }
+    };
+    auto p = ai::levelParams({}, 37);
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.thinkBudget = 0;
+    Probe probe(p);
+    probe.test(o);
+}
+
+static void testBuildKeepsVisibleMain() {
+    Observation o;
+    o.me = 1;
+    o.frame = 1690;
+    o.tsumo.pairs = {{4,3}, {4,2}, {1,3}, {3,3}};
+    o.player[0].field = splitAttackField("400000300003100002100043230023110424120114220313140423120322223343131133113342331442");
+    o.player[1].field = splitAttackField("000000200400400300344330114620123430332331323441122112241221441421223344213114311333");
+    o.player[0].phase = Phase::Split;
+    o.player[0].wait = 16;
+    o.player[1].wait = 1;
+    o.player[0].scoring = {396, 46};
+    o.player[1].scoring = {308, 28};
+    for (auto& player : o.player) {
+        player.moves = 35;
+        player.nextPair = 1;
+        player.colors = {4, 3};
+    }
+    ai::Gaze gaze;
+    ai::PlanSet mine, theirs;
+    auto p = ai::levelParams({}, 37);
+    constexpr uint64_t seed = 7;
+    gaze.plans(o, 1, true, 3, p, seed, mine);
+    gaze.plans(o, 0, false, 3, p, seed, theirs);
+    const unsigned choices = (1u << 1) | (1u << 12);
+    const auto choose = [&](const Observation& view, const ai::PlanSet& opponent, bool stopped = false) {
+        return ai::preserveReadyBuild(view, mine, opponent, 1, choices, p, seed, [&] { return stopped; });
+    };
+    check(choose(o, theirs) == 12, "a build can hold the visible next-pair main against the known immediate attack");
+    check(choose(o, theirs, true) == 1, "an unfinished comparison must keep the original placement");
+    check(choose(o, ai::PlanSet{}) == 1, "a board without a known immediate attack keeps the ordinary build");
+    auto allClear = o;
+    allClear.player[1].scoring.allClear = true;
+    check(choose(allClear, theirs) == 1, "an all-clear bonus remains under the ordinary decision");
+    p = ai::levelParams({}, 36);
+    check(choose(o, theirs) == 1, "Lv36 keeps its own building decision");
+}
+
+static void testKnownPokeReserve() {
+    constexpr const char* rows[]{
+        "......", "RG....", "RR.RYG", "GG.GRB", "RR.GGY", "BY.RRR", "GRYGGG",
+        "GRRBBY", "BGBRGG", "BYBYRB", "BYYRYY", "RRRGYB", "GBYBRB"
+    };
+    Observation o;
+    o.me = 1;
+    o.frame = 1590;
+    o.player[0].wait = o.player[1].wait = 1;
+    o.player[1].scoring.pool = 22;
+    o.player[1].field = fieldOf(rows, 13);
+
+    ai::PlanSet own, enemy;
+    own.who = 1;
+    enemy.who = 0;
+    own.knownCount = own.pairCount = 3;
+    enemy.knownCount = enemy.pairCount = 1;
+    own.pair[0] = {2, 4};
+    own.pair[1] = {1, 4};
+    own.pair[2] = {1, 2};
+    enemy.pair[0] = {2, 3};
+    ai::Plan poke, hold, reply;
+    poke.count = poke.fireDepth = 1;
+    poke.id[0] = 13;
+    poke.chains = 2;
+    poke.points = 545;
+    poke.sent = 8;
+    poke.mainAfter = 52220;
+    hold.count = hold.fireDepth = 3;
+    hold.id[0] = 7;
+    hold.id[1] = 8;
+    hold.id[2] = 2;
+    hold.chains = 14;
+    hold.points = 96588;
+    reply.count = 1;
+    reply.id[0] = 2;
+    own.plans = {poke, hold};
+    enemy.plans = {reply};
+
+    const auto params = ai::levelParams({}, 37);
+    const auto legal = legalPlacements(o.self().field);
+    const auto select = [&](int room) {
+        return ai::known_poke::prefer(o, legal, 70, 1, params, own, enemy, poke, room, false, 0, [] { return false; });
+    };
+    check(select(3) == 7, "Lv37 holds a visible 14-chain when every known exchange is at least as good");
+    check(select(2) < 0, "the reserve rule leaves a cramped poke unchanged");
+    own.pair[3] = {1, 1};
+    own.knownCount = 4;
+    check(select(3) < 0, "the reserve rule leaves a four-pair window unchanged");
+}
+
+static void testKnownPokeHandoff() {
+    constexpr const char* ownRows[]{
+        "......", "Y..Y.R", "BR.GGY", "GBYGRB", "YBYYGB", "YGGGBY", "BBRBBG",
+        "BGGRRR", "YYGYBB", "RRRYBG", "BYGRRG", "BBGBRG", "YYYGGR"
+    };
+    constexpr const char* enemyRows[]{
+        "B.....", "RR....", "RGBGYG", "BYRRYG", "BBYYGB", "RGYGYG", "BRRYBB",
+        "GGRBGY", "GRYBGY", "BBBGYB", "RGRYYB", "RRGGBY", "GGYGYY"
+    };
+    Observation o;
+    o.frame = 1532;
+    auto& own = o.player[0];
+    auto& enemy = o.player[1];
+    own.field = fieldOf(ownRows, 13);
+    enemy.field = fieldOf(enemyRows, 13);
+    enemy.field.row14[0] = 3;
+    own.phase = Phase::Next;
+    own.wait = 1;
+    own.moves = 34;
+    own.scoring = {261, 261, false};
+    enemy.phase = Phase::Control;
+    enemy.moves = 35;
+    enemy.nextPair = 2;
+    enemy.scoring = {267, 267, false};
+    enemy.colors = {1, 2};
+    enemy.pair.x = 2;
+    enemy.pair.y = 12;
+    enemy.pair.dir = DOWN;
+    enemy.pair.gain = 84;
+    o.tsumo.pairs = {{2, 4}, {1, 2}, {3, 1}, {2, 2}};
+
+    ai::Plan poke, hold, main;
+    poke.id[0] = 2;
+    poke.count = poke.fireDepth = 1;
+    poke.points = 543;
+    poke.chains = 2;
+    poke.sent = 11;
+    poke.mainAfter = 94760;
+    hold.id[0] = 9;
+    hold.id[1] = 7;
+    hold.count = hold.fireDepth = 2;
+    hold.points = 131124;
+    hold.chains = 16;
+    main.id[0] = 1;
+    main.id[1] = 19;
+    main.count = main.fireDepth = 2;
+    main.points = 106124;
+    main.chains = 14;
+    main.mainAfter = 100;
+    ai::PlanSet a, b;
+    a.who = 0;
+    b.who = 1;
+    a.knownCount = ai::copySearchPairs(o, 0, true, a.pair, 4);
+    b.knownCount = ai::copySearchPairs(o, 1, true, b.pair, 4);
+    b.midAir = true;
+    a.plans = {poke, hold};
+    b.plans = {main};
+    const auto params = ai::levelParams({}, 37);
+    const int rate = o.rules.rateAt(o.frame);
+    const unsigned legal = legalPlacements(own.field);
+    const auto select = [&](bool discounted, auto stop) {
+        return ai::known_poke::prefer(o, legal, rate, 37, params, a, b, poke, 1, discounted, main.points, stop);
+    };
+    const auto live = [] { return false; };
+    check(select(true, live) == 9, "Lv37 retains a visible full offset against a previously discounted main");
+    check(select(false, live) < 0, "a poke without a discounted main is unchanged on this field");
+    int polls = 0;
+    check(select(true, [&] { return ++polls == 128; }) < 0 && polls == 128,
+          "an interrupted known-pair replay retains the original poke");
+    enemy.pair.locked = true;
+    check(select(true, live) < 0, "a reported in-hand reply with no playable pair cannot replace the poke");
+    enemy.pair.locked = false;
+    own.scoring.allClear = true;
+    check(select(true, live) < 0, "an all-clear bonus retains the existing poke judgement");
+    own.scoring.allClear = false;
+    o.rules.cancel = true;
+    check(select(true, live) < 0, "cancel rules retain the existing poke judgement");
+    o.rules.cancel = false;
+    a.knownCount = 1;
+    check(select(true, live) < 0, "an unseen offset pair cannot replace the poke");
+}
+
+static void testKnownPrefixTiming() {
+    // The observations give the player only the pairs visible at the decision.
+    Observation o;
+    o.me = 1;
+    o.frame = 2976;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{1, 2}, {2, 4}};
+    o.tsumo1.pairs = {{3, 3}, {3, 1}, {3, 2}};
+    auto& foe = o.player[0];
+    auto& self = o.player[1];
+    foe.field = splitAttackField("100000000000000000000000000000000000000244000242010334010322040232332323223433222244");
+    self.field = splitAttackField("100002020011010334030141230412431141422441332124324424432114433221411133222444311233");
+    foe.phase = Phase::Wave;
+    foe.wait = 5;
+    foe.chain.chains = 8;
+    foe.moves = 46;
+    self.phase = Phase::Next;
+    self.wait = 1;
+    self.moves = 54;
+    self.incoming.pending = 285;
+    self.scoring.pool = 61;
+
+    auto p = ai::levelParams({}, 37);
+    p.beamWidth = 250;
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.beamFixedQueues = 4;
+    p.searchThreads = 1;
+    p.thinkBudget = 0;
+    struct Probe : ai::X3Agent { using X3Agent::X3Agent; using X3Agent::choose; };
+    const auto choose = [](const Observation& view, const ai::Params& p) {
+        Probe agent(p);
+        agent.startRound(view.me, 7674555874918794106ull);
+        const auto hand = view.mine().pair(view.self().nextPair);
+        const auto legal = ai::differentFields(legalPlacements(view.self().field), hand);
+        const int id = agent.choose(view, hand, legal);
+        return std::pair{id, agent.kind};
+    };
+
+    auto ordinary = p;
+    ordinary.checkKnownExchange = false;
+    check(choose(o, p) == std::pair{2, ai::X3Agent::AnswerBuild},
+          "an unavoidable visible four-chain leaves too few layers for the old build");
+    check(choose(o, ordinary) == std::pair{3, ai::X3Agent::AnswerBuild},
+          "known timing is disabled with known exchanges");
+
+    Observation clear;
+    clear.player[0].field.f.set(0, 0, 1);
+    clear.player[0].field.f.set(1, 0, 1);
+    clear.player[0].phase = Phase::Next;
+    clear.player[0].wait = 1;
+    clear.player[1].phase = Phase::Next;
+    clear.player[1].wait = 200;
+    clear.tsumo.pairs = {{1, 1}, {2, 3}, {3, 4}};
+    const auto selected = choose(clear, p);
+    GameField field = clear.self().field;
+    place(field, placement(selected.first), clear.mine().pair(0));
+    ai::Trial fired;
+    ai::runTrialChain(field.f, clear.rules, clear.timing, fired);
+    check(selected.second == ai::X3Agent::Clear && field.f.empty() && selected == choose(clear, ordinary),
+          "a visible all-clear still takes the ordinary clear route");
+}
+
+static void testRunningChainOffsetRetention() {
+    Observation o;
+    o.frame = 2239;
+    o.ownTsumo = true;
+    o.rules.cancel = false;
+    o.tsumo.pairs = {{3, 4}, {1, 2}, {1, 2}};
+    o.tsumo1.pairs = {{1, 3}, {1, 2}};
+    constexpr char ownCells[] =
+        "040000" "440000" "410300" "320200" "210100" "220124" "311424"
+        "313132" "422434" "424434" "432124" "232441" "232411" "211144";
+    constexpr char foeCells[] =
+        "000000" "000000" "040000" "220104" "130403" "320301" "212314"
+        "221241" "423231" "113132" "132142" "442212" "143424" "113144";
+    static_assert(sizeof(ownCells) == W * 14 + 1 && sizeof(foeCells) == W * 14 + 1);
+    auto& self = o.player[0];
+    self.field = splitAttackField(ownCells);
+    self.wait = 1;
+    self.moves = 44;
+    self.scoring = {1080, 30};
+    self.incoming.pending = 5;
+    auto& foe = o.player[1];
+    foe.field = splitAttackField(foeCells);
+    foe.phase = Phase::Wave;
+    foe.wait = 68;
+    foe.moves = 41;
+    foe.scoring = {1224, 34};
+    foe.chain.chains = 2;
+
+    ai::Gaze gaze;
+    const auto p = ai::levelParams({}, 37);
+    constexpr uint64_t seed = 3122309291697762058ull + 44;
+    const auto collect = [&](const Observation& view, const ai::Params& q) {
+        ai::PlanSet s;
+        gaze.plans(view, 0, true, 3, q, seed, s);
+        return s;
+    };
+    const auto hasReturn = [](const ai::Plan& s) {
+        return s.count == 3 && s.id[0] == 4 && s.id[1] == 5 && s.id[2] == 19;
+    };
+    const auto mine = collect(o, p);
+    const auto actual = std::find_if(mine.tactical.begin(), mine.tactical.end(), hasReturn);
+    check(actual != mine.tactical.end() && actual->chains == 13 && actual->sent == 0,
+          "a 13-chain that spends its attack on offsets remains available");
+    ai::PlanSet theirs;
+    gaze.plans(o, 1, false, 3, p, seed, theirs);
+    const ai::Duel d = ai::playOut(o, mine, &*actual, theirs, nullptr, p, seed, true);
+    check(d.player[1].chain.chains == 13 && d.player[1].phase == ai::DuelPhase::Control &&
+          d.player[0].chain.chains == 13 && d.player[0].moves == self.moves + 3 &&
+          d.player[0].fallen + d.player[0].incoming.total() == 147,
+          "the retained 13-chain leaves 147 after the running attack completes");
+    auto withoutOffset = p;
+    withoutOffset.checkKnownExchange = false;
+    const auto legacy = collect(o, withoutOffset);
+    check(std::none_of(legacy.tactical.begin(), legacy.tactical.end(), hasReturn),
+          "the offset-specific slot is needed for this return");
+    const auto previousLevel = collect(o, ai::levelParams({}, 36));
+    check(previousLevel.tactical.empty(), "Lv36 does not get running-chain offset retention");
+
+    auto quiet = o;
+    quiet.player[1].phase = Phase::Next;
+    quiet.player[1].wait = 1;
+    quiet.player[1].chain = {};
+    quiet.player[0].incoming = {};
+    const auto idle = collect(quiet, p), idleLegacy = collect(quiet, withoutOffset);
+    check(std::equal(idle.tactical.begin(), idle.tactical.end(), idleLegacy.tactical.begin(), idleLegacy.tactical.end(),
+        [](const ai::Plan& a, const ai::Plan& b) {
+            return ai::samePlacements(a, b) && a.sent == b.sent && a.points == b.points &&
+                a.mainAfter == b.mainAfter && a.endFrame == b.endFrame;
+        }), "a rival without a running chain leaves tactical retention unchanged");
+}
+
+// Add below the small-attack fixtures, and call from the ordinary AI tests.
+static juraic::ai::Observation smallReplyField(bool early) {
+    using namespace juraic;
+    ai::Observation o;
+    o.me = 1;
+    o.ownTsumo = true;
+    o.frame = early ? 2416 : 2606;
+    const auto field = [](std::string_view rows) {
+        GameField f;
+        for (int x = 0; x < W; ++x) f.row14[x] = Cell(rows[x] - '0');
+        for (int i = W; i < int(rows.size()); ++i) {
+            const Cell c = Cell(rows[size_t(i)] - '0');
+            if (c != EMPTY) f.f.set(i % W, 13 - i / W, c);
+        }
+        return f;
+    };
+    auto& rival = o.player[0];
+    auto& own = o.player[1];
+    rival.field = field(early ?
+        "000000200000100003143003162123226124311424313132422434424434432124232441232411211144" :
+        "000000200002100003140003163003222004311404313132422434424434432124232441232411211144");
+    own.field = field(early ?
+        "000004000001000012440334430244230312430112320244341424131221232444421131322441311141" :
+        "000004400001400012400334430244240312440112321244341424131221232444421131322441311141");
+    rival.phase = early ? Phase::Next : Phase::Wave;
+    rival.wait = early ? 5 : 49;
+    rival.chain.chains = early ? 1 : 2;
+    rival.moves = early ? 45 : 47;
+    rival.scoring = early ? Scoring{880, 40, false} : Scoring{1244, 54, false};
+    own.phase = Phase::Next;
+    own.wait = 1;
+    own.moves = early ? 46 : 49;
+    own.scoring = early ? Scoring{1228, 38, false} : Scoring{1282, 22, false};
+    own.incoming.confirmed = early ? 1 : 0;
+    own.incoming.pending = early ? 0 : 5;
+    o.tsumo.pairs = early ? std::vector<Pair>{{1, 2}, {1, 2}} : std::vector<Pair>{{4, 1}, {2, 1}};
+    o.tsumo1.pairs = early ? std::vector<Pair>{{1, 3}, {4, 3}, {4, 4}} : std::vector<Pair>{{3, 1}, {2, 4}, {4, 1}};
+    return o;
+}
+
+static void testSmallReplyExchange() {
+    using namespace juraic;
+    auto p = ai::levelParams({}, 37);
+    p.searchThreads = 1;
+    p.beamWidth = 250;
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.beamFixedQueues = 4;
+    struct TestAgent : ai::X3Agent {
+        using ai::X3Agent::X3Agent;
+        int pick(const ai::Observation& o) {
+            startRound(o.me, 10192824035178659411ull);
+            return choose(o, o.mine().pair(o.self().nextPair), legalPlacements(o.self().field));
+        }
+    };
+    TestAgent agent(p);
+    auto late = smallReplyField(false);
+    check(agent.pick(late) == 7, "Lv37 fires the earlier, stronger reply with an equally ready three-pair field");
+    check(agent.kind == TestAgent::Answer, "the earlier attack answers incoming garbage");
+    check(agent.pick(smallReplyField(true)) == 2, "a small reply keeps its main when no visible large threat can start");
+    ai::Gaze gaze;
+    ai::PlanSet ours, theirs;
+    static constexpr uint64_t seed = 10192824035178659411ull;
+    gaze.plans(late, 1, true, 3, p, seed, ours);
+    gaze.plans(late, 0, false, 3, p, seed, theirs);
+    int polls = 0;
+    const auto ask = [&](auto expired, int arriving) {
+        return ai::receive_compare::prefer(late, ours, theirs, 3, legalPlacements(late.self().field), arriving, p, seed, expired);
+    };
+    check(ask([&] { return ++polls == 200; }, 5) == -1 && polls == 200,
+          "a stopped comparison leaves the ordinary answer");
+    int whole = 0, latePolls = 0;
+    check(ask([&] { ++whole; return false; }, 5) == 7 && whole > 200,
+          "the positive fixture completes its exchange comparison");
+    check(ask([&] { return ++latePolls == whole - 1; }, 5) == -1 && latePolls == whole - 1,
+          "interrupting the final checks cannot take an already promising attack");
+    check(ask([] { return false; }, 797) == -1, "an incoming main uses regular offset selection");
+}
+
+static void testSetupKeepsVisibleAnswer() {
+    using namespace juraic;
+    ai::Observation o;
+    o.frame = 1589;
+    o.rules.cancel = false;
+    o.tsumo.pairs = {{3,4}, {1,2}, {4,3}, {2,1}};
+    auto& self = o.player[0];
+    self.field = splitAttackField(
+        "000000110000240004140342211342444221113142"
+        "123242221142134123133443144224222344111423");
+    self.nextPair = 1;
+    self.moves = 35;
+    self.phase = Phase::Next;
+    self.wait = 1;
+    self.scoring = {267,267,false};
+    auto& enemy = o.player[1];
+    enemy.field = splitAttackField(
+        "000000420000110042421041443021122041213022"
+        "233244114414122322444342121434112334221113");
+    enemy.nextPair = 0;
+    enemy.moves = 34;
+    enemy.phase = Phase::Next;
+    enemy.wait = 6;
+    enemy.scoring = {257,257,false};
+
+    const auto p = ai::levelParams({}, 37);
+    const uint64_t seed = 11;
+    ai::Gaze gaze;
+    ai::PlanSet ours, theirs;
+    gaze.plans(o, 0, true, 3, p, seed, ours);
+    gaze.plans(o, 1, false, 3, p, seed, theirs);
+    const auto open = [] { return false; };
+    const auto result = ai::keepSetupAnswer(o, ours, theirs, 8, 5, p, seed, open);
+    check(result == 8, "a faster setup must keep the visible answer to the rival main chain");
+    ai::PlanSet quietRival = theirs;
+    quietRival.plans.clear();
+    quietRival.tactical.clear();
+    quietRival.keeping.clear();
+    check(ai::keepSetupAnswer(o, ours, quietRival, 8, 5, p, seed, open) == 5,
+          "a faster placement remains available with no shown attack");
+    check(ai::keepSetupAnswer(o, ours, theirs, 8, 5, ai::levelParams({},36), seed, open) == 5,
+          "the setup check belongs to level 37");
+    check(ai::keepSetupAnswer(o, ours, theirs, 8, 5, p, seed, [] { return true; }) == 8,
+          "the existing beam choice stands if the comparison runs out of time");
+}
+
+static void testPokeAgainstStoredAllClear() {
+    constexpr const char* left[]{
+        "Y.....", "R...Y.", "RG..G.", "RY..BG", "BY..YG", "BYRBGY", "GGBYBB",
+        "GYBYRB", "BRRGBR", "BBYGBR", "YRGRBR", "YRRBRG", "GGGBRG"
+    };
+    constexpr const char* right[]{
+        "......", "......", "GY....", "GY....", "GY....", "BGG..B", "BYRR.R",
+        "YGGR.R", "BGYBGR", "BYYRRG", "BRBBRG", "YBRYBG", "YYRRBB"
+    };
+    Observation o;
+    o.frame = 1373;
+    o.ownTsumo = true;
+    auto& own = o.player[0];
+    auto& foe = o.player[1];
+    own.field = fieldOf(left, 13);
+    own.wait = 1;
+    own.nextPair = own.moves = 31;
+    own.scoring.pool = 260;
+    foe.field = fieldOf(right, 13);
+    foe.phase = Phase::Control;
+    foe.nextPair = 28;
+    foe.moves = 27;
+    foe.scoring.pool = 293;
+    foe.scoring.allClear = true;
+    foe.colors = {3, 2};
+    foe.pair = spawnPair(o.timing);
+    for (const uint8_t button : {6, 4, 6, 4, 4, 4, 4})
+        stepPair(foe.pair, foe.field, button, o.timing, o.rules.speedPercent);
+    o.tsumo.pairs.resize(31);
+    o.tsumo1.pairs.resize(28);
+    for (Pair p : {Pair{3, 2}, Pair{1, 4}, Pair{2, 1}}) o.tsumo.pairs.push_back(p);
+    for (Pair p : {Pair{4, 1}, Pair{3, 2}}) o.tsumo1.pairs.push_back(p);
+
+    const auto p = ai::levelParams({}, 37);
+    const auto legal = legalPlacements(own.field);
+    constexpr uint64_t seed = 4687432659440854654ull;
+    ai::Gaze gaze;
+    ai::PlanSet plans, counters;
+    gaze.plans(o, 0, true, 3, p, seed, plans);
+    gaze.plans(o, 1, false, 3, p, seed, counters);
+    const auto poke = std::find_if(plans.plans.begin(), plans.plans.end(), [](const ai::Plan& plan) {
+        return plan.count == 1 && plan.fireDepth == 1 && plan.id[0] == 10;
+    });
+    check(poke != plans.plans.end() && poke->sent == 4, "a four-piece poke is available under the stored all-clear");
+    const auto choose = [&](const ai::Params& params, auto stop) {
+        return ai::known_poke::prefer(o, legal, 70, seed, params, plans, counters, *poke, 0, true, 0, stop);
+    };
+    const auto noTimeLimit = [] { return false; };
+    check(choose(p, noTimeLimit) == 14, "Lv37 keeps a physically executable offset to the known all-clear counter");
+    int checks = 0;
+    check(choose(p, [&] { return ++checks >= 16; }) < 0, "an interrupted all-clear counter scan leaves the poke selection unchanged");
+    check(choose(ai::levelParams({}, 36), noTimeLimit) < 0, "Lv36 never runs the stored all-clear counter scan");
+    counters.knownCount = 1;
+    check(choose(p, noTimeLimit) < 0, "an unseen next pair cannot prove a lethal all-clear counter");
+    counters.knownCount = 3;
+    foe.scoring.allClear = false;
+    own.scoring.allClear = true;
+    check(choose(p, noTimeLimit) < 0, "the player's own stored all-clear bonus keeps the normal poke rules");
+}
+
+// The three visible pairs and complete own field in the audited high reach case.
+// Opponent motion and unknown pairs are irrelevant to the standalone comparator.
+static void testOpenSetup() {
+    ai::Observation o;
+    o.me = 1;
+    o.rules.colors = 4;
+    o.rules.cancel = false;
+    o.player[1].wait = 1;
+    o.player[0].phase = Phase::Control;
+    o.player[0].incoming.confirmed = 1;
+    constexpr const char* rows[] = {"000000","400000","310000","244130","114341","123413","214433",
+                                    "231114","432321","131221","141432","144232","222421","114422"};
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) o.player[1].field.f.set(x, y, Cell(rows[ROW_14-y][x] - '0'));
+    o.tsumo.pairs = {{1,4}, {4,4}, {3,2}};
+    ai::PlanSet mine;
+    mine.who = 1;
+    mine.knownCount = mine.pairCount = 3;
+    std::copy(o.tsumo.pairs.begin(), o.tsumo.pairs.end(), mine.pair);
+    ai::Plan visible;
+    visible.count = visible.fireDepth = 2;
+    visible.id[0] = 20;
+    visible.id[1] = 7;
+    visible.points = 101424;
+    visible.sent = 1449;
+    mine.plans.push_back(visible);
+    ai::BuildResult b;
+    const unsigned both = (1u << 20) | (1u << 9);
+    b.alive = both;
+    b.sum[20] = 1054040;
+    b.sum[9] = 1023340;
+    const auto lv37 = ai::agentParams("lv37", ai::Params{});
+    const auto run = [&](const ai::Observation& state, int room = 2) {
+        return ai::preferOpenSetup(state, mine, b, 20, both, room, lv37, [] { return false; });
+    };
+    check(run(o) == 9, "the quiet reverse must strictly extend visible conditional coverage");
+
+    auto changed = o;
+    changed.tsumo.pairs.pop_back();
+    check(run(changed) == 20, "two pairs cannot prove the four-pair branches");
+    changed = o;
+    changed.tsumo.pairs.push_back({2,3});
+    check(run(changed) == 20, "a visible fourth pair cannot be replaced by forecasts");
+    changed = o;
+    changed.player[0].incoming = {1,0};
+    check(run(changed) == 20, "unconfirmed opponent garbage stays with the usual choice");
+    changed = o;
+    changed.player[0].incoming.confirmed = W;
+    check(run(changed) == 20, "a row on the rival must be left to ordinary tactics");
+    changed = o;
+    changed.player[1].incoming.pending = 1;
+    check(run(changed) == 20, "own garbage blocks quiet reversal");
+    changed = o;
+    changed.player[0].phase = Phase::Wave;
+    check(run(changed) == 20, "an opponent chain blocks quiet reversal");
+    changed = o;
+    changed.player[1].phase = Phase::Wave;
+    check(run(changed) == 20, "an own chain blocks quiet reversal");
+    changed = o;
+    changed.busyChain[0] = true;
+    changed.busyLeft[0] = 1;
+    check(run(changed) == 20, "an unfinished landing reported earlier than the phase also blocks reversal");
+    for (int seat : {0, 1}) {
+        changed = o;
+        changed.player[seat].scoring.allClear = true;
+        check(run(changed) == 20, "both all-clear bonuses take precedence");
+    }
+    check(run(o, 3) == 20, "the quiet reverse is restricted to a field with less room than the preview");
+    const auto lv36 = ai::agentParams("lv36", ai::Params{});
+    check(ai::preferOpenSetup(o, mine, b, 20, both, 2, lv36, [] { return false; }) == 20,
+            "the old level cannot change its choice");
+    check(ai::preferOpenSetup(o, mine, b, 20, both, 2, lv37, [] { return true; }) == 20,
+            "an expired start keeps the ordinary orientation");
+    int checks = 0;
+    check(ai::preferOpenSetup(o, mine, b, 20, both, 2, lv37, [&] { return ++checks >= 100; }) == 20 && checks >= 100,
+            "an interrupted comparison keeps the ordinary orientation");
+    b.sum[9] = 1000000;
+    check(run(o) == 20, "the original tolerance applies before trying the orientation");
+    b.sum[9] = 1023340;
+    changed = o;
+    changed.tsumo.pairs[0] = {4,4};
+    mine.pair[0] = {4,4};
+    check(run(changed) == 20, "the same-colour orientations already have the same field");
+}
+
+static void testKnownPartialBuild() {
+    Observation pressured;
+    pressured.ownTsumo = true;
+    pressured.frame = 1614;
+    pressured.tsumo.pairs = {{4,1}, {2,2}, {4,4}};
+    pressured.tsumo1.pairs = {{4,3}, {3,1}};
+    auto& own = pressured.player[0];
+    own.field = splitAttackField(
+        "020000" "140000" "210044" "444014" "113141" "122321" "342122"
+        "323234" "133224" "222114" "113142" "134211" "434422" "111311");
+    own.scoring = {268, 268, false};
+    own.moves = 36;
+    own.wait = 1;
+    auto& foe = pressured.player[1];
+    foe.field = splitAttackField(
+        "000004" "000004" "310003" "130343" "211142" "233432" "113112"
+        "144241" "224324" "123414" "113134" "442431" "433411" "223244");
+    foe.scoring = {261, 261, false};
+    foe.moves = 35;
+    foe.wait = 6;
+
+    Observation hold;
+    hold.me = 1;
+    hold.ownTsumo = true;
+    hold.frame = 1945;
+    hold.tsumo.pairs = {{4,2}, {1,3}};
+    hold.tsumo1.pairs = {{4,4}, {3,2}, {2,3}};
+    auto& rival = hold.player[0];
+    rival.field = splitAttackField(
+        "000000" "200042" "100033" "400623" "410322" "140113" "110244"
+        "431131" "431431" "432244" "111422" "422434" "332314" "444112");
+    rival.scoring = {350, 70, false};
+    rival.moves = 37;
+    rival.phase = Phase::Garbage;
+    rival.wait = 24;
+    auto& player = hold.player[1];
+    player.field = splitAttackField(
+        "000000" "400000" "310410" "244130" "114341" "123413" "214433"
+        "231114" "432321" "131221" "141432" "144232" "222421" "114422");
+    player.scoring = {361, 11, false};
+    player.moves = 39;
+    player.wait = 1;
+
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+
+        static unsigned offeredFromSpawn(const Observation& o) {
+            ai::InputPlanner planner;
+            ai::InputPath path;
+            const auto spawn = spawnPair(o.timing);
+            unsigned reached = 0;
+            for (unsigned legal = legalPlacements(o.self().field); legal; legal &= legal - 1) {
+                const int id = std::countr_zero(legal);
+                if (planner.plan(o.self().field, spawn, placement(id), o.timing, o.rules.speedPercent, path)) reached |= 1u << id;
+            }
+            return reached;
+        }
+
+        std::pair<int, Kind> pick(const Observation& o, uint64_t seed) {
+            startRound(o.me, seed);
+            const int id = choose(o, o.mine().pair(o.self().nextPair), offeredFromSpawn(o));
+            return {id, kind};
+        }
+
+        void checkExact(const Observation& o, uint64_t seed) {
+            const auto legal = offeredFromSpawn(o);
+            const auto beam = searchBuild(o, 0);
+            const int rate = o.rules.rateAt(o.frame);
+            const auto ask = [&](const ai::PlanSet& opponent, auto expired) {
+                return ai::preferKnownPartialBuild(o, mine, opponent, beam, 14, legal, p, seed + o.self().moves, rate, expired);
+            };
+            int polls = 0;
+            check(ask(theirs, [&] { ++polls; return false; }) == 3 && polls > 4,
+                  "the partial offset is supported by complete concrete exchanges");
+            const int deadline = polls - 1;
+            polls = 0;
+            check(ask(theirs, [&] { return ++polls >= deadline; }) == 14 && polls >= deadline,
+                  "a deadline during the comparison keeps the ordinary build");
+            auto onePair = theirs;
+            onePair.pairCount = 1;
+            check(ask(onePair, [] { return false; }) == 14,
+                  "the second opposing pair must be available to the concrete reading");
+        }
+    };
+
+    auto p = ai::levelParams({}, 37);
+    p.searchThreads = 1;
+    p.beamWidth = 250;
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.beamFixedQueues = 4;
+    p.thinkBudget = 0;
+    auto ordinary = p;
+    ordinary.checkKnownExchange = false;
+    constexpr uint64_t pressuredSeed = 13761247434487866029ull;
+    constexpr uint64_t holdSeed = 12786619812055743890ull;
+    Probe agent(p), legacy(ordinary);
+    check(legacy.pick(pressured, pressuredSeed) == std::pair{14, Probe::Build}, "the ordinary beam spends the visible main on a single");
+    check(agent.pick(pressured, pressuredSeed) == std::pair{3, Probe::Build}, "the normal Lv37 choice limits the known partial offset loss");
+    agent.checkExact(pressured, pressuredSeed);
+    check(agent.pick(hold, holdSeed) == std::pair{5, Probe::Build} && legacy.pick(hold, holdSeed) == std::pair{5, Probe::Build},
+          "a quiet build retains its stronger idle possibilities against a weak visible response");
+
+    Observation quiet;
+    quiet.tsumo.pairs = {{1,1}};
+    quiet.player[0].wait = 1;
+    quiet.player[1].wait = 20;
+    constexpr int wanted = 7;
+    const Pair mono = quiet.mine().pair(0);
+    ai::InputPlanner planner;
+    ai::InputPath canonical, selected;
+    const auto spawn = spawnPair(quiet.timing);
+    const unsigned legal = legalPlacements(quiet.self().field);
+    check(planner.plan(quiet.self().field, spawn, placement(wanted), quiet.timing, quiet.rules.speedPercent, canonical),
+          "the canonical quiet path is physically available");
+    int alternate = wanted;
+    check(planner.planEquivalent(quiet.self().field, spawn, alternate, legal, mono, quiet.timing, quiet.rules, selected) &&
+              alternate == ai::reversePlacement(wanted) && selected.frames() < canonical.frames(),
+          "ordinary input can change the time of the quiet same-colour placement");
+
+    ai::PlanSet a, b;
+    ai::Gaze gaze;
+    gaze.plans(quiet, 0, true, 1, p, 1, a);
+    gaze.plans(quiet, 1, false, 1, p, 1, b);
+    ai::Plan one;
+    one.count = 1;
+    one.id[0] = wanted;
+    const auto replay = [&](bool equivalent) {
+        ai::KnownReplay guarded{[] { return false; }};
+        guarded.acceptPlacement = [&](const ai::Duel& d, int who, Placement target, Pair pair, int64_t from, int64_t lock) {
+            return ai::stablePartialBuildRoute(d, who, target, pair, from, lock, equivalent);
+        };
+        return ai::playOut(quiet, a, &one, b, nullptr, p, 1, true, nullptr, &guarded);
+    };
+    check(replay(false).player[0].moves == 1 && replay(true).player[0].moves == 0,
+          "a quiet alternate interrupts the exact replay only when equivalent input is enabled");
+
+    auto tall = quiet;
+    for (int y = 0; y < 12; ++y) tall.player[0].field.f.set(1, y, GARBAGE);
+    for (int y = 0; y < 11; ++y) tall.player[0].field.f.set(DEATH_X, y, GARBAGE);
+    const unsigned tallLegal = legalPlacements(tall.self().field);
+    one.id[0] = 12;
+    check(!(tallLegal >> 12 & 1u) && (tallLegal >> 1 & 1u), "only the alternate is legal on the high column");
+    bool rejected = false;
+    ai::KnownReplay alternateOnly{[] { return false; }};
+    alternateOnly.acceptPlacement = [&](const ai::Duel& d, int who, Placement target, Pair pair, int64_t from, int64_t lock) {
+        rejected = lock == -1 && !ai::stablePartialBuildRoute(d, who, target, pair, from, lock, true);
+        return !rejected;
+    };
+    ai::playOut(tall, a, &one, b, nullptr, p, 1, true, nullptr, &alternateOnly);
+    check(rejected, "the exchange also checks an orientation with no canonical path");
+
+    ai::Duel blocked(quiet);
+    const auto stable = [&](Pair pair, int64_t lock) {
+        return ai::stablePartialBuildRoute(blocked, 0, placement(wanted), pair, 0, lock, true);
+    };
+    check(stable({1,2}, 5), "a mixed pair never changes orientation");
+    blocked.player[0].field.f.set(1, 0, 1), blocked.player[0].field.f.set(1, 1, 1);
+    check(stable(mono, 5), "an immediate clear keeps its canonical input");
+    blocked.player[0].field = {};
+    blocked.player[1].phase = ai::DuelPhase::Check;
+    blocked.player[1].chain.chains = 1;
+    blocked.player[1].at = 10;
+    check(stable(mono, 5) && !stable(mono, 10), "a running chain blocks equivalent input only within its known interval");
+}
+
+static void testKnownAnswerWindow() {
+    const auto parse = [](const char* cells) {
+        GameField field;
+        for (int y = ROW_14; y >= 0; --y) for (int x = 0; x < W; ++x) {
+            const Cell c = Cell(*cells++ - '0');
+            if (y == ROW_14) field.row14[x] = c;
+            else field.f.set(x, y, c);
+        }
+        return field;
+    };
+    ai::Observation o;
+    o.rules.cancel = false;
+    o.rules.colors = 4;
+    o.rules.preInput = true;
+    o.tsumo.pairs = {{3,3}, {1,3}, {1,4}, {3,1}, {4,4}};
+    auto& self = o.player[0];
+    auto& rival = o.player[1];
+    self.wait = 1;
+    self.nextPair = 2;
+    self.scoring = {255, 255, false};
+    self.incoming.pending = 8;
+    self.field = parse("000000110000220000413030212330133110134431222321444343232433221122333432211233221244");
+    rival.phase = Phase::Wave;
+    rival.wait = 77;
+    rival.chain.chains = 2;
+    rival.scoring = {605, 45, false};
+    rival.field = parse("000000000000000000000001200002242203343303342302114211122441333222242433224312441122");
+
+    const auto params = ai::levelParams(ai::Params{}, 37);
+    ai::Gaze gaze;
+    ai::PlanSet ours, theirs;
+    gaze.plans(o,0,true,3,params,1,ours);
+    gaze.plans(o,1,false,3,params,1,theirs);
+    const auto known = [&](int first, int second = -1) -> const ai::Plan& {
+        for (const auto* list : {&ours.plans,&ours.tactical,&ours.keeping}) for (const auto& plan : *list) {
+            const int count = second < 0 ? 1 : 2;
+            if (plan.count == count && plan.fireDepth == count && plan.id[0] == first && (second < 0 || plan.id[1] == second)) return plan;
+        }
+        throw std::runtime_error("the answer fixture lost its visible route");
+    };
+    const auto& ordinary = known(10,3);
+    const auto& immediate = known(21);
+    const auto& prepared = known(20,16);
+    ai::Duel confirmed(o,1);
+    ai::toPairOf(confirmed,1,o.frame+6000);
+    const auto ask = [&](const ai::Observation& view, const ai::Plan& answer, const ai::Params& profile, const auto& stop) {
+        return ai::answer_window::prefer(view,ours,theirs,answer,&immediate,confirmed,legalPlacements(view.self().field),8,profile,1,stop);
+    };
+    const auto deadlineOpen = [] { return false; };
+    check(ask(o,ordinary,params,deadlineOpen) == 20, "the first answer keeps both an early full offset and a visible main");
+    check(ask(o,prepared,params,deadlineOpen) < 0, "the existing first placement with both answers is kept");
+    auto onlyOne = o;
+    onlyOne.tsumo.pairs.resize(3);
+    check(ask(onlyOne,ordinary,params,deadlineOpen) < 0, "an unseen pair cannot be used to prove the main");
+    int calls = 0;
+    check(ask(o,ordinary,params,[&] { return ++calls >= 25; }) < 0 && calls >= 25,
+          "a comparison interrupted in progress keeps the ordinary answer");
+    check(ask(o,ordinary,ai::levelParams(ai::Params{},36),deadlineOpen) < 0, "Lv36 keeps its ordinary answer");
+    for (int who : {0,1}) {
+        auto allClear = o;
+        allClear.player[who].scoring.allClear = true;
+        check(ask(allClear,ordinary,params,deadlineOpen) < 0, "a stored all clear keeps its established tactics");
+    }
+    auto preInput = o;
+    preInput.player[0].buttons = BTN_CW;
+    check(ask(preInput,ordinary,params,deadlineOpen) < 0, "an altered spawn orientation invalidates the canonical input clock");
+}
+
+static void testCommittedAnswerExchange(bool withClock = false) {
+    Observation o;
+    o.frame = 1509;
+    o.me = 1;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{2,2}, {1,4}};
+    o.tsumo1.pairs = {{1,4}, {3,2}, {3,2}};
+    auto& foe = o.player[0];
+    foe.field = splitAttackField(
+        "000000" "200000" "440000" "411000" "212000" "442020" "423440"
+        "224120" "414421" "413312" "223112" "211432" "331314" "444114");
+    foe.moves = 32;
+    foe.wait = 5;
+    foe.scoring = {355, 5, false};
+    foe.chain.chains = 1;
+    auto& own = o.player[1];
+    own.field = splitAttackField(
+        "300000" "300000" "200000" "420000" "421030" "211023" "233422"
+        "413113" "414422" "414311" "222141" "313132" "343412" "111442");
+    own.moves = 31;
+    own.wait = 1;
+    own.scoring = {249, 249, false};
+    own.incoming.confirmed = 5;
+
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        int64_t decisionUs = 0;
+
+        static unsigned offered(const Observation& view) {
+            ai::InputPlanner planner;
+            ai::InputPath path;
+            const auto spawn = spawnPair(view.timing);
+            unsigned mask = 0;
+            for (unsigned ids = legalPlacements(view.self().field); ids; ids &= ids - 1) {
+                const int id = std::countr_zero(ids);
+                if (planner.plan(view.self().field, spawn, placement(id), view.timing, view.rules.speedPercent, path)) mask |= 1u << id;
+            }
+            return mask;
+        }
+
+        std::pair<int, Kind> pick(const Observation& view, uint64_t seed) {
+            startRound(view.me, seed);
+            const unsigned legal = offered(view);
+            const auto start = std::chrono::steady_clock::now();
+            const int id = choose(view, view.mine().pair(view.self().nextPair), legal);
+            decisionUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+            return {id, kind};
+        }
+
+        void checkExact(const Observation& view, uint64_t seed) {
+            const unsigned legal = offered(view);
+            const auto compare = [&](const Observation& current, const ai::PlanSet& opposing, auto stop) {
+                return ai::preferCommittedAnswer(current, mine, opposing, 9, legal, 5, p, seed + view.self().moves, stop);
+            };
+            int polls = 0;
+            check(compare(view, theirs, [&] { ++polls; return false; }) == 14 && polls > 50,
+                  "the stronger committed answer reduces the worst concrete partial offset");
+            const int deadline = polls - 7;
+            polls = 0;
+            check(compare(view, theirs, [&] { return ++polls >= deadline; }) == 9 && polls >= deadline,
+                  "an incomplete committed-answer comparison keeps the ordinary placement");
+            auto limited = theirs;
+            limited.knownCount = limited.pairCount = 1;
+            check(compare(view, limited, [] { return false; }) == 9, "an unobserved second pair cannot establish a counter");
+            auto bonus = view;
+            bonus.player[1 - view.me].scoring.allClear = true;
+            check(compare(bonus, theirs, [] { return false; }) == 9, "a stored all-clear keeps the ordinary answer");
+            auto clears = mine;
+            for (auto& plan : clears.plans) if (plan.id[0] == 9 && plan.count == 1) plan.allClear = true;
+            check(ai::preferCommittedAnswer(view, clears, theirs, 9, legal, 5, p, seed, [] { return false; }) == 9,
+                  "an immediate all-clear keeps the ordinary answer");
+
+            const unsigned foeLegal = legalPlacements(view.opponent().field);
+            bool differentTime = false;
+            for (unsigned ids = foeLegal; ids && !differentTime; ids &= ids - 1) {
+                const int id = std::countr_zero(ids), reverse = ai::reversePlacement(id);
+                if (id >= reverse || !(foeLegal >> reverse & 1u)) continue;
+                ai::Plan route;
+                route.count = 1;
+                route.id[0] = int8_t(id);
+                const auto a = ai::playOut(view, mine, nullptr, theirs, &route, p, seed, true);
+                route.id[0] = int8_t(reverse);
+                const auto b = ai::playOut(view, mine, nullptr, theirs, &route, p, seed, true);
+                const auto& first = a.player[1 - view.me];
+                const auto& second = b.player[1 - view.me];
+                differentTime = first.moves == view.opponent().moves + 1 && second.moves == first.moves &&
+                    first.field == second.field && first.lockFrame != second.lockFrame;
+            }
+            check(differentTime, "visible same-colour orientations can leave the same field at different times");
+        }
+    };
+    auto p = ai::levelParams({}, 37);
+    p.beamWidth = 250;
+    p.beamDepth = 16;
+    p.beamQueues = 8;
+    p.beamFixedQueues = 4;
+    p.searchThreads = 1;
+    p.thinkBudget = 0;
+    auto ordinary = p;
+    ordinary.checkKnownExchange = false;
+    constexpr uint64_t seed = 8191215416231582517ull;
+    Probe baseline(ordinary), tested(p);
+    check(baseline.pick(o, seed) == std::pair{9, Probe::Answer}, "the ordinary answer commits the smaller main");
+    check(tested.pick(o, seed) == std::pair{14, Probe::Answer}, "the normal Answer entry chooses the stronger immediate offset");
+    tested.checkExact(o, seed);
+
+    if (withClock) {
+        p.thinkBudget = 180;
+        Probe timed(p);
+        check(timed.pick(o, seed) == std::pair{14, Probe::Answer}, "the committed answer fits the standard clock on the fixed position");
+        std::cout << "committed answer with clock: " << timed.decisionUs << " us\n";
+    }
+}
+
+// Define this after the AI test assertions and call testSideResponse() from main.
+static void testSideResponse() {
+    using namespace juraic;
+    using namespace juraic::ai;
+    const auto check = [](bool ok, const char* text) {
+        if (!ok) throw std::runtime_error(text);
+    };
+    Observation o;
+    o.frame = 1487;
+    o.ownTsumo = true;
+    o.rules.cancel = false;
+    o.tsumo.pairs = {{4,2}, {2,1}, {1,1}};
+    o.tsumo1.pairs = {{3,1}, {3,4}};
+    const auto board = [](std::string_view rows, GameField& field) {
+        int y = H - 1, x = 0;
+        for (const char c : rows) {
+            if (c == '/') { --y; x = 0; } else field.f.set(x++, y, Cell(c - '0'));
+        }
+    };
+    board("000000/000123/020214/011241/243442/441223/212323/221413/413244/113314/432411/442443/333224", o.player[0].field);
+    board("200000/100000/200001/100033/220434/114231/133231/241324/241144/214223/311342/342132/322132", o.player[1].field);
+    o.player[0].phase = Phase::Next;
+    o.player[0].wait = 1;
+    o.player[0].scoring.pool = 263;
+    o.player[0].incoming.pending = 4;
+    o.player[1].phase = Phase::Wave;
+    o.player[1].wait = 35;
+    o.player[1].scoring.pool = 19;
+    o.player[1].chain.chains = 1;
+    const Params p = agentParams("lv37", {});
+    constexpr uint64_t seed = 3856410095300094479ull;
+    Gaze gaze;
+    const auto choose = [&](const Observation& view, const Params& params, int ordinary, side_response::Ready& ready, int stopAfter = 0) {
+        PlanSet mine, theirs;
+        gaze.plans(view, 0, true, 3, params, seed, mine);
+        gaze.plans(view, 1, false, 3, params, seed, theirs);
+        Duel after(view, seed);
+        toPairOf(after, 1, view.frame + 1000);
+        int visited = 0;
+        return side_response::prefer(view, after, mine, theirs, ordinary, legalPlacements(view.self().field),
+            after.player[0].incoming.total(), params, seed, ready, [&] { return stopAfter > 0 && ++visited >= stopAfter; });
+    };
+    side_response::Ready ready;
+    check(choose(o, p, 1, ready) == 11 && ready.next == 8, "A short, visible full offset keeps the main chain");
+    Duel after(o, seed);
+    toPairOf(after, 1, o.frame + 1000);
+    PlanSet ours, rival;
+    gaze.plans(o, 0, true, 3, p, seed, ours);
+    gaze.plans(o, 1, false, 3, p, seed, rival);
+    const auto window = side_response::quietWindow(o, after, rival, [] { return false; });
+    check(window.firstWave == 1682 && window.firstConfirm == 1737, "Bound the first unseen blast without using its colors");
+    // A green double in the second enemy preview opens an executable main.
+    auto targeted = o;
+    targeted.tsumo1.pairs[1] = {2, 2};
+    targeted.me = 1;
+    rival.pair[1] = {2, 2};
+    Plan reply;
+    reply.count = 2;
+    reply.id[0] = 15;
+    reply.id[1] = 2;
+    KnownReplay replay{[] { return false; }};
+    ReplayCheckpoint settled;
+    const Duel direct = playOut(targeted, rival, &reply, ours, nullptr, p, seed, true, nullptr, &replay, nullptr, &settled);
+    check(settled.duel.rules && direct.player[1].moves == 2 && direct.player[1].chain.chains == 12,
+          "The visible enemy main must have real buttons");
+    side_response::Ready beforeMain;
+    targeted.me = 0;
+    check(choose(targeted, p, 1, beforeMain) == 1 && beforeMain.next < 0, "Do not ignore a visible enemy main");
+    Observation next = o;
+    next.frame = 1519;
+    next.player[1].wait = 3;
+    next.player[0].moves = 1;
+    next.player[0].nextPair = 1;
+    next.player[0].field = ready.field;
+    check(choose(next, p, 7, ready) == 8, "Recheck the selected response at the next playable pair");
+
+    side_response::Ready stopped;
+    check(choose(o, p, 1, stopped, 1) == 1 && stopped.next < 0, "Preserve the ordinary choice when expired");
+    check(choose(o, p, 1, stopped, 250) == 1 && stopped.next < 0, "Do not use an unfinished reply enumeration");
+    check(choose(next, p, 7, ready, 1) == 7, "A carried response must be rechecked before use");
+    auto alternate = next;
+    alternate.tsumo1.pairs.push_back({3,3});
+    check(choose(alternate, p, 7, ready) == 7, "Newly visible enemy information invalidates the carried scope");
+    alternate = o;
+    alternate.tsumo.pairs.resize(1);
+    check(choose(alternate, p, 1, stopped) == 1, "Need both pairs for a setup and short response");
+    alternate = o;
+    alternate.player[0].scoring.allClear = true;
+    check(choose(alternate, p, 1, stopped) == 1, "Keep the ordinary use of an own all-clear bonus");
+    alternate = o;
+    alternate.player[1].scoring.allClear = true;
+    check(choose(alternate, p, 1, stopped) == 1, "Keep the ordinary answer to an enemy all-clear bonus");
+    check(choose(o, agentParams("lv36", {}), 1, stopped) == 1, "Keep the level 36 choice");
+    check(choose(o, agentParams("x3", {}), 1, stopped) == 1, "Keep the Ex choice");
+}
+
 int main(int argc, char** argv) {
+    std::cout << std::unitbuf; // (every line out at once: a run that is stopped still tells how far it came)
     try {
         if (argc > 1 && std::string(argv[1]) == "bench") {
             if (argc > 2 && std::string(argv[2]) == "build") {
@@ -3494,6 +6086,7 @@ int main(int argc, char** argv) {
         testDuelSameFrame();
         testDuelOrder();
         testDuelTall();
+        testTallSpawnInputCache();
         testInputStraight();
         testInputHigh(argc > 1 ? std::atoi(argv[1]) : 2000);
         testDetect();
@@ -3501,8 +6094,25 @@ int main(int argc, char** argv) {
         testValue();
         testGaze();
         testAirRest();
+        testMidairSameColorOffset();
         testQuietPoke();
         testLevelTable();
+        testKnownSearchPairs();
+        testKnownExchange();
+        testExchangePoke();
+        testMidgamePressure();
+        testMidgameBeam();
+        testMidgamePoke();
+        testPressureFollowUp();
+        testKnownMainReturn();
+        testMidgameShelter();
+        testSetupSpeed();
+        testGazeDeadline();
+        testEquivalentSetupRoute();
+        testMidgameAttackRetention();
+        testMidgamePreparation();
+        testSmallReceive();
+        testMidgameDig();
         testLevels();
         testBase();
         testTear();
@@ -3514,10 +6124,28 @@ int main(int argc, char** argv) {
         testSecondChoice();
         testSearchThreads();
         testBudget();
+        testRivalAhead();
         testSwitches();
         testSoonKeep();
         testEnough();
+        testAnswer();
         testTactics();
+        testSplitMainAttack();
+        testWinImmediateFire();
+        testConfirmedOffsetCoverage();
+        testBuildKeepsVisibleMain();
+        testKnownPokeReserve();
+        testKnownPokeHandoff();
+        testKnownPrefixTiming();
+        testSideResponse();
+        testCommittedAnswerExchange();
+        testKnownAnswerWindow();
+        testKnownPartialBuild();
+        testOpenSetup();
+        testPokeAgainstStoredAllClear();
+        testSetupKeepsVisibleAnswer();
+        testSmallReplyExchange();
+        testRunningChainOffsetRetention();
         std::cout << "ai tests passed\n";
         return 0;
     } catch (const std::exception& e) {

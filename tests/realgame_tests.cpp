@@ -1445,7 +1445,7 @@ static void testPutUnseenIntoHiddenRows() {
     for (int scenario = 0; scenario < 4; ++scenario) {
         // (0: the fifth column twelve high; 1: the fifth and sixth, not told; 2: the same, told the sixth; 3: the same, and
         //  garbage fallen, one on each column, as pair 1 was put - which came first is not known, so the 13th row of the
-        //  fifth column is unsure, not taken as garbage)
+        //  fifth column is unsure; it is taken as garbage, as many pieces fallen on it either way)
         Reading empty;
         for (SideRead& side : empty.side) {
             for (auto& column : side.point)
@@ -1495,8 +1495,8 @@ static void testPutUnseenIntoHiddenRows() {
             continue;
         }
         if (scenario == 3) {
-            check(m.followed == 1 && m.core.field.f.get(5, 12) == 5 && m.core.field.row14[5] == 3 && m.core.field.f.get(4, 12) == EMPTY && (m.unsure >> 4 & 1),
-                  "the 13th row of a column twelve high, garbage fallen as a pair put unseen was found, is not left unsure (followed " + std::to_string(m.followed) +
+            check(m.followed == 1 && m.core.field.f.get(5, 12) == 5 && m.core.field.row14[5] == 3 && m.core.field.f.get(4, 12) == GARBAGE && (m.unsure >> 4 & 1),
+                  "the 13th row of a column twelve high, garbage fallen as a pair put unseen was found, is not garbage and unsure (followed " + std::to_string(m.followed) +
                       ", unsure " + std::to_string(m.unsure) + ", row 13 of the fifth column " + std::to_string(int(m.core.field.f.get(4, 12))) + ")");
             continue;
         }
@@ -2142,10 +2142,16 @@ struct DriveCounts {
     // lateSpawn: the pairs made to come later, those of them locked with a placement chosen, and of them those locked there;
     // unseenAloft: the pairs kept out of sight so
     long lateSpawns = 0, lateLocks = 0, lateHits = 0, aloft = 0;
+    long earlyAfterHigh = 0; // lateAfterHigh: of the pairs made to come later, those the driver had begun by the frame its engine foresaw
     long aloftAlone = 0; // ... and of leftAlone, the times such a pair took no button for 10 frames while out of sight
     // topSwing: the turns drawn so, and the pictures that put the engine's pair right while they were drawn (or up to 3
     // frames after)
     long swings = 0, swingCorrected = 0;
+    // aloftOne, markRead: the times a pair was drawn so, and the pictures that put the engine's pair right while it was
+    // (or up to 3 frames after)
+    long aloftOnes = 0, aloftOneCorrected = 0, marks = 0, markCorrected = 0;
+    long turnedShown = 0, turnedCorrected = 0; // turnedAsAppears: the pairs drawn so, and the pictures that put the engine's pair right meanwhile
+    long quickSwings = 0, quickSwingCorrected = 0; // quickSwing: the quick turns drawn so, and the pictures that put the engine's pair right meanwhile
     // Frames in which a pair of 2P in the 13th row, not over the column chosen for it turned its way, took the down button
     long downAloft = 0;
     // Pairs of 2P turned quickly by buttons sent for them, locked, of them where the AI chose, and of the others those
@@ -2479,6 +2485,9 @@ struct DriveScenario {
     // longer from two frames before it): the round takes the buttons meanwhile, and what they ask of the pair to come is done
     // as it appears (Rules::preInput).
     int lateSpawn = 0, lateEvery = 2;
+    // The pair after one locked with a piece in the 13th row or above appears that many frames later (as lateSpawn; the
+    // real game shows it five to nine frames after the frame the engine has).
+    int lateAfterHigh = 0;
     // pauseFor: in the last so many frames of each stop the light is gone (the screen read clear, the round still standing
     // and taking no button: the real game took none for ten frames after its pictures were clear again).
     int pauseClear = 0;
@@ -2494,6 +2503,26 @@ struct DriveScenario {
     // other piece above the screen: Tracker reads the pair upside down there (PairSeen::axisHidden), as it reads the
     // child of the real game on its way round near the top.
     int topSwing = 0;
+    // A pair of 2P that moves or turns lying in the 13th row, one of its pieces over a column 11 high or less, is drawn
+    // in that many pictures after it as one piece of its axis's colour in the upper half of the 12th row of that column,
+    // the other piece above the screen: Tracker reads the pair there, its child up and hidden
+    // (PairSeen::childHidden), as it reads a pair of the real game drawn so for a picture or two up there.
+    int aloftOne = 0;
+    // A pair of 2P that leaves the third column (no piece of it there in the 12th row or above any more), that column
+    // 11 high or less, is drawn in that many pictures, from the fourth after it, as one piece of its axis's colour in
+    // the 12th row of the third column, the other piece above the screen: as the mark the real game draws in that cell
+    // is read now and then, a piece of a colour.
+    int markRead = 0;
+    // A pair of 2P that turns quickly is drawn in that many pictures after it as it was before, its child up, half a
+    // cell below where its axis now is: as the real game draws the axis on its way up and the child round the side.
+    int quickSwing = 0;
+    // One pair of 2P in three that appears with no turn asked of it (its child up) is drawn in that many pictures from
+    // the one it appears in with its child to the right, the cell there empty: as the light of an attack that crosses
+    // the top of the field of the real game reads beside a pair of its colour.
+    int turnedAsAppears = 0;
+    // How much of the fields the screen of the round shows, in cells from their floor (0: as the layout of the tests
+    // has it, a part of the 13th row shown; 12: as the real game, nothing of the 13th row).
+    float shownRows = 0;
     // The game of the round counts no fall while a pair lies (the frame tables of this game), where the engine of the
     // mode counts it on as the real game does (Timing::fallOnGround): the game's pair half a cell above the engine's now
     // and then, after it lay on something.
@@ -2501,7 +2530,12 @@ struct DriveScenario {
 };
 // Such a round from `seed`, counted into n.
 static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
-    const Layout l = sampleLayout();
+    const Layout l = [&] {
+        Layout made = sampleLayout();
+        if (how.shownRows > 0)
+            for (SideLayout& d : made.side) d.shownRows = how.shownRows;
+        return made;
+    }();
     const Rules rules;
     Round r;
     Timing roundTiming;
@@ -2573,8 +2607,18 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
     int turnedAt = -100;            // the frame of the round the pair of 2P last turned in
     int pauseLeft = 0, inPlay = 0;  // pauseFor: frames the round stays stopped; frames the pair of 2P has been in play
     int lateFor = -1;               // lateSpawn: the pair (as spawns numbers it once it has appeared) made to come later
+    bool highLocked = false;        // lateAfterHigh: the pair of 2P locked last has a piece in the 13th row or above
+    int sinceSpawn = 1000;          // turnedAsAppears: pictures since the pair of 2P appeared
+    int quickFor = 0;               // quickSwing: pictures left that show the pair of 2P on its way round
+    int64_t quickAt = -100;         // ... and the frame of the clock of the first of them
+    int64_t turnedShownAt = -100;   // ... and the frame of the clock of the first picture that drew one turned
+    int byFrameAtLock = 0;          // ... and Driver::begunByFrame then
     int swingFor = 0, swingX = 0;   // topSwing: pictures left that show the pair upside down in that column
     int64_t swingAt = -100;         // ... and the frame of the clock of the first of them
+    int oneFor = 0, oneX = 0;     // aloftOne: pictures left that show one piece of the pair in the 12th row of that column
+    int64_t oneAt = -100;          // ... and the frame of the clock of the first of them
+    int markFor = 0, markWait = 0;  // markRead: pictures left that show a piece of the pair in the cell of the mark, after so many
+    int64_t markAt = -100;          // ... and the frame of the clock of the first of them
     int aloftFor = 0;               // unseenAloft: frames left in which the pair of 2P takes no down button
     int64_t aloftEndedAt = -100;    // ... and the frame of the clock the last such pair took it again in, or was put
     bool pausedPair = false;        // ... the pair in play was in play as the round stopped,
@@ -2634,8 +2678,25 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         }
         const bool misread = how.misreadAfterSpawn && clock == ps.begunAt + 1 && ps.begunFor % how.misreadAfterSpawn == 0 && r.player[1].phase == Phase::Control;
         const bool appearing = how.hideAppearing && r.player[1].phase == Phase::Next && r.player[1].wait <= 1;
-        if (oldFor > 0 || hideFor > 0 || kickFor > 0 || liftFor > 0 || glitchNext || misread || appearing || swingFor > 0) {
+        bool turned = false;
+        if (how.turnedAsAppears && r.player[1].phase == Phase::Control) {
+            const PairControl& q = r.player[1].pair;
+            turned = sinceSpawn < how.turnedAsAppears && spawns % 3 == 0 && q.dir == UP && q.x < W - 1 && r.player[1].field.f.get(q.x + 1, q.y) == EMPTY;
+            if (turned && sinceSpawn == 0) ++n.turnedShown, turnedShownAt = clock;
+            ++sinceSpawn;
+        }
+        if (oldFor > 0 || hideFor > 0 || kickFor > 0 || liftFor > 0 || glitchNext || misread || appearing || swingFor > 0 || oneFor > 0 || markFor > 0 || turned || quickFor > 0) {
             Round shown = r;
+            if (turned) shown.player[1].pair.dir = RIGHT;
+            if (quickFor > 0) {
+                if (shown.player[1].phase == Phase::Control) {
+                    PairControl& q = shown.player[1].pair;
+                    q.dir = UP;
+                    if (q.upper) q.upper = false;
+                    else q.y = int8_t(q.y - 1), q.upper = true;
+                }
+                --quickFor;
+            }
             if (appearing) shown.player[1].wait = 2;
             // (topSwing: the child on its way round near the top of the screen, drawn as the one piece Tracker reads as
             //  the pair upside down - its axis above the screen)
@@ -2645,6 +2706,24 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
                     q.x = int8_t(swingX), q.y = 12, q.upper = true, q.dir = DOWN;
                 }
                 --swingFor;
+            }
+            // (aloftOne, markRead: one piece of the axis's colour, the child above the screen)
+            if (oneFor > 0) {
+                if (shown.player[1].phase == Phase::Control) {
+                    PairControl& q = shown.player[1].pair;
+                    q.x = int8_t(oneX), q.y = 11, q.upper = true, q.dir = UP;
+                }
+                --oneFor;
+            }
+            if (markFor > 0 && markWait > 0) {
+                --markWait;
+            } else if (markFor > 0) {
+                // (not while a piece of the pair is in that column in the 12th row or above: it covers the mark)
+                PairControl& q = shown.player[1].pair;
+                if (shown.player[1].phase == Phase::Control && !((q.x == DEATH_X && q.y >= DEATH_Y) || (q.childX() == DEATH_X && q.childY() >= DEATH_Y))) {
+                    q.x = DEATH_X, q.y = DEATH_Y, q.upper = false, q.dir = UP;
+                }
+                --markFor;
             }
             if (misread) {
                 PairControl& q = shown.player[1].pair;
@@ -2759,6 +2838,10 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
                   "the driver or Follower took other frames of a side from the events than the tracker has");
             if (clock - kickAt <= 4) n.kickCorrected += d.corrected - correctedNow;
             if (how.topSwing && clock - swingAt <= how.topSwing + 3) n.swingCorrected += d.corrected - correctedNow;
+            if (how.aloftOne && clock - oneAt <= how.aloftOne + 3) n.aloftOneCorrected += d.corrected - correctedNow;
+            if (how.turnedAsAppears && clock - turnedShownAt <= how.turnedAsAppears + 3) n.turnedCorrected += d.corrected - correctedNow;
+            if (how.quickSwing && clock - quickAt <= how.quickSwing + 3) n.quickSwingCorrected += d.corrected - correctedNow;
+            if (how.markRead && clock - markAt <= how.markRead + 3) n.markCorrected += d.corrected - correctedNow;
             if (clock - liftAt <= 8) n.liftCorrected += d.corrected - correctedNow;
             if (d.corrected > correctedNow && follow.tracker.side[1].pairs + follow.tracker.side[1].unseen < d.begunPair()) ++n.staleCorrected;
         }
@@ -2840,7 +2923,19 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
             const int x = r.player[1].pair.childX();
             if (h[x] <= 10) swingFor = how.topSwing, swingX = x, swingAt = clock + 1, ++n.swings;
         }
+        if ((how.aloftOne || how.markRead) && !e[1].spawned && r.player[1].phase == Phase::Control && r.player[1].colors.axis != r.player[1].colors.child) {
+            int h[W];
+            r.player[1].field.heights(h);
+            const PairControl& p = r.player[1].pair;
+            if (how.aloftOne && oneFor == 0 && (e[1].control.moved || e[1].control.rotated) && p.y >= 12 && (p.dir == LEFT || p.dir == RIGHT)) {
+                const int x = h[p.x] <= 11 ? p.x : h[p.childX()] <= 11 ? p.childX() : -1;
+                if (x >= 0) oneFor = how.aloftOne, oneX = x, oneAt = clock + 1, ++n.aloftOnes;
+            }
+            const auto atMark = [](const PairControl& q) { return (q.x == DEATH_X && q.y >= DEATH_Y) || (q.childX() == DEATH_X && q.childY() >= DEATH_Y); };
+            if (how.markRead && markFor == 0 && atMark(pairBefore) && !atMark(p) && h[DEATH_X] <= 11) markFor = how.markRead, markWait = 3, markAt = clock + 4, ++n.marks;
+        }
         if (e[1].locked && lateFor == spawns) n.lateLocks += target >= 0, n.lateHits += target >= 0 && placementId(r.player[1].pair.placement()) == target;
+        if (e[1].locked && how.lateAfterHigh) highLocked = r.player[1].pair.y >= 12 || r.player[1].pair.childY() >= 12, byFrameAtLock = d.begunByFrame;
         if (how.turnShownLate && e[1].control.rotated && r.player[1].phase == Phase::Control) oldDir = dirBefore, oldFor = how.turnShownLate;
         if (how.crowdedLate && e[1].control.rotated && r.player[1].phase == Phase::Control) {
             if (r.player[1].pair.x != columnBefore || f - lastTurn <= 3) {
@@ -2915,7 +3010,9 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         }
         if (e[1].locked && pausedPair)
             n.pausedLocks += pausedTarget >= 0, n.pausedHits += pausedTarget >= 0 && placementId(r.player[1].pair.placement()) == pausedTarget, pausedPair = false;
-        if (e[1].spawned) inPlay = 0;
+        if (e[1].spawned) inPlay = 0, sinceSpawn = 0;
+        if (how.quickSwing && e[1].control.quickTurned && !e[1].spawned && r.player[1].phase == Phase::Control) quickFor = how.quickSwing, quickAt = clock + 1, ++n.quickSwings;
+        if (e[1].locked) quickFor = 0;
         if (how.pauseFor && !how.pauseBefore && r.player[1].phase == Phase::Control && ++inPlay == how.pauseAfter && spawns % how.pauseEvery == 1)
             pauseLeft = how.pauseFor, ++n.pauses, pausedPair = true, pausedTarget = target;
         if (how.pauseFor && how.pauseBefore && r.player[1].phase == Phase::Next && r.player[1].wait == 2 && (spawns + 1) % how.pauseEvery == 0)
@@ -2923,6 +3020,8 @@ static void driveRound(uint64_t seed, DriveCounts& n, DriveScenario how) {
         // (lateSpawn: once for the pair, numbered spawns + 1 as it appears)
         if (how.lateSpawn && r.player[1].phase == Phase::Next && r.player[1].wait == 2 && spawns > 0 && (spawns + 1) % how.lateEvery == 0 && lateFor != spawns + 1)
             r.player[1].wait += how.lateSpawn, lateFor = spawns + 1, ++n.lateSpawns;
+        if (how.lateAfterHigh && highLocked && r.player[1].phase == Phase::Next && r.player[1].wait == 2 && lateFor != spawns + 1)
+            r.player[1].wait += how.lateAfterHigh, lateFor = spawns + 1, ++n.lateSpawns, highLocked = false, n.earlyAfterHigh += d.begunByFrame - byFrameAtLock;
     }
     n.corrected += d.corrected;
     n.walledHeld += d.walledHeld;
@@ -4013,7 +4112,9 @@ static void testWaitWithFrameToSpare() {
                 if (where.size() < 200) where += " pair " + std::to_string(i) + " frame " + std::to_string(k);
             }
     }
-    check(tried >= 1800 && elsewhere == 0 && held >= 450, "a frame left out while the second choice is on its way: " + std::to_string(elsewhere) + " of " + std::to_string(tried) +
+    // (straight down: fewer frames than with every way kept alone - a pair is not sent down where its way would then
+    //  be two frames longer or go back up)
+    check(tried >= 1800 && elsewhere == 0 && held >= 330, "a frame left out while the second choice is on its way: " + std::to_string(elsewhere) + " of " + std::to_string(tried) +
                                                             " elsewhere," + where + "; went straight down " + std::to_string(held) + " frames");
     std::cout << "the second choice waited for with a frame to spare: " << tried << " frames left out, none elsewhere, straight down " << held << " frames\n";
 }
@@ -4115,6 +4216,67 @@ static void testModeUsesThirteenthRow() {
     check(!kept && n.locks >= 150 && n.highPairs > 0 && n.leftAlone == 0 && n.hiddenWrong * 100 <= n.hiddenCells * 30 && (n.hiddenWrong - n.hiddenWrongUnsure) * 20 <= n.hiddenCells,
           "the AI of the mode, the 13th row used: " + counts);
     std::cout << "the AI of the mode, the 13th row used: " << counts << "\n";
+}
+
+// A pair turned quickly is drawn for some pictures on its way - its axis half a cell below where it now is, its child
+// not yet below it (on a record of the real game it read "child up" there, the child above the screen): the engine's
+// pair is not put right for such a picture (Driver::correct). The rounds of testTurnAfterQuickTurn, the screen as the
+// real game's: pairs turned quickly, none put right in those pictures, the pairs where the AI chose, none left alone.
+static void testQuickTurnDrawnOnItsWay() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (uint64_t seed = 120; seed < 138; ++seed) {
+        std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .quickSwing = 5, .shownRows = 12});
+    }
+    const std::string counts = std::to_string(n.quickSwings) + " quick turns drawn on their way, " + std::to_string(n.quickSwingCorrected) + " pictures put the pair right for it; " +
+                               std::to_string(n.hits) + " of " + std::to_string(n.locks) + " pairs where the AI chose, " + std::to_string(n.leftAlone) + " left alone";
+    check(n.quickSwings >= 3 && n.quickSwingCorrected == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 97, "a quick turn drawn on its way: " + counts);
+    std::cout << "a quick turn drawn on its way: " << counts << "\n";
+}
+
+// A pair that has just appeared, no turn asked of it, read with its child beside it (on a record of the real game the
+// light of an attack of the other side crossed the top of the field as a pair of its colour appeared, and read so): the
+// engine's pair is not put right for such a picture (Driver::correct) - put right, the pair was turned back and moved
+// from there and locked a column aside. The pairs go where the AI chose, none is left alone.
+static void testPairReadTurnedAsItAppears() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {120, 121, 122, 123, 124, 125}) {
+        std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .quietLanding = true, .early = false, .turnedAsAppears = 3, .shownRows = 12});
+    }
+    const std::string counts = std::to_string(n.turnedShown) + " pairs drawn turned as they appeared, " + std::to_string(n.turnedCorrected) + " pictures put the pair right for it; " +
+                               std::to_string(n.hits) + " of " + std::to_string(n.locks) + " pairs where the AI chose, " + std::to_string(n.leftAlone) + " left alone";
+    check(n.turnedShown >= 10 && n.turnedCorrected == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 97, "a pair read turned as it appears: " + counts);
+    std::cout << "a pair read turned as it appears: " << counts << "\n";
+}
+
+// After a pair locked with a piece in the 13th row or above the real game shows the next pair five to nine frames later
+// than the engine has it (three records: 32 of the 41 pairs begun early that came so late). The rounds of
+// testModeUsesThirteenthRow drawn so, seven frames later: none of those pairs is begun by the frame the engine foresaw
+// (Driver::earlyDue), they go where the AI chose as the others do, none is left alone. (Begun by that frame, a quick turn
+// sent for one on the real game, its first press before the pair and lost, turned it once, and it locked as it
+// appeared with the down button held.)
+static void testPairLateAfterTheThirteenthRow() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {120, 121, 122, 123, 124, 125}) {
+        std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .hidden = 2, .movedHidden = 1, .quietLanding = true, .lateAfterHigh = 7});
+    }
+    const std::string counts = std::to_string(n.lateSpawns) + " pairs later after a pair locked in the 13th row or above, " + std::to_string(n.earlyAfterHigh) +
+                               " of them begun by the frame foreseen, " + std::to_string(n.lateHits) + " of " + std::to_string(n.lateLocks) + " where the AI chose, " +
+                               std::to_string(n.hits) + " of " + std::to_string(n.locks) + " in all, " + std::to_string(n.leftAlone) + " left alone";
+    check(n.lateSpawns >= 10 && n.earlyAfterHigh == 0 && n.leftAlone == 0 && n.lateHits * 100 >= n.lateLocks * 95 && n.hits * 100 >= n.locks * 97,
+          "pairs that come later after the 13th row: " + counts);
+    std::cout << "pairs that come later after the 13th row: " << counts << "\n";
 }
 
 // On a screen of twelve rows, the placements of the caller's own pairs it tells (Follower::tell) are taken where the
@@ -7039,6 +7201,50 @@ static void testTurnNearTheTopReadUpsideDown() {
     std::cout << "turns near the top read as the pair upside down: " << counts << "\n";
 }
 
+// A pair in the 13th row is above the screen; turning or moving up there it is drawn for a picture or two with one
+// piece in the upper half of the 12th row, and Tracker reads one piece with the place above it beyond the screen as
+// the pair with its child up there: the engine's pair, in the 13th row then or a few frames before, is not put right
+// for such a picture. (Put right so "in the 12th row, half up, child up", pairs on their way over a column twelve
+// high had that way sent again from there, on a record of the real game; with nothing put right, the pair after each
+// appeared in the frame the engine foresaw it in, 3 to 21 frames from it otherwise - one next pair went down where it
+// appeared.)
+static void testOnePieceReadWhilePairAloft() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {120, 121, 122, 123, 124, 125}) {
+        std::unique_ptr<ai::Agent> a = seed % 2 ? std::unique_ptr<ai::Agent>(std::make_unique<KickAgent>()) : ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .quietLanding = true, .aloftOne = 3});
+    }
+    const std::string counts = std::to_string(n.aloftOnes) + " pairs lying in the 13th row drawn as one piece in the 12th, " + std::to_string(n.aloftOneCorrected) +
+                               " pictures of them put the engine's pair right; " + std::to_string(n.hits) + " of " + std::to_string(n.locks) + " pairs where the AI chose, " +
+                               std::to_string(n.leftAlone) + " left alone";
+    check(n.aloftOnes >= 10 && n.aloftOneCorrected == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 97, "one piece read as the pair while it is in the 13th row: " + counts);
+    std::cout << "one piece read as the pair while it is in the 13th row: " << counts << "\n";
+}
+
+// The mark the real game draws in the 12th row of the third column is read as a piece of a colour now and then; of
+// the colour of the axis of the pair in play, Tracker reads the pair there, its child up above the screen. The
+// engine's pair, no piece of it in that column in the 12th row or above, is not put right for such a picture. (Put
+// right so, a pair that had left the column eight frames before was turned again from there and went down turned
+// otherwise than the AI chose, on a record of the real game.)
+static void testMarkOfTheGameReadAsPair() {
+    ai::Params narrow;
+    narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
+    DriveCounts n;
+    for (const uint64_t seed : {160, 161, 162, 163, 164, 165}) {
+        std::unique_ptr<ai::Agent> a = ai::makeAgent("x3", narrow);
+        Driver::prepare(a.get());
+        driveRound(seed, n, {.lag = 5, .startLag = 6, .given = std::move(a), .quietLanding = true, .markRead = 3, .shownRows = 12});
+    }
+    const std::string counts = std::to_string(n.marks) + " pairs that left the third column drawn as a piece in the cell of the mark, " + std::to_string(n.markCorrected) +
+                               " pictures of them put the engine's pair right; " + std::to_string(n.hits) + " of " + std::to_string(n.locks) + " pairs where the AI chose, " +
+                               std::to_string(n.leftAlone) + " left alone";
+    check(n.marks >= 30 && n.markCorrected == 0 && n.leftAlone == 0 && n.hits * 100 >= n.locks * 97, "the mark of the game read as the pair: " + counts);
+    std::cout << "the mark of the game read as the pair: " << counts << "\n";
+}
+
 // A pair in the 13th row that has turns or moves yet to make takes no down button: aloft it steps down half a cell 13
 // frames after its last step, and the way over a column twelve high must be made before that. (The AI of the mode sends
 // the down button while a second choice is on its way, in every frame in which that loses nothing as the engine has it:
@@ -7098,9 +7304,12 @@ static void testFallCountedWhileLying() {
                                " (" + std::to_string(earlyBefore) + "), after 30 frames " + std::to_string(afterLong) + " ("+ std::to_string(longBefore) + ")";
     // (70 + 5 x 10 lain + 10: the step in the turn's frame; 70 + 2 x 10 lain: 100, 110, 120, 130; without the count 80 ... 130)
     check(now == 1 && early == 4 && before == 6 && earlyBefore == 6 && longBefore == 6, "frames from losing the ground to the step down: " + counts);
-    // A pair that lay long: the steps due meanwhile are not made up (70 + 30 x 10 = 370, 114 of the step due next: the
-    // step in the frame after the turn's, and none in the frame after that).
-    check(afterLong == 2 && late.y == 8 && late.upper && lateBefore.y == 8 && lateBefore.upper, "a pair that lay long steps down as the step it counts towards comes due, once");
+    // A pair that lay until a step had come due steps down in the frame it loses its ground, once (70 + 30 x 10 = 370:
+    // the step in the turn's frame, and none in the frame after that). (A record of the real game: a pair that lay
+    // four frames with 100 of its step fallen - 140 - was half a cell lower in the frame it was moved off the column
+    // it lay on; with the count gone round, 12 of the step due next, the engine had it step down eleven frames later
+    // and a picture put it right.)
+    check(afterLong == 1 && late.y == 8 && late.upper && lateBefore.y == 8 && lateBefore.upper, "a pair that lay until a step had come due steps down as it loses its ground, once");
     // A floor kick of a pair that lies leaves the count as it is. (The record: two columns of a height, the pair lying
     // across them four frames with 2/256 left of its last step, kicked upright, turned on to lie over the lower column
     // beside it four frames later - 42 + 4 x 10, then 92, 102, 112, 122, 132: the step in the fifth frame from that
@@ -7108,11 +7317,11 @@ static void testFallCountedWhileLying() {
     // 114, 124, 134, the third frame. With the tables of this game: 64, then 74 ... 134, the seventh.)
     GameField flat;
     addGarbage(flat, 2, 8), addGarbage(flat, 3, 8), addGarbage(flat, 4, 8);
-    const auto kicked = [&](const Timing& t) {
+    const auto kicked = [&](const Timing& t, int gain = 2, int lain = 4) {
         PairControl p;
-        p.x = 3, p.y = 8, p.upper = false, p.dir = RIGHT, p.gain = 2;
-        for (int k = 0; k < 4; ++k) stepPair(p, flat, 0, t);
-        check(p.grounded && p.groundFrames == 4, "the pair of the test does not lie across the two columns");
+        p.x = 3, p.y = 8, p.upper = false, p.dir = RIGHT, p.gain = int16_t(gain);
+        for (int k = 0; k < lain; ++k) stepPair(p, flat, 0, t);
+        check(p.grounded && p.groundFrames == lain, "the pair of the test does not lie across the two columns");
         const ControlEvents kick = stepPair(p, flat, BTN_CW, t);
         check(kick.kicked && p.dir == DOWN && p.y == 9 && !p.upper && p.grounded, "the pair of the test is not kicked upright");
         for (int k = 0; k < 3; ++k) stepPair(p, flat, 0, t);
@@ -7123,7 +7332,16 @@ static void testFallCountedWhileLying() {
     };
     const int kickNow = kicked(real), kickBefore = kicked(plain);
     check(kickNow == 5 && kickBefore == 7, "frames from the turn after a floor kick to the step down: " + std::to_string(kickNow) + " (as this game's tables have it " + std::to_string(kickBefore) + ")");
-    std::cout << "the fall counted while a pair lies, frames to the step down: " << counts << "; after a floor kick " << kickNow << " (" << kickBefore << ")\n";
+    // A step that came due while the pair lay is kept through the floor kick and made as the pair loses the ground
+    // its child gives it: in the frame of the turn. (The record: a pair that lay eight frames with 50/256 of its step
+    // fallen - 130 -, kicked upright, turned on four frames later; the move over the column beside it, twelve high,
+    // sent four frames after that turn came to nothing. With the count gone round at the kick: 2 + 40, then 52 ... 132,
+    // the ninth frame.)
+    const int kickDue = kicked(real, 50, 8), kickDueBefore = kicked(plain, 50, 8);
+    check(kickDue == 1 && kickDueBefore == 7, "frames from the turn after a floor kick to the step down, a step due as the pair lay: " + std::to_string(kickDue) +
+                                                  " (as this game's tables have it " + std::to_string(kickDueBefore) + ")");
+    std::cout << "the fall counted while a pair lies, frames to the step down: " << counts << "; after a floor kick " << kickNow << " (" << kickBefore << "), a step due as it lay "
+              << kickDue << " (" << kickDueBefore << ")\n";
 }
 
 // A quick turn whose first press was asked for before the pair appeared (Timing::queuedTurnBelow, the real game:
@@ -7253,6 +7471,8 @@ int main(int argc, char** argv) {
         testStillAfterTheStop();
         testUnseenPairOutOfSight();
         testTurnNearTheTopReadUpsideDown();
+        testOnePieceReadWhilePairAloft();
+        testMarkOfTheGameReadAsPair();
         testNoDownAloftInTheThirteenthRow();
         testThirdAlikeToldByTheOtherSide();
         testFallCountedWhileLying();
@@ -7270,6 +7490,9 @@ int main(int argc, char** argv) {
         testLiftsShownLate();
         testKeepsLow();
         testModeUsesThirteenthRow();
+        testPairLateAfterTheThirteenthRow();
+        testPairReadTurnedAsItAppears();
+        testQuickTurnDrawnOnItsWay();
         testToldPlacements();
         testOwnPlacementsFound();
         testMisreadAfterSpawn();

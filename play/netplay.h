@@ -38,12 +38,12 @@ struct NetPlay {
     bool on() const { return stage != Off; }
 
     // What a match takes from the host's settings: the rules, and two of the settings that stand with the buttons -
-    // the one the round itself reads (Rules::preInput: with another value on each machine the two would play
-    // different rounds from the same buttons, and the match would be stopped), and the quick drop, a button that
+    // those the round itself reads (Rules::preInput and Rules::cancel: with another value on each machine the two
+    // would play different rounds from the same buttons, and the match would be stopped), and the quick drop, a button that
     // only one of the two would have otherwise (the owner of the match turns it into buttons: play/main.cpp,
     // personButtons). The rest - the lever of four ways, the AI, the pictures and the sound - is each machine's own,
     // and is not sent.
-    static bool travels(const SettingItem& item) { return item.section == SEC_RULES || item.key == "preInput" || item.key == "quickDrop"; }
+    static bool travels(const SettingItem& item) { return item.section == SEC_RULES || item.key == "preInput" || item.key == "cancel" || item.key == "quickDrop"; }
     // The rules of a match as they travel: one "name=value" a line.
     static std::string rulesText(Settings s) {
         SettingsTable table(s);

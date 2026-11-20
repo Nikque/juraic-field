@@ -167,7 +167,7 @@ inline PlayerEvents advancePlayer(Player& p, Incoming& opponent, uint8_t buttons
     const int split = timing.splitFrames(p.placed.split, axisX, p.placed.lockY);
     // The landing animation has run since the pair came to rest (Timing::lockWait): a pair that lay
     // on the ground before it locked has less of it left, or none.
-    const int rested = int(p.pair.groundFrames);
+    const int rested = restedFrames(p.pair, timing);
     const int land = timing.landFrames - rested < timing.lockWait ? timing.lockWait : timing.landFrames - rested;
     p.phase = split ? Phase::Split : Phase::Land;
     p.wait = split ? split : land;

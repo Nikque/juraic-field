@@ -4,18 +4,16 @@
 // only its client, ViGEmClient, third_party/), plugged in by the mode and pulled out when the mode is left or the
 // program ends. This program does not read it as a pad of its own (Pads::skipXInput).
 #include "../game/control.h"
+#include "../core/diagnostic_trace.h"
 #include <windows.h>
 #include <ViGEm/Client.h>
+#include <mutex>
 #include <string>
 
 namespace play {
 
 class VirtualPad {
 public:
-    // Which button of the pad a turn is sent on: A for a turn to the right, B to the left (when the real game turns the
-    // other way round the driver sends the other turn: realgame::Driver::turnsSwapped).
-    bool aTurnsRight = true;
-
     VirtualPad() = default;
     VirtualPad(const VirtualPad&) = delete;
     VirtualPad& operator=(const VirtualPad&) = delete;
@@ -25,14 +23,14 @@ public:
     bool start(std::wstring& error) {
         stop();
         client = vigem_alloc();
-        if (!client) return error = L"仮想のパッドを作れません（メモリーが足りません）", false;
+        if (!client) return error = L"仮想パッドを作成できません（メモリ不足）", false;
         VIGEM_ERROR e = vigem_connect(client);
-        if (e == VIGEM_ERROR_BUS_NOT_FOUND) return stop(), error = L"ViGEmBus のドライバーが入っていません（入れてから、もう一度選んでください）", false;
-        if (!VIGEM_SUCCESS(e)) return stop(), error = L"ViGEmBus のドライバーにつなげません（" + code(e) + L"）", false;
+        if (e == VIGEM_ERROR_BUS_NOT_FOUND) return stop(), error = L"ViGEmBus ドライバーがインストールされていません（インストール後に、もう一度選択してください）", false;
+        if (!VIGEM_SUCCESS(e)) return stop(), error = L"ViGEmBus ドライバーに接続できません（" + code(e) + L"）", false;
         pad = vigem_target_x360_alloc();
-        if (!pad) return stop(), error = L"仮想のパッドを作れません", false;
+        if (!pad) return stop(), error = L"仮想パッドを作成できません", false;
         e = vigem_target_add(client, pad);
-        if (!VIGEM_SUCCESS(e)) return stop(), error = L"仮想のパッドを差し込めません（" + code(e) + L"）", false;
+        if (!VIGEM_SUCCESS(e)) return stop(), error = L"仮想パッドを接続できません（" + code(e) + L"）", false;
         added = true;
         ULONG index = 0;
         slot = VIGEM_SUCCESS(vigem_target_x360_get_user_index(client, pad, &index)) ? int(index) : -1;
@@ -59,22 +57,31 @@ public:
     // The number XInput gives the pad (-1: not known).
     int xinputSlot() const { return slot; }
 
-    // Holds the buttons of the game (game/control.h Button bits: the directions on the cross, the turns on A and B).
+    // Holds the buttons of the game (game/control.h Button bits: the directions on the cross, a turn to the right on A and
+    // one to the left on B; when the real game turns the other way round the driver sends the other turn:
+    // realgame::Driver::turnsSwapped).
     void press(uint8_t buttons) {
         unsigned b = 0;
         if (buttons & juraic::BTN_LEFT) b |= XUSB_GAMEPAD_DPAD_LEFT;
         if (buttons & juraic::BTN_RIGHT) b |= XUSB_GAMEPAD_DPAD_RIGHT;
         if (buttons & juraic::BTN_DOWN) b |= XUSB_GAMEPAD_DPAD_DOWN;
-        if (buttons & juraic::BTN_CW) b |= aTurnsRight ? XUSB_GAMEPAD_A : XUSB_GAMEPAD_B;
-        if (buttons & juraic::BTN_CCW) b |= aTurnsRight ? XUSB_GAMEPAD_B : XUSB_GAMEPAD_A;
+        if (buttons & juraic::BTN_CW) b |= XUSB_GAMEPAD_A;
+        if (buttons & juraic::BTN_CCW) b |= XUSB_GAMEPAD_B;
         hold(USHORT(b));
     }
     // Holds buttons of the pad as they are (XUSB_GAMEPAD_*): for pressing through the menus of the real game by hand.
     void hold(USHORT buttons) {
-        if (!added || buttons == last) return;
+        // (the thread that plays by the pictures and the one that plays by the memory may both set the pad)
+        const std::lock_guard<std::mutex> one(setting);
+        const auto diagnosticBegin=juraic::inputdiag::clock();const auto previous=heldButtons();
+        if (!added || buttons == last) {
+            juraic::inputdiag::trace.emit(juraic::inputdiag::PAD,{buttons,previous,heldButtons(),added?0:3,0,diagnosticBegin,juraic::inputdiag::clock()});return;}
         XUSB_REPORT report{};
         report.wButtons = buttons;
-        if (VIGEM_SUCCESS(vigem_target_x360_update(client, pad, report))) last = buttons;
+        const auto diagnosticResult=vigem_target_x360_update(client,pad,report);
+        if (VIGEM_SUCCESS(diagnosticResult)) last = buttons;
+        juraic::inputdiag::trace.emit(juraic::inputdiag::PAD,{buttons,previous,heldButtons(),VIGEM_SUCCESS(diagnosticResult)?1:2,
+            int64_t(diagnosticResult),diagnosticBegin,juraic::inputdiag::clock()});
     }
 
 private:
@@ -83,6 +90,7 @@ private:
     bool added = false;
     int slot = -1;
     USHORT last = 0xFFFF;
+    std::mutex setting;
 
     static std::wstring code(VIGEM_ERROR e) {
         wchar_t text[16];

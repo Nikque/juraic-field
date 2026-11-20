@@ -5,6 +5,8 @@
 // so it can be saved and watched as a replay.
 #include "input.h"
 #include "observe.h"
+#include "params.h"
+#include "../core/diagnostic_trace.h"
 #include <chrono>
 #include <cstdlib>
 #include <future>
@@ -47,6 +49,29 @@ enum class Thinking { AtOnce, Thread, Free };
 // destructor (a thread works with the members of that class).
 class PlacementAgent : public Agent {
 public:
+    const uint64_t diagnosticAgent=++inputdiag::agentSerial;
+    uint64_t diagnosticRound=0, diagnosticSerial=0, diagnosticMain=0, diagnosticSecond=0, diagnosticSelected=0;
+    uint64_t diagnosticTargetDecision=0;
+    int diagnosticTargetPair=-1,diagnosticMainPair=-1,diagnosticSecondPair=-1;
+    struct Choice {
+        int id = -1;
+        bool setup = false;
+    };
+    Choice diagnosticChoose(const Observation& o,Pair pair,unsigned legal,uint64_t decision,int reason){
+        const auto begin=inputdiag::clock();const int result=choose(o,pair,legal);
+        inputdiag::trace.emit(inputdiag::CHOSEN,{int64_t(diagnosticAgent),int64_t(diagnosticRound),int64_t(decision),o.frame,
+            o.self().nextPair+1,reason,result,(inputdiag::clock()-begin)/10});
+        return {result, equivalentSetupRoute && setupChoice()};
+    }
+    void diagnosticTarget(const Observation& o,int reason,uint64_t decision,int previous){
+        const int observedPair=o.self().nextPair+(o.self().phase==Phase::Next?1:0);
+        if(decision==diagnosticMain)diagnosticTargetPair=diagnosticMainPair;
+        else if(decision==diagnosticSecond)diagnosticTargetPair=diagnosticSecondPair;
+        diagnosticTargetDecision=decision;
+        inputdiag::trace.emit(inputdiag::TARGET,{int64_t(diagnosticAgent),int64_t(diagnosticRound),int64_t(decision),o.frame,
+            diagnosticTargetPair,target,reason,previous,observedPair});
+    }
+    int choicePairLimit = 3; // immutable for the configured agent
     int ahead = 1;
     Thinking thinking = Thinking::AtOnce;
     int64_t lateFrames = 0; // Free: frames in which a pair in the air had no placement yet (for tools)
@@ -59,7 +84,6 @@ public:
     int64_t rerouted = 0;   // pairs whose chosen placement had no path from where they appeared, and that went to another (for tools)
     int64_t steered = 0;    // pairs sent to the nearest placement they could still reach, no way leading to the chosen one any more (steer, a late choice; for tools)
     int64_t steeredLow = 0; // ... of them, those a way through the 13th row still led to the chosen one (keepLow; for tools)
-    int lastWanted = -1, lastTaken = -1; // ... the last of them
     // true: a placement is offered to choose() only when the pair has a path to it from where it
     // appears. (legalPlacements follows the rule of reach of core/reach.h; on a field with columns
     // twelve high it allows placements beyond them that InputPlanner finds no buttons for. Counted:
@@ -77,7 +101,8 @@ public:
     int againLate = 0;
     // The second choices of this round: the moves the player had made, then the frames after the
     // pair appeared at which the choice came (0 = before it appeared, -1 = not while the pair was
-    // in the air), one after the other (the game writes them into its replay).
+    // in the air; a second choice asked for in the air, askInAir, counts from the frame it was asked
+    // in), one after the other (the game writes them into its replay).
     std::vector<int> againLog;
     const std::vector<int>* againScript = nullptr; // a tool: the againLog of the round that is played again
     // (for tools) times the screen showed more than a choice knew, second choices
@@ -95,6 +120,20 @@ public:
     // know only then (a choice made ahead of the frame its pair appears in, for buttons that reach the game late): it is
     // made as for the pair before it appears, and taken in the air.
     bool askInAir = false;
+    // A choice dropped because its field or known pairs changed has the searches of its thread stopped at once (abandon()),
+    // so that the choice of the field as it is now is begun without waiting for their time to run out. false: they run
+    // to their end and are dropped then (the default).
+    bool cutStale = false;
+    // fastestAgain with holdKeepsWay: the search of the way over soonest is begun, and its way taken, while a second
+    // choice is on its way too. false: not while a second choice is on its way (the default).
+    bool searchWhileSecond = false;
+    // A first choice not made as its pair appears drops the second choice asked for; with this, that one is asked for
+    // once more in the air (askInAir) once the first is made. false: no second choice for that pair (the default).
+    bool retryInAir = false;
+    // A second choice is asked for as the pair appears (or in the air, askInAir) when the screen shows no pair the first
+    // choice did not know: the same pairs, with the fields as they are then. Once for a pair, and not when a second choice
+    // has been begun for it already. false: only when the screen shows a pair the first choice did not know (the default).
+    bool againFresh = false;
     // The taps of the buttons it gives (InputPlanner::tapHold): pressed this many frames, let go as many before the
     // next. 1: a frame each (the fastest; the default).
     int tapHold = 1;
@@ -112,6 +151,34 @@ public:
     // No way to the placement chosen is lost by a frame its sender is not called in, when one with the down button held
     // later is not (InputPlanner::spareFrame).
     bool spareFrame = false;
+    // The way to the placement chosen is the one of the fewest frames among the buttons of every frame, when that is
+    // shorter than the straight way (InputPlanner::fastest). false: the straight way (the default).
+    bool fastestWays = false;
+    // Lv 37 considers exchanging the places of two pieces of the same colour.
+    bool equivalentSetupRoute = false;
+    // ... the states of a search made in the frame the way is needed in, and of one made ahead on a thread of its own
+    // once the placement of the pair to come is chosen (InputPlanner::fastestStates, fastestAhead; 0: none made
+    // ahead). fastestWaits: the frame a way is needed in waits for a search made ahead (InputPlanner::aheadWaits).
+    int fastestStates = 50000, fastestAhead = 0;
+    bool fastestWaits = false;
+    // holdSecond: a frame in which the way to the first choice itself only holds the down button is a frame of that way.
+    // The way is kept - not dropped to be planned again from where the pair is a frame later, which a way made ahead
+    // (fastestAhead: a search too long for the frame its buttons are for) does not survive. false: as before.
+    bool holdKeepsWay = false;
+    // holdSecond: nor does the way to the first choice take the pair, in a frame, to where a placement that had a way has
+    // none - no button is pressed in that frame, when that keeps them all (on the real game a pair gone down beside a
+    // column on its way to the first choice went up again by turns for a second choice behind it, or could not).
+    bool holdLevel = false;
+    // holdSecond, keepsWays: when a pair may go down while the second choice is awaited. 0: whenever every placement
+    // keeps a way (the pair may then have to go back up - over a column, by a kick or a quick turn - when the choice
+    // comes). 1: not where a way would then be two frames longer, or a frame longer and go back up. 2: not where a way
+    // would then be longer at all.
+    int holdDown = 1;
+    // The ways over soonest: a way planned for a pair in the air (the second choice taken there, a way planned again
+    // after frames held straight down) is searched within the frame its buttons are for (fastestStates). Above 0: the
+    // search of fastestAhead is begun then as well, on its thread, from where that way has the pair so many frames
+    // on, and the way it finds is taken there when it has come by then. 0: none (the default).
+    int fastestAgain = 0;
     // The cells of the 13th and 14th rows of the own field that may be the other way, and the frames after the pair is
     // shown elsewhere than its way has it by which a way from where it is then begins (InputPlanner::planSure: the ways
     // to the placement chosen).
@@ -121,6 +188,8 @@ public:
     int64_t climbs = 0;    // pairs for which every placement reached below the 13th row filled it (for tools)
     std::vector<int> climbing; // ... and the pairs whose ways were let go up into the 13th row so, by their number (for tools)
     int64_t againHeld = 0; // frames in which a pair went straight down for that reason
+    int64_t againLevel = 0; // frames in which a pair was left alone, waiting for its second choice (holdLevel)
+    int64_t againWays = 0; // ways of pairs in the air planned once more where a search begun for them had them (fastestAgain; for tools)
     int64_t revisedChoices = 0; // choices discarded because their field or known pairs changed
     int64_t unknownFrames = 0;  // frames a pair in the air waited for its colours to be known (unknownPair; for tools)
     // The speed of the hands (Params::handWait; 0 = the fastest input): a pair is left alone this many frames
@@ -139,7 +208,7 @@ public:
     void steer(const Observation& o) {
         tune();
         if (o.self().phase != Phase::Control || late || target < 0) return;
-        step = 0;
+        step = 0, againAt = -1;
         reach(o, o.self().pair, target, ~0u);
     }
     // The pair in play taken up again where it is, after it had been taken as put (play/realgame_drive.h: the game stopped
@@ -149,21 +218,45 @@ public:
         revising = false;
         steer(o);
     }
+    // Recover a still-public current pair, never carry a future pair's search
+    // across a false predicted lock. Reuse its stored goal, or ask for a new
+    // placement using only the already-visible current pair.
+    bool recoveryReady() const {
+        return !late && (!job.valid() || job.wait_for(std::chrono::seconds(0))==std::future_status::ready) &&
+            (!again_.valid() || again_.wait_for(std::chrono::seconds(0))==std::future_status::ready);
+    }
+    void recoverKnownPair(const Observation& o,int goal,uint64_t goalDecision=0) {
+        finish();revising=false;step=0;path.buttons.clear();idle=0;appearedPair=o.self().nextPair;
+        targetSetup = false;
+        if(goal>=0 && goal<PLACEMENTS){
+            target=goal;diagnosticSelected=diagnosticTargetDecision=goalDecision;
+            diagnosticTargetPair=o.self().nextPair;
+            steer(o);
+            if(path.frames()>0 || (o.self().pair.x==placement(target).x && o.self().pair.dir==placement(target).dir))return;
+        }
+        target=-1;unknownPair=false;
+        lateLog.push_back(int(o.self().moves));lateLog.push_back(0);
+        thinkInAir(o);
+    }
     // The placement the pair in play is brought to (-1: none yet).
     int targetPlacement() const { return target; }
 
-    void startRound(int, uint64_t seed) override {
+    void startRound(int seat, uint64_t seed) override {
         finish();
+        ++diagnosticRound;diagnosticMain=diagnosticSecond=diagnosticSelected=diagnosticTargetDecision=0;diagnosticTargetPair=diagnosticMainPair=diagnosticSecondPair=-1;
+        inputdiag::trace.emit(inputdiag::ROUND,{int64_t(diagnosticAgent),int64_t(diagnosticRound),seat,int64_t(seed)});
         rng = Rng(seed, AGENT_STREAM);
         lateLog.clear();
         againLog.clear();
         climbing.clear();
         path.buttons.clear();
-        step = 0, last = 0, target = -1, idle = 0;
-        revising = false;
+        step = 0, last = 0, target = -1, idle = 0, appearedPair = -1, againAt = -1;
+        heldRun[0] = heldRun[1] = 0;
+        revising = targetSetup = false;
     }
 
     uint8_t frame(const Observation& o) override {
+        if (tapHold > 1) countHeld();
         tune();
         const Player& p = o.self();
         uint8_t b = 0;
@@ -172,8 +265,8 @@ public:
         if (p.phase == Phase::Next || p.phase == Phase::Control) {
             if (!revising && !unknownPair && (thought || late || second) && !sameChoice(o)) {
                 revising = true, ++revisedChoices;
-                target = -1, step = 0;
-                path.buttons.clear();
+                target = -1, dropWay();
+                if (cutStale) abandon(); // (the searches of the dropped choice end now)
             }
             if (revising) {
                 // A search owns the agent's working data until it returns. Keep sending input, then discard its result
@@ -182,11 +275,22 @@ public:
                     return last = (p.phase == Phase::Control || p.wait == 1) && !downWhenPlaced && (!holdSecond || downKeepsWays(o)) ? BTN_DOWN : 0;
                 finish();
                 revising = false;
-                target = -1, step = 0;
-                path.buttons.clear();
+                target = -1, dropWay();
                 if (p.phase == Phase::Control) {
                     thinkInAir(o);
-                    if (!lateScript) lateLog.push_back(int(p.moves)), lateLog.push_back(0);
+                    if (!lateScript) logLate(p);
+                }
+            }
+        }
+        if (p.phase == Phase::Control && appearedPair != p.nextPair) {
+            // The frame before the pair appeared was not shown (frames the caller could not read): the pair is taken up
+            // where it is, with the choice made for it - never with the placement of the pair before it.
+            appearedPair = p.nextPair;
+            if (!late) {
+                target = -1, dropWay(), idle = 0, pending = false;
+                if (thought && sameChoice(o)) {
+                    if (thinking == Thinking::Free && !made()) late = true, logLate(p);
+                    else route(o, p.pair, true);
                 }
             }
         }
@@ -207,46 +311,97 @@ public:
                     if (again(o)) thinkAgain(seenAgain);
                 }
             }
-            if (second && secondHere(false)) chosen = secondId, endSecond(0); // (it takes the place of the first before the pair appears)
-            if (p.wait == 1) pending = false; // (the first choice is not made as the pair appears: no second one)
+            if (againFresh && p.wait == 1 && thought && !askedFresh && !secondBegun && !second && !pending && made()) {
+                // (againFresh: the choice once more as the pair appears, with what the screen shows now)
+                askedFresh = true, ++againAsked;
+                againAsIs = true;
+                if (again(o)) thinkAgain(sight(o));
+                againAsIs = false;
+            }
+            if (second && secondHere(false)) {chosen = secondChoice;diagnosticMain=diagnosticSecond;diagnosticMainPair=diagnosticSecondPair;endSecond(0);} // (it takes the place of the first before the pair appears)
+            // (the ways over soonest: the way of the pair to come is searched ahead once its placement is chosen)
+            if (fastestWays && fastestAhead > 0 && p.wait > 1 && thought && !pending && !revising && !second && made()) {
+                if (job.valid()) chosen = job.get();
+                if (chosen.id >= 0 && (legalPlacements(p.field) >> chosen.id & 1)) {
+                    PairControl pair = appearingPair(p, o.rules, o.timing);
+                    pair.held = 0; // (as the frame before a pair appears leaves it: no button of the way before)
+                    planner.prepareFastest(p.field, pair, placement(chosen.id), o.timing, o.rules.speedPercent);
+                }
+            }
             if (p.wait == 1) {
+                // (the first choice is not made as the pair appears: no second one - retryInAir: asked for in the air)
+                if (pending && retryInAir) asked = false;
+                pending = false;
                 // The pair appears in this frame: the first button already moves it.
                 PairControl pair = appearingPair(p, o.rules, o.timing);
                 pair.held = last;
-                born = pair;
-                target = -1;
-                step = 0;
-                path.buttons.clear();
+                born = pair, appearedPair = p.nextPair + 1;
+                target = -1, dropWay();
                 idle = handWait;
-                if (!thought) late = true, unknownPair = true, lateLog.push_back(int(p.moves)), lateLog.push_back(0);
-                else if (thinking == Thinking::Free && !made()) late = true, lateLog.push_back(int(p.moves)), lateLog.push_back(0);
-                else if (lateScript && (lateLeft = scriptedLate(int(p.moves))) > 0) late = true;
+                if (!thought) late = true, unknownPair = true, logLate(p);
+                else if (thinking == Thinking::Free && !made()) late = true, logLate(p);
+                else if (lateScript && (lateLeft = fromScript(*lateScript, int(p.moves), 0)) > 0) late = true; // (the frames it waited there)
                 else route(o, pair);
             }
         } else if (late) {
             if (unknownPair && p.phase == Phase::Control && o.mine().known(p.nextPair - 1)) unknownPair = false, thinkInAir(o);
             if (!unknownPair && (lateScript ? --lateLeft <= 0 : made())) late = false, route(o, p.pair, true);
         } else if (p.phase == Phase::Control) {
-            if (askInAir && !asked && !second && target >= 0 && p.nextPair - 1 == choiceIndex && o.mine().count() > shownAtThink) {
+            // (againFresh: once in the air as well, when no second choice was begun as the pair appeared)
+            const bool newInAir = !asked && o.mine().count() > shownAtThink;
+            const bool freshInAir = againFresh && !askedFresh && !secondBegun;
+            if (askInAir && !second && target >= 0 && p.nextPair - 1 == choiceIndex && (newInAir || freshInAir)) {
                 asked = true, ++againAsked;
-                Observation before = o;
-                Player& q = before.player[before.me];
-                q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+                if (againFresh) askedFresh = true;
+                againAsIs = !newInAir;
+                const Observation before = beforeItAppears(o);
+                airFrom = &p.pair;
                 if (made() && again(before)) thinkAgain(sight(before));
+                airFrom = nullptr;
+                againAsIs = false;
             }
             if (second && (++secondFrames, secondHere(true))) {
                 // The second choice has come while the pair is in the air: there, if a path still leads there.
-                if (secondId >= 0 && secondId != target) {
+                int nextTarget = secondChoice.id;
+                const bool same = nextTarget == target ||
+                    (targetSetup && secondChoice.setup && nextTarget >= 0 && reversePlacement(nextTarget) == target &&
+                     planner.canReverse(currentColors(o)));
+                if (same) targetSetup = secondChoice.setup;
+                else if (nextTarget >= 0) {
                     InputPath other;
-                    if (planner.planSure(p.field, p.pair, placement(secondId), o.timing, o.rules.speedPercent, other)) path = other, step = 0, target = secondId, ++againSwitched;
+                    if (planTarget(o, p.pair, nextTarget, other, secondChoice.setup)) {
+                        const int previous=target;path = other, step = 0, target = nextTarget, ++againSwitched;
+                        targetSetup = secondChoice.setup;
+                        diagnosticSelected=diagnosticSecond;diagnosticTarget(o,2,diagnosticSecond,previous);
+                    }
                     else ++againNoPath;
                 }
                 endSecond(secondFrames);
+                if ((same || nextTarget == target) && step == 0) searchAgain(o);
             }
             if (step >= path.frames() && target >= 0) {
                 // The path is over and the pair is still in the air (not seen): from where it is now.
                 step = 0;
-                if (!planner.planSure(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, path)) path.buttons.clear();
+                const int previous = target;
+                if (!planTarget(o, p.pair, target, path, targetSetup && !second)) path.buttons.clear();
+                else {
+                    if (target != previous) diagnosticTarget(o,3,diagnosticSelected,previous);
+                    searchAgain(o);
+                }
+            }
+            if (againAt >= 0 && step == againAt && againPair == p.nextPair && againTarget == target && (!second || searchesWhileSecond())) {
+                // (fastestAgain) The pair is where the search begun for it has it: its way, when it has come.
+                againAt = -1;
+                InputPath sooner;
+                // (not waited for, but by fastestWaits: a search still under way leaves the way as it is)
+                const int64_t before = planner.aheadUsed;
+                const auto ends = [&](const std::vector<uint8_t>& b) { return FastestSearch::ends(p.field, p.pair, b, o.timing, o.rules.speedPercent); };
+                const std::vector<uint8_t> rest(path.buttons.begin() + std::min(step, path.frames()), path.buttons.end());
+                if ((fastestWaits || !planner.preparing()) && planner.planSure(p.field, p.pair, placement(target), o.timing, o.rules.speedPercent, sooner) &&
+                    (ends(rest) == 0 || (ends(sooner.buttons) > 0 && ends(sooner.buttons) <= ends(rest)))) {
+                    path = sooner, step = 0;
+                    againWays += planner.aheadUsed > before; // (the search's own answer: the pair was where it was begun for)
+                }
             }
         }
         if (late) {
@@ -261,19 +416,31 @@ public:
             // Slow hands (handWait): the pair is left alone in this frame, if a way still leads to its placement afterwards.
             if (target >= 0 && alone(o, p.phase == Phase::Control ? p.pair : born)) {
                 --idle;
-                path.buttons.clear(), step = 0; // (the way is planned again from where the pair is then)
+                dropWay(); // (the way is planned again from where the pair is then)
                 return ++handWaited, last = 0;
             }
             idle = 0;
         }
         if (second && holdSecond && target >= 0 && (p.phase == Phase::Control || (p.phase == Phase::Next && p.wait == 1 && step == 0))) {
-            // A second choice is on its way: straight down, if nothing is lost by it (holdSecond).
-            if (straight(o, p.phase == Phase::Control ? p.pair : born)) {
+            // A second choice is on its way: straight down, if nothing is lost by it (holdSecond). (holdKeepsWay: the way
+            // itself goes straight down in this frame - it is followed.)
+            const bool onWay = holdKeepsWay && step < path.frames() && path.buttons[size_t(step)] == BTN_DOWN;
+            if (!onWay && straight(o, p.phase == Phase::Control ? p.pair : born)) {
                 path.buttons.clear(), step = 0; // (the way is planned again from where the pair is then)
                 return ++againHeld, last = BTN_DOWN;
             }
+            if (holdLevel && p.phase == Phase::Control && step < path.frames()) {
+                const PairControl next = stepped(o, p.pair, path.buttons[size_t(step)]);
+                if (!next.locked && !keepsWays(o, p.pair, next, -1)) {
+                    const PairControl rest = stepped(o, p.pair, 0);
+                    if (!rest.locked && keepsWays(o, p.pair, rest, -1)) {
+                        path.buttons.clear(), step = 0; // (the way is planned again from where the pair is then)
+                        return ++againLevel, last = 0;
+                    }
+                }
+            }
         }
-        if ((p.phase == Phase::Control || step == 0) && step < path.frames()) b = path.buttons[size_t(step++)];
+        if ((p.phase == Phase::Control || (p.phase == Phase::Next && p.wait == 1 && step == 0)) && step < path.frames()) b = path.buttons[size_t(step++)];
         else if (p.phase == Phase::Control) b = BTN_DOWN;
         return last = b;
     }
@@ -282,6 +449,7 @@ protected:
     // The placement (0..21) for `pair`, the pair that appears next (with `ahead` 1: in the next frame).
     // `legal` = legalPlacements of the own field, not zero.
     virtual int choose(const Observation& o, Pair pair, unsigned legal) = 0;
+    virtual bool setupChoice() const { return false; }
 
     // The pair `colors` is in the air on its way to placement `id`, with `frames` frames of buttons
     // left: called in every such frame, when no choice is being worked out. For an agent that uses
@@ -289,10 +457,17 @@ protected:
     virtual void airborne(const Observation&, Pair, int, int) {}
 
     // The screen shows a pair that the choice of the pair that appears next did not know, and that
-    // choice is made: is it to be made once more? (Asked once for a pair.) choose() is then called
-    // again, with choosingAgain set.
+    // choice is made: is it to be made once more? (Asked once for a pair; retryInAir and againFresh ask
+    // once more.) choose() is then called again, with choosingAgain set.
     virtual bool again(const Observation&) { return false; }
     bool choosingAgain = false; // choose(): this is the second choice of the pair
+    bool againAsIs = false;     // again(): asked by againFresh, the screen showing no pair the first choice did not know
+
+    // cutStale: the choice under way (and a second one) is dropped; the searches of its threads are to end at once.
+    // Called on the thread of frame().
+    virtual void abandon() {}
+    // A choice (or a second one) is about to begin, on the thread of frame(), no thread of an earlier choice at work.
+    virtual void choiceBegins() {}
 
     // What a choice is shown of the screen `o`: asked in the frame in which the choice is begun, on the thread
     // of frame(); what it returns is read (or copied) before the next call. An agent that sees the opponent
@@ -301,8 +476,8 @@ protected:
 
     // Waits for a choice that is still being worked out, and drops it.
     void finish() {
-        if (job.valid()) job.wait(), job = std::future<int>();
-        if (again_.valid()) again_.wait(), again_ = std::future<int>();
+        if (job.valid()) job.wait(), job = std::future<Choice>();
+        if (again_.valid()) again_.wait(), again_ = std::future<Choice>();
         if (second) endSecond(-1); // (the round was over first)
         thought = late = pending = unknownPair = false;
     }
@@ -316,16 +491,13 @@ private:
         choiceField = o.self().field;
         choiceIndex = o.self().nextPair;
         choiceCount = 0;
-        for (int i = choiceIndex; choiceCount < 3 && o.mine().known(i); ++i) choicePairs[choiceCount++] = o.mine().pair(i);
+        for (int i = choiceIndex; choiceCount < choicePairLimit && choiceCount < MAX_KNOWN && o.mine().known(i); ++i) choicePairs[choiceCount++] = o.mine().pair(i);
     }
     bool sameChoice(const Observation& o) const {
         const int index = o.self().nextPair - (o.self().phase == Phase::Control ? 1 : 0);
         if (index != choiceIndex || !(choiceField == o.self().field)) return false;
-        for (int k = 0; k < choiceCount; ++k) {
-            if (!o.mine().known(index + k)) return false;
-            const Pair a = choicePairs[k], b = o.mine().pair(index + k);
-            if (a.axis != b.axis || a.child != b.child) return false;
-        }
+        for (int k = 0; k < choiceCount; ++k)
+            if (!o.mine().known(index + k) || !samePair(choicePairs[k], o.mine().pair(index + k))) return false;
         return true;
     }
     // The settings of the ways the planner makes.
@@ -333,7 +505,60 @@ private:
         planner.tapHold = tapHold, planner.heldFor[0] = tapsHeldFor[0], planner.heldFor[1] = tapsHeldFor[1], planner.downWhenPlaced = downWhenPlaced;
         planner.keepLow = keepLow && lowWays;
         planner.waitQuickLock = waitQuickLock, planner.spareFrame = spareFrame;
+        planner.fastest = fastestWays, planner.fastestStates = fastestStates, planner.fastestAhead = fastestAhead, planner.aheadWaits = fastestWaits;
         planner.unsure13 = unsure13, planner.unsure14 = unsure14, planner.seenAfter = seenAfter;
+        for (WaysFrom& w : waysFrom) w.frame = -1;
+    }
+    // A way of the pair `from` on the own field to placement `id` (InputPlanner::plan), and one that holds where the
+    // field may be the other way (InputPlanner::planSure).
+    bool wayTo(const Observation& o, const PairControl& from, int id, InputPath& way) {
+        return planner.plan(o.self().field, from, placement(id), o.timing, o.rules.speedPercent, way);
+    }
+    bool sureWayTo(const Observation& o, const PairControl& from, int id, InputPath& way) {
+        return planner.planSure(o.self().field, from, placement(id), o.timing, o.rules.speedPercent, way);
+    }
+    static Pair currentColors(const Observation& o) {
+        const Player& p = o.self();
+        const bool inAir = p.phase == Phase::Control;
+        const int index = p.nextPair - int(inAir);
+        if (!o.mine().known(index)) return {};
+        const Pair colors = o.mine().pair(index);
+        return !inAir || samePair(colors, p.colors) ? colors : Pair{};
+    }
+    static bool quietForSetup(const Observation& o) {
+        if (o.self().incoming.total() || o.busyChain[o.me]) return false;
+        if (o.players < 2) return true;
+        const Player& other = o.opponent();
+        if (other.incoming.total() || o.busyChain[1 - o.me] || other.phase == Phase::Wave ||
+            other.phase == Phase::Decide || other.phase == Phase::Garbage) return false;
+        if (other.phase != Phase::Split && other.phase != Phase::Land) return true;
+        Wave wave;
+        return !other.chain.chains && !findWaveFor(other.field.f, wave, o.rules.clearCount, false);
+    }
+    bool planTarget(const Observation& o, const PairControl& from, int& id, InputPath& way, bool setup, unsigned legal = ~0u) {
+        const GameField& field = o.self().field;
+        const Pair colors = setup ? currentColors(o) : Pair{};
+        if (!planner.canReverse(colors) || !quietForSetup(o)) return (legal >> id & 1) && sureWayTo(o, from, id, way);
+        // Replanning an airborne pair may still reach its previous target even when the spawn reach mask excludes it.
+        if (legal == ~0u) legal = legalPlacements(field) | (1u << id);
+        return planner.planEquivalent(field, from, id, legal, colors, o.timing, o.rules, way);
+    }
+    // The pair one frame on, with `buttons` held, on the own field.
+    static PairControl stepped(const Observation& o, PairControl pair, uint8_t buttons) {
+        stepPair(pair, o.self().field, buttons, o.timing, o.rules.speedPercent);
+        return pair;
+    }
+    // The way of the pair in play is to be planned again (from where it is then).
+    void dropWay() { path.buttons.clear(), step = 0; }
+    // The pair of the player `p` begins to wait for its choice (lateLog).
+    void logLate(const Player& p) { lateLog.push_back(int(p.moves)), lateLog.push_back(0); }
+    // `o` with the pair in the air taken for the pair that is about to appear: a choice made for it now.
+    static Observation beforeItAppears(const Observation& o) {
+        Observation before = o;
+        Player& q = before.player[before.me];
+        q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+        before.busyLeft[before.me] = 0;
+        return before;
     }
     // The placements choose() is offered for the pair `colors` (counted: a first choice, for climbs).
     unsigned offered(const Observation& o, Pair colors, bool counted) {
@@ -348,7 +573,7 @@ private:
             p.field.heights(h);
             for (int x = 0; x < W; ++x) top = h[x] > top ? h[x] : top;
             if (top >= 11 || keepLow) {
-                const PairControl pair = spawnPair(o.timing);
+                const PairControl pair = airFrom ? *airFrom : spawnPair(o.timing);
                 unsigned reached = reachedFrom(o, pair, legal);
                 if (keepLow && !survives(p.field, reached, colors)) {
                     lowWays = false, climbs += counted;
@@ -366,7 +591,7 @@ private:
         unsigned reached = 0;
         InputPath there;
         for (int id = 0; id < PLACEMENTS; ++id)
-            if ((legal >> id & 1) && planner.plan(o.self().field, pair, placement(id), o.timing, o.rules.speedPercent, there)) reached |= 1u << id;
+            if ((legal >> id & 1) && wayTo(o, pair, id, there)) reached |= 1u << id;
         return reached;
     }
     // Does a placement of `ids` leave the 12th row of the third column empty once its chain has run?
@@ -382,22 +607,28 @@ private:
     }
     // Chooses the placement of the pair that appears next.
     void think(const Observation& o) {
-        if (again_.valid()) again_.get(), again_ = std::future<int>(); // (a second choice whose pair had come to rest: its thread must have ended)
-        thought = true, chosen = -1;
+        if (again_.valid()) again_.get(); // (a second choice whose pair had come to rest: its thread must have ended)
+        thought = true, chosen = {};
         rememberChoice(o);
         asked = pending = second = false, shownAtThink = o.mine().count();
+        askedFresh = secondBegun = false;
         const Player& p = o.self();
         const Pair colors = o.mine().pair(p.nextPair);
         const unsigned legal = offered(o, colors, true);
+        const auto diagnosticRequest=diagnosticMain=++diagnosticSerial;
+        diagnosticMainPair=p.nextPair+1;
+        inputdiag::trace.emit(inputdiag::THINK,{int64_t(diagnosticAgent),int64_t(diagnosticRound),int64_t(diagnosticRequest),
+            o.frame,p.nextPair+1,0,legal,colors.axis,colors.child});
         if (!legal) return;
         coming = colors;
         choosingAgain = false;
+        choiceBegins();
         const Observation& shown = sight(o);
         if (thinking == Thinking::Free || (thinking == Thinking::Thread && p.wait > 1)) {
             seen = shown;
-            job = std::async(std::launch::async, [this, colors, legal] { return choose(seen, colors, legal); });
+            job = std::async(std::launch::async, [this, colors, legal, diagnosticRequest] { return diagnosticChoose(seen, colors, legal, diagnosticRequest,0); });
         } else {
-            chosen = choose(shown, colors, legal);
+            chosen = diagnosticChoose(shown, colors, legal,diagnosticRequest,0);
         }
     }
     // The pair in the air chosen now (its choice dropped, or its colours known only now), as the pair about to appear;
@@ -408,26 +639,30 @@ private:
             unknownPair = true;
             return;
         }
-        Observation fresh = o;
-        Player& q = fresh.player[fresh.me];
-        q.phase = Phase::Next, q.wait = 1, --q.nextPair;
+        const Observation fresh = beforeItAppears(o);
         think(fresh);
     }
     // The choice of that pair once more (again() said so). The first one stands until this one has come.
     void thinkAgain(const Observation& o) {
-        if (job.valid()) chosen = job.get(), job = std::future<int>();
+        if (job.valid()) chosen = job.get();
         const unsigned legal = offered(o, coming, false);
-        if (!legal || chosen < 0) return;
+        if (!legal || chosen.id < 0) return;
         ++againBegun;
+        const auto diagnosticRequest=diagnosticSecond=++diagnosticSerial;
+        diagnosticSecondPair=o.self().nextPair+1;
+        inputdiag::trace.emit(inputdiag::THINK,{int64_t(diagnosticAgent),int64_t(diagnosticRound),int64_t(diagnosticRequest),
+            o.frame,o.self().nextPair+1,1,legal,coming.axis,coming.child});
         rememberChoice(o);
-        second = true, secondId = -1, secondFrames = 0, secondMove = int(o.self().moves);
+        second = true, secondChoice = {}, secondFrames = 0, secondMove = int(o.self().moves);
+        secondBegun = true;
         choosingAgain = true;
+        choiceBegins();
         if (thinking == Thinking::Free) {
             seen = o;
-            again_ = std::async(std::launch::async, [this, legal] { return choose(seen, coming, legal); });
+            again_ = std::async(std::launch::async, [this, legal, diagnosticRequest] { return diagnosticChoose(seen, coming, legal,diagnosticRequest,1); });
         } else {
-            secondId = choose(o, coming, legal);
-            secondAt = againScript ? scriptedAgain(secondMove) : againLate;
+            secondChoice = diagnosticChoose(o, coming, legal,diagnosticRequest,1);
+            secondAt = againScript ? fromScript(*againScript, secondMove, -1) : againLate;
             if (secondAt < 0) second = false; // (in the round played again it did not come while the pair was in the air)
         }
     }
@@ -436,7 +671,7 @@ private:
     bool secondHere(bool air) {
         if (again_.valid()) {
             if (again_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
-            secondId = again_.get(), again_ = std::future<int>();
+            secondChoice = again_.get(); // (get() leaves the future empty: valid() is false from here on)
             return true;
         }
         return air ? secondFrames >= secondAt : secondAt == 0;
@@ -446,30 +681,52 @@ private:
         second = false;
         againLog.push_back(secondMove), againLog.push_back(frames);
     }
-    int scriptedAgain(int moves) const {
-        for (size_t i = 0; i + 1 < againScript->size(); i += 2)
-            if ((*againScript)[i] == moves) return (*againScript)[i + 1];
-        return -1;
+    // What a log of a round played again (lateLog, againLog: the moves, then a number, pair after pair) holds for the
+    // pair after `moves` moves; `none` when it holds nothing for it.
+    static int fromScript(const std::vector<int>& script, int moves, int none) {
+        for (size_t i = 0; i + 1 < script.size(); i += 2)
+            if (script[i] == moves) return script[i + 1];
+        return none;
+    }
+    // fastestAgain: the way just planned for the pair in the air (path, from its step `step` on) was searched within the
+    // frame. The search of fastestAhead from where that way has the pair fastestAgain frames on is begun on its thread;
+    // frame() takes its way when the pair is there. Not while a second choice is on its way (the way may be dropped),
+    // unless searchesWhileSecond().
+    void searchAgain(const Observation& o) {
+        againAt = -1;
+        const Player& p = o.self();
+        if (!fastestWays || fastestAgain <= 0 || fastestAhead <= 0 || (second && !searchesWhileSecond()) || target < 0 || p.phase != Phase::Control) return;
+        if (step + fastestAgain + 1 >= path.frames()) return; // (the pair is put before a search could come)
+        PairControl then = p.pair;
+        for (int i = 0; i < fastestAgain; ++i) {
+            stepPair(then, p.field, path.buttons[size_t(step + i)], o.timing, o.rules.speedPercent);
+            if (then.locked) return;
+        }
+        planner.prepareFastest(p.field, then, placement(target), o.timing, o.rules.speedPercent);
+        againAt = step + fastestAgain, againPair = p.nextPair, againTarget = target;
     }
     // holdSecond: may the pair, which the frame finds as `now`, go straight down in this frame? Yes
     // when the way to the first choice is then one frame shorter, and every placement that has a
     // way from here still has one from there.
     bool straight(const Observation& o, const PairControl& now) {
-        const Player& p = o.self();
         const int left = path.frames() - step; // the frames of the way to the first choice from here
         if (left <= 1) return false;
-        PairControl next = now;
-        stepPair(next, p.field, BTN_DOWN, o.timing, o.rules.speedPercent);
+        const PairControl next = stepped(o, now, BTN_DOWN);
         if (next.locked) return false;
         InputPath way;
-        if (!planner.plan(p.field, next, placement(target), o.timing, o.rules.speedPercent, way) || way.frames() + 1 > left) return false;
+        if (!wayTo(o, next, target, way) || way.frames() + 1 > left) return false;
+        // (fastestWays: the way to the first choice may be over sooner than the straight way; going down must not end the
+        //  landing animation later than the rest of that way does)
+        if (planner.fastest) {
+            const std::vector<uint8_t> rest(path.buttons.begin() + step, path.buttons.end());
+            const int restEnd = FastestSearch::ends(o.self().field, now, rest, o.timing, o.rules.speedPercent);
+            if (restEnd > 0 && FastestSearch::ends(o.self().field, next, way.buttons, o.timing, o.rules.speedPercent) + 1 > restEnd) return false;
+        }
         // (spareFrame: nor so far down that a frame its sender is not called in takes the placement out of reach - held
         //  down to the last frame from which a way still led there, the next one, left out, sent the pair elsewhere)
         if (spareFrame && tapHold > 1) {
             InputPath sure;
-            if (!planner.planSure(p.field, next, placement(target), o.timing, o.rules.speedPercent, sure) ||
-                planner.lostBySkip(p.field, next, placement(target), o.timing, o.rules.speedPercent, sure))
-                return false;
+            if (!sureWayTo(o, next, target, sure) || planner.lostBySkip(o.self().field, next, placement(target), o.timing, o.rules.speedPercent, sure)) return false;
         }
         return keepsWays(o, now, next, target);
     }
@@ -479,78 +736,138 @@ private:
     bool downKeepsWays(const Observation& o) {
         const Player& p = o.self();
         const PairControl now = p.phase == Phase::Control ? p.pair : appearingPair(p, o.rules, o.timing);
-        PairControl next = now;
-        stepPair(next, p.field, BTN_DOWN, o.timing, o.rules.speedPercent);
-        if (next.locked) return false;
-        return keepsWays(o, now, next, -1);
+        const PairControl next = stepped(o, now, BTN_DOWN);
+        return !next.locked && keepsWays(o, now, next, -1);
     }
-    // Has every placement but `except` that has a way from `now` still one from `next`?
+    // Has every placement but `except` that has a way from `now` still one from `next`, and not one that goes back up? A
+    // way from a frame further on that is longer by two frames or more does - over a column, by a kick or a quick turn:
+    // the pair came down while the second choice was awaited and climbed again when it came. One a single frame longer
+    // (the taps of a way fall on other frames from there) counts only when the pair rises on it and not on the way from
+    // `now`.
     bool keepsWays(const Observation& o, const PairControl& now, const PairControl& next, int except) {
-        const Player& p = o.self();
-        InputPath way;
-        const unsigned legal = legalPlacements(p.field);
-        for (int id = 0; id < PLACEMENTS; ++id)
-            if ((legal >> id & 1) && id != except && planner.plan(p.field, now, placement(id), o.timing, o.rules.speedPercent, way) &&
-                !planner.plan(p.field, next, placement(id), o.timing, o.rules.speedPercent, way))
-                return false;
+        int way = 0, after = 0;
+        const unsigned legal = legalPlacements(o.self().field);
+        for (int id = 0; id < PLACEMENTS; ++id) {
+            bool up = false, upThen = false;
+            if (!(legal >> id & 1) || id == except || !wayFrom(o, now, id, way, &up)) continue;
+            if (!wayFrom(o, next, id, after, &upThen)) return false;
+            if (holdDown == 0) continue;                 // (every way kept: enough)
+            if (holdDown == 2 ? after > way : after > way + 1) return false;
+            if (holdDown == 1 && after > way && upThen && !up) return false;
+        }
         return true;
+    }
+    // Does the pair, played on `way` from `p`, go up in some frame (a kick from the floor, a quick turn)?
+    bool rises(const Observation& o, PairControl p, const InputPath& way) {
+        for (const uint8_t b : way.buttons) {
+            if (p.locked) break;
+            const int before = 2 * p.y + (p.upper ? 1 : 0);
+            p = stepped(o, p, b);
+            if (2 * p.y + (p.upper ? 1 : 0) > before) return true;
+        }
+        return false;
+    }
+    // keepsWays: does a way (wayTo) lead from `from` to placement `id`, and in how many frames? Worked out once
+    // for the frame (Observation::frame), the own field, `from` and the planner's settings (tune() forgets them all).
+    struct WaysFrom {
+        int64_t frame = -1;
+        GameField field;
+        PairControl from{};
+        bool low = false;
+        unsigned asked = 0, has = 0, rise = 0; // (rise: the pair goes up at some frame of the way - rises())
+        int frames[PLACEMENTS]{};
+    };
+    WaysFrom waysFrom[4];
+    int waysNext = 0;
+    bool wayFrom(const Observation& o, const PairControl& from, int id, int& frames, bool* up = nullptr) {
+        WaysFrom* w = nullptr;
+        for (WaysFrom& c : waysFrom)
+            if (c.frame == o.frame && c.low == planner.keepLow && c.from == from && c.field == o.self().field) {
+                w = &c;
+                break;
+            }
+        if (!w) {
+            w = &waysFrom[waysNext], waysNext = (waysNext + 1) % 4;
+            w->frame = o.frame, w->field = o.self().field, w->from = from, w->low = planner.keepLow, w->asked = w->has = w->rise = 0;
+        }
+        if (!(w->asked >> id & 1)) {
+            InputPath way;
+            w->asked |= 1u << id;
+            w->frames[id] = 0;
+            if (wayTo(o, from, id, way)) {
+                w->has |= 1u << id, w->frames[id] = way.frames();
+                if (rises(o, from, way)) w->rise |= 1u << id;
+            }
+        }
+        frames = w->frames[id];
+        if (up) *up = (w->rise >> id & 1) != 0;
+        return (w->has >> id & 1) != 0;
+    }
+    // searchAgain: the search of the way over soonest goes on while a second choice is on its way.
+    bool searchesWhileSecond() const { return searchWhileSecond && holdKeepsWay; }
+    // tapHold above 1: the frames the turn and the move of the buttons this agent gave last (`last`) have been held in a
+    // row so far, counted from those buttons (tapsHeldFor).
+    void countHeld() {
+        constexpr uint8_t KIND[2] = {BTN_CW | BTN_CCW, BTN_LEFT | BTN_RIGHT};
+        for (int k = 0; k < 2; ++k) heldRun[k] = (last & KIND[k]) ? heldRun[k] + 1 : 0, tapsHeldFor[k] = heldRun[k];
     }
     // handWait: may the pair, which the frame finds as `now`, be left alone in this frame? Yes when that does
     // not lock it and a way leads to the placement chosen from where it is then.
     bool alone(const Observation& o, const PairControl& now) {
-        const Player& p = o.self();
-        PairControl next = now;
-        stepPair(next, p.field, 0, o.timing, o.rules.speedPercent);
-        if (next.locked) return false;
+        const PairControl next = stepped(o, now, 0);
         InputPath way;
-        return planner.plan(p.field, next, placement(target), o.timing, o.rules.speedPercent, way);
+        return !next.locked && wayTo(o, next, target, way);
     }
     bool made() const { return !job.valid() || job.wait_for(std::chrono::seconds(0)) == std::future_status::ready; }
-    // The frames the pair after `moves` moves waited in the round of lateScript.
-    int scriptedLate(int moves) const {
-        for (size_t i = 0; i + 1 < lateScript->size(); i += 2)
-            if ((*lateScript)[i] == moves) return (*lateScript)[i + 1];
-        return 0;
-    }
     // The buttons that bring `pair` to the placement chosen (waits for it).
     // fallen: the pair has been in the air without a choice (Free).
     void route(const Observation& o, const PairControl& pair, bool fallen = false) {
-        if (job.valid()) chosen = job.get(), job = std::future<int>(); // (kept: a second choice in the air stands on it)
-        int id = chosen;
+        if (job.valid()) chosen = job.get(); // (kept: a second choice in the air stands on it)
+        int id = chosen.id;
+        targetSetup = chosen.setup;
+        diagnosticSelected=diagnosticMain;
         thought = false;
         const Player& p = o.self();
         const unsigned legal = legalPlacements(p.field);
         if (!fallen) {
             // (a placement that is legal and has no path from where a pair appears: the next legal one is taken)
             const int wanted = id;
-            for (int tries = 0; id >= 0 && tries < PLACEMENTS; ++tries, id = (id + 1) % PLACEMENTS)
-                if ((legal >> id & 1) && planner.planSure(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
-                    target = id;
-                    break;
+            for (int tries = 0; id >= 0 && tries < PLACEMENTS; ++tries, id = (id + 1) % PLACEMENTS) {
+                int reached = id;
+                if (planTarget(o, pair, reached, path, id == wanted && targetSetup && !second, legal)) {
+                    const int previous=target;target = reached;
+                    diagnosticTarget(o,0,diagnosticSelected,previous);
+                    if (id != wanted) ++rerouted, targetSetup = false;
+                    return;
                 }
-            if (wanted >= 0 && target != wanted) ++rerouted, lastWanted = wanted, lastTaken = target;
+            }
+            if (wanted >= 0) ++rerouted;
             return;
         }
-        if (id >= 0) reach(o, pair, id, legal);
+        if (id >= 0) reach(o, pair, id, legal,1);
     }
     // The way of `pair` to placement `id` (one of `legal`). No way leads there any more - the choice came, or the pair was
     // put right, when it had fallen behind a column -: to the placement nearest to it; none: down where it is. Kept below
     // the 13th row (keepLow) and finding no way at all: any way.
-    void reach(const Observation& o, const PairControl& pair, int id, unsigned legal) {
+    void reach(const Observation& o, const PairControl& pair, int id, unsigned legal,int diagnosticReason=3) {
         const Player& p = o.self();
         for (;;) {
-            if ((legal >> id & 1) && planner.planSure(p.field, pair, placement(id), o.timing, o.rules.speedPercent, path)) {
-                target = id;
+            int reached = id;
+            if (planTarget(o, pair, reached, path, targetSetup && !second, legal)) {
+                const int previous=target;target = reached;
+                diagnosticTarget(o,diagnosticReason,diagnosticSelected,previous);
                 return;
             }
             const int best = nearest(o, pair, id, path);
             if (best >= 0) {
-                target = best, ++steered;
+                const int previous=target;target = best, ++steered;
+                targetSetup = false;
+                diagnosticTarget(o,4,diagnosticSelected,previous);
                 if (planner.keepLow && (legal >> id & 1)) {
                     // (for tools: a way through the 13th row leads there still)
                     InputPath high;
                     planner.keepLow = false;
-                    steeredLow += planner.plan(p.field, pair, placement(id), o.timing, o.rules.speedPercent, high);
+                    steeredLow += wayTo(o, pair, id, high);
                     planner.keepLow = true;
                 }
                 return;
@@ -578,7 +895,7 @@ private:
             const Placement t = placement(other);
             const int apart = std::abs(int(t.x) - int(want.x)) + std::abs(t.childX() - want.childX());
             if (best >= 0 && apart >= bestApart) continue;
-            if (planner.plan(p.field, pair, t, o.timing, o.rules.speedPercent, there)) best = other, bestApart = apart, std::swap(way, there);
+            if (wayTo(o, pair, other, there)) best = other, bestApart = apart, std::swap(way, there);
         }
         return best;
     }
@@ -587,31 +904,39 @@ private:
     bool lowWays = true; // keepLow holds for the ways of the pair in play
     InputPath path;
     int step = 0, target = -1;
+    bool targetSetup = false;
     int idle = 0; // handWait: the frames the pair in the air is still left alone
     uint8_t last = 0;
     bool thought = false; // the pair that appears next has its placement, or a thread at work on it
     bool revising = false;
     GameField choiceField;
     int choiceIndex = -1, choiceCount = 0;
-    Pair choicePairs[3]{};
+    Pair choicePairs[MAX_KNOWN]{};
     bool late = false;    // Free: the pair is in the air and its placement is not made yet
     bool unknownPair = false; // ... nor begun: its colours are not known (Observation: the own pairs known end before it)
     int lateLeft = 0;     // lateScript: the frames the pair still waits
-    int chosen = -1;      // the placement, when it was worked out at once; -1 = none is legal
+    Choice chosen;       // the placement, when it was worked out at once
     Pair coming{};        // the pair the choice is for
-    std::future<int> job; // ... or the thread
+    std::future<Choice> job; // ... or the thread
     Observation seen;     // what the thread looks at
     int shownAtThink = 0; // the pairs the screen had shown when that choice was begun
-    bool asked = false;   // the screen has shown more since (once for a pair)
+    bool asked = false;   // the screen has shown more since (once for a pair; retryInAir: once more in the air)
+    bool askedFresh = false; // againFresh: a second choice was asked for with nothing new shown (once for a pair)
+    bool secondBegun = false; // a second choice has been begun for the pair
     bool pending = false; // ... and again() is asked as soon as the first choice is made
     Observation seenAgain; // ... what the screen showed in that frame
     bool second = false;  // a second choice has been begun and has not come yet
-    int secondId = -1;    // ... the placement, when it was worked out at once
-    std::future<int> again_; // ... or its thread (valid, with second false: its pair has come to rest and it still works)
+    Choice secondChoice; // ... the placement, when it was worked out at once
+    std::future<Choice> again_; // ... or its thread (valid, with second false: its pair has come to rest and it still works)
     int secondAt = 0;     // the frames after the pair appears at which a second choice worked out at once comes
     int secondFrames = 0; // the frames the pair has been in the air
     int secondMove = 0;   // the moves the player had made when it was begun
+    int againAt = -1;     // fastestAgain: the step of the way at which the search begun for the pair in the air has it (-1: none)
+    int againPair = -1, againTarget = -1; // ... the pair (Player::nextPair then) and the placement it was begun for
     PairControl born;     // the pair as it appears (in the frame it appears)
+    int appearedPair = -1; // Player::nextPair of the pair in the air whose appearance was seen (or that was taken up)
+    const PairControl* airFrom = nullptr; // askInAir: the pair in the air a second choice is offered placements for
+    int heldRun[2] = {0, 0}; // countHeld: the frames the turn and the move have been held in a row
 };
 
 // Puts every pair on a random legal placement, with the fastest input.

@@ -4,7 +4,8 @@
 //
 //   - the clock of a choice (Params::thinkBudget): how fast this machine searches is learned from the searches it
 //     has made, and a search that would not end in its time is made narrower (search(), learn(), chooseAhead());
-//   - the second choice of a pair, made when the third pair has come into the window (again());
+//   - the second choice of a pair, made when the third pair has come into the window, or, with
+//     PlacementAgent::againFresh, once more as the pair appears (again());
 //   - the search of the next choice begun while the pair of this one falls (airborne(), Params::thinkPonder);
 //   - the late view of the opponent and the slow hands of the levels below the strongest (Params::seeLate,
 //     handWait: remember(), sight());
@@ -15,13 +16,19 @@
 // does is to call the tactics in the frame the choice is due.
 #include "agent.h"
 #include "build.h"
+#include <array>
+#include <atomic>
+#include <future>
+#include <mutex>
 
 namespace juraic::ai {
 
 class X3Pace : public PlacementAgent {
 public:
     explicit X3Pace(const Params& params) : p(params) {
+        choicePairLimit = std::clamp(params.knownPairs, 3, MAX_KNOWN);
         ahead = params.thinkAhead, pathCheck = params.x3PathCheck != 0, againLate = params.thinkLate, holdSecond = params.thinkHold != 0;
+        equivalentSetupRoute = params.equivalentSetupRoute;
         handWait = params.handWait > 0 ? params.handWait : 0;
         autoAhead = params.thinkAhead <= 0 && params.thinkBudget > 0 && params.thinkFit >= 1;
         budgetSet = params.thinkBudget;
@@ -30,12 +37,15 @@ public:
     ~X3Pace() override {
         finish();
         dropEarly();
+        dropRival();
     }
 
     void startRound(int seat, uint64_t seed) override {
         if (p.x3Salt) seed += uint64_t(p.x3Salt) * 0x9E3779B97F4A7C15ull; // (a twin: Params::x3Salt)
         PlacementAgent::startRound(seat, seed);
         dropEarly();
+        dropRival();
+        rivalStamp = -1;
         earlySeed = 0, earlyPairs = 0;
         roundSeed = seed;
         for (Seen& s : past) s.frame = -1;
@@ -51,7 +61,8 @@ public:
     }
 
     // What the last choice was (for tests and tools).
-    enum Kind { None, Win, Answer, AnswerBuild, Poke, Build, Fire, Clear, KINDS };
+    // (Whoever prints a kind keeps a name for each: tools/ai_match.cpp, play/realgame_drive.h.)
+    enum Kind { None, Win, Answer, AnswerBuild, Poke, Build, Fire, Clear, Crush, CrushBuild, KINDS };
     Kind kind = None;
     bool guardedNow = false; // the last choice: x3Guard narrowed the placements the beam search chose among
     int lastChoice = -1;
@@ -65,6 +76,12 @@ public:
     // clock made narrower or stopped (the first choice then stands).
     int64_t againMade = 0, againPoor = 0;
     int64_t againNarrow = 0, againCut = 0; // ... and their searches among narrowSearches and cutSearches
+    // again(), with the clock: how often it was asked; and not begun because the screen showed no pair the first choice
+    // did not know, because the speed of the machine is not known yet, because its plans and its search would not be
+    // done in time - and for those the milliseconds they were reckoned to need and the milliseconds there were, summed.
+    int64_t againAsked = 0, againNothingNew = 0, againNoSpeed = 0, againNoTime = 0, againNeedMs = 0, againHaveMs = 0;
+    int64_t rivalMissed = 0; // thinkRivalFull: choices whose search of the opponent's field was not done in their time
+    int widthOfFirst() const { return firstWidth; } // the width of the search of the own field of the last first choice
     // What the clock decided in a choice (Params::thinkBudget): with these and the seed of the round
     // the choice can be made again by a tool that has no clock, unless the clock stopped a search
     // (cut > 0: where each queue stood then is not kept).
@@ -132,7 +149,7 @@ protected:
     // That side as a frame shows it: a chain is running, or about to - the pair that fires it has locked.
     // (Rules that clear another number than four: only a chain that runs.)
     static bool firing(const Player& q, const Rules& rules) {
-        if (q.phase == Phase::Wave) return true;
+        if (q.phase == Phase::Wave || (q.phase == Phase::Land && q.chain.chains > 0)) return true;
         return (q.phase == Phase::Split || q.phase == Phase::Land) && rules.clearCount == 4 && q.field.f.hasClear();
     }
     // Before every frame of the round: keeps what the screen shows, and moves the frame the opponent is seen at.
@@ -186,9 +203,8 @@ protected:
     bool again(const Observation& o) override {
         if (!p.thinkAgain) return false;
         const Player& self = o.self();
-        int pairs = 0;
-        for (int i = self.nextPair; pairs < 3 && pairs < p.x2Depth && o.mine().known(i); ++i) ++pairs;
-        if (pairs <= firstPairs) return false; // (nothing the first choice did not know)
+        if (p.thinkBudget > 0) ++againAsked;
+        if (pairsShown(o) <= firstPairs && !againAsIs) return ++againNothingNew, false; // (nothing the first choice did not know)
         if (p.thinkBudget <= 0) {
             // A tool: always. A round of the game played again: when the game did (two notes for the move).
             if (!script) return true;
@@ -200,12 +216,12 @@ protected:
         // done thinkAgainFrames after the pair has appeared (search() keeps three tenths of the time in
         // hand, and 20 ms stay free). The search of the opponent's field is mostly that of the first
         // choice; when it is not, and the time runs short, the second choice is poor and the first stands.
-        if (unitNs <= 0) return false;
+        if (unitNs <= 0) return ++againNoSpeed, false;
         const int queues = p.queues(), depth = p.depth();
         const int width = firstWidth > 0 ? (firstWidth * p.thinkAgainWidth + 99) / 100 : p.width(); // (the width it must reach: choose())
         const int64_t search = unitNs * width * depth * queues;
         const int64_t have = int64_t(self.wait + p.thinkAgainFrames) * 1000000000 / 60 - 20000000;
-        if (againPlansNs + search * 10 / 7 > have) return false;
+        if (againPlansNs + search * 10 / 7 > have) return ++againNoTime, againNeedMs += (againPlansNs + search * 10 / 7) / 1000000, againHaveMs += have / 1000000, false;
         againBudget = int(have / 1000000);
         return true;
     }
@@ -223,7 +239,7 @@ protected:
     struct Early {
         bool on = false; // begun, and not taken or dropped yet
         GameField field;
-        Pair pair[3]{};
+        Pair pair[MAX_KNOWN]{};
         int pairs = 0;
         uint64_t seed = 0;
         int depth = 0, queues = 0, thirdMax = 0, keyed = 0, width = 0; // of its Params: beamDepth, beamQueues, beamThirdMax, evKeyed, beamWidth
@@ -231,19 +247,126 @@ protected:
         bool is(const GameField& g, const Pair* known, int count, uint64_t s, const Params& q) const {
             if (count != pairs || s != seed || q.beamDepth != depth || q.beamQueues != queues || q.beamThirdMax != thirdMax || q.evKeyed != keyed || !(g == field)) return false;
             for (int i = 0; i < count; ++i)
-                if (known[i].axis != pair[i].axis || known[i].child != pair[i].child) return false;
+                if (!samePair(known[i], pair[i])) return false;
             return true;
         }
     } early;
     Builder earlyBuilder;
     uint64_t earlySeed = 0; // the seed of the choice an early search was last begun for (or tried), and with how many pairs
     int earlyPairs = 0;
+    GameField earlySourceField;
+    Pair earlySourceColors{};
+    int earlySourceTarget = -1;
+
+    // Params::thinkRivalFull. The search of the opponent's field at the width the AI is measured with, as deep as he
+    // may have moves, takes longer than the part of a choice it has (thinkRival). His field changes when he puts a
+    // pair, not when a choice is made: so the search is begun in the frame his field is known (X3Agent::watchRival, on
+    // the thread of frame()) and runs on a thread of its own; the choice that asks for it waits up to its time, and a
+    // search not done by then stays at work for the next choice of the same field. One search at a time; a field that
+    // is another stops it.
+    struct RivalAhead {
+        bool on = false; // begun, and not taken or dropped yet
+        GameField field;
+        Pair pair[MAX_KNOWN]{};
+        int pairs = 0, depth = 0, width = 0;
+        uint64_t seed = 0;
+        bool seeded = false; // the made-up pairs of the search depend on its seed (Builder::seeded)
+        std::future<BuildResult> job;
+        bool is(const GameField& g, const Pair* known, int count, uint64_t s, const Params& q) const {
+            if (!on || count != pairs || q.beamDepth != depth || q.beamWidth != width || (seeded && s != seed) || !(g == field)) return false;
+            for (int i = 0; i < count; ++i)
+                if (!samePair(known[i], pair[i])) return false;
+            return true;
+        }
+    } rivalAhead;
+    Builder rivalBuilder;
+    std::mutex rivalLock;   // rivalAhead: the thread of frame() begins searches, the thread of a choice begins and takes them
+    int64_t rivalStamp = -1; // watchRival: what the opponent's side was when a search was last begun for it
+    std::array<Pair, MAX_KNOWN> rivalObservedPairs{};
+    GameField rivalObservedField;
+    void dropRivalLocked() {
+        if (rivalAhead.job.valid()) {
+            rivalBuilder.until(Builder::Clock::now());
+            rivalAhead.job.wait();
+            rivalAhead.job = std::future<BuildResult>();
+        }
+        rivalAhead.on = false;
+    }
+    void dropRival() {
+        std::lock_guard<std::mutex> lock(rivalLock);
+        dropRivalLocked();
+    }
+    // Begins the search, unless it is the one at work. wait false (the thread of frame()): not while a choice holds
+    // the searches - false then, and nothing is begun.
+    bool beginRival(const GameField& field, const Pair* known, int count, const Rules& rules, const Timing& timing, Params q, uint64_t seed, bool wait,
+                    Builder::Clock::time_point end = Builder::Clock::time_point::max()) {
+        if (!known || count <= 0 || count > MAX_KNOWN) return false;
+        std::unique_lock<std::mutex> lock(rivalLock, std::defer_lock);
+        if (wait) lock.lock();
+        else if (!lock.try_lock()) return false;
+        if (!valuesWanted()) q.beamLastValues = 0;
+        if (rivalAhead.is(field, known, count, seed, q)) {
+            if (end != Builder::Clock::time_point::max()) rivalBuilder.until(end);
+            return true;
+        }
+        dropRivalLocked();
+        RivalAhead& r = rivalAhead;
+        r.field = field, r.pairs = count, r.depth = q.beamDepth, r.width = q.beamWidth, r.seed = seed, r.seeded = Builder::seeded(rules, q);
+        std::array<Pair, MAX_KNOWN> pairs{};
+        for (int i = 0; i < count; ++i) r.pair[i] = pairs[size_t(i)] = known[i];
+        rivalBuilder.until(std::min(end, Builder::Clock::now() + std::chrono::seconds(3)));
+        r.on = true;
+        r.job = std::async(std::launch::async, [this, field, pairs, count, rules, timing, q, seed, threads = p.searchThreads] {
+            return rivalBuilder.search(field, pairs.data(), count, rules, timing, q, seed, threads);
+        });
+        return true;
+    }
+    // The search begun for this field, once it is done: waited for until `end`. False: none for this field, not done
+    // by then (it stays at work), or stopped by its own clock.
+    bool takeRival(const GameField& field, const Pair* known, int count, Params q, uint64_t seed, Builder::Clock::time_point end, BuildResult& out) {
+        std::lock_guard<std::mutex> lock(rivalLock);
+        if (!valuesWanted()) q.beamLastValues = 0;
+        if (!rivalAhead.is(field, known, count, seed, q) || !rivalAhead.job.valid()) return false;
+        if (!cutStale) {
+            if (rivalAhead.job.wait_until(end) != std::future_status::ready) return false;
+        } else {
+            // (cutStale: a choice dropped meanwhile waits no longer)
+            for (;;) {
+                const Builder::Clock::time_point soon = Builder::Clock::now() + std::chrono::milliseconds(1);
+                if (rivalAhead.job.wait_until(soon < end ? soon : end) == std::future_status::ready) break;
+                if (stale.load() || Builder::Clock::now() >= end) return false;
+            }
+        }
+        out = rivalAhead.job.get();
+        rivalAhead.job = std::future<BuildResult>(), rivalAhead.on = false;
+        return !out.cut;
+    }
 
     // Does a choice read BuildResult::value of a search that ran to its end?
     bool valuesWanted() const { return p.x3ByValue || p.x3ValueMix > 0; }
-    // How high a search of the own field may put the third column, by the heights of the field: x3ThirdMax, unless
-    // the column is that high already (x3ThirdStrict: higher than that) - then no placement would be left.
-    int thirdLimit(const int h[W]) const { return (p.x3ThirdStrict ? h[DEATH_X] > p.x3ThirdMax : h[DEATH_X] >= p.x3ThirdMax) ? 12 : p.x3ThirdMax; }
+    // How high a search of the own field `g` may put the third column: x3ThirdMax, unless the column is that high
+    // already (x3ThirdStrict: higher than that) - then no placement would be left.
+    int thirdLimit(const GameField& g) const {
+        int h[W];
+        g.heights(h);
+        return (p.x3ThirdStrict ? h[DEATH_X] > p.x3ThirdMax : h[DEATH_X] >= p.x3ThirdMax) ? 12 : p.x3ThirdMax;
+    }
+    // The widest a search of the own field is made when the clock allows more (Params::thinkWidthMax).
+    int widest() const { return p.thinkWidthMax > p.beamWidth ? p.thinkWidthMax : p.beamWidth; }
+    // The pairs of the own tsumo the screen shows from the pair that appears next on, as many as the plans are made with
+    // (three at most, Params::x2Depth).
+    int pairsShown(const Observation& o) const {
+        int pairs = 0;
+        for (int i = o.self().nextPair; pairs < p.searchKnownLimit(p.x2Depth) && o.mine().known(i); ++i) ++pairs;
+        return pairs;
+    }
+    // The note of the choice that is being made (null: the round is not noted, or no choice has begun).
+    Note* note() { return noting && !notes.empty() ? &notes.back() : nullptr; }
+    static int64_t nanos(Builder::Clock::duration d) { return std::chrono::duration_cast<std::chrono::nanoseconds>(d).count(); }
+    // A time learnt again: the new sample counts a quarter, the first one in full (0 = none yet).
+    static int64_t blend(int64_t learnt, int64_t sample) { return learnt ? (3 * learnt + sample) / 4 : sample; }
+    // Is `part` at least `percent` percent of `whole`?
+    static bool atLeastPercent(int64_t part, int percent, int64_t whole) { return part * 100 >= whole * percent; }
 
     // Stops the search begun early, if one is at work, and forgets it.
     void dropEarly() {
@@ -255,6 +378,25 @@ protected:
         early.on = false;
     }
 
+    // PlacementAgent::cutStale: the choice under way is dropped. The search it makes now (`searching`) and the one begun
+    // early are stopped at once; what they took is not learnt (`stale`, until the next choice begins), and the one begun
+    // early is dropped as the next choice begins (earlyStale). Only with the clock: a tool's searches run to their end.
+    std::atomic<bool> stale{false};
+    std::atomic<Builder*> searching{nullptr};
+    bool earlyStale = false;
+    void abandon() override {
+        if (p.thinkBudget <= 0) return;
+        stale.store(true);
+        const Builder::Clock::time_point now = Builder::Clock::now();
+        if (Builder* b = searching.load()) b->until(now);
+        earlyBuilder.until(now);
+        earlyStale = true;
+    }
+    void choiceBegins() override {
+        stale.store(false);
+        if (earlyStale) earlyStale = false, dropEarly();
+    }
+
     void airborne(const Observation& o, Pair colors, int id, int frames) override {
         if (p.thinkBudget <= 0 || !p.thinkPonder || p.thinkFit < 1 || unitNs <= 0) return;
         const Player& self = o.self();
@@ -262,27 +404,34 @@ protected:
         // nextPair - 1). A pair of the opponent that appears while this one falls may show one
         // more: the search is then begun again with it, in the time that is left.
         const uint64_t seed = roundSeed * 1000 + uint64_t(self.moves) + 1;
-        int pairs = 0;
-        for (int i = self.nextPair; pairs < 3 && pairs < p.x2Depth && o.mine().known(i); ++i) ++pairs;
-        if (earlySeed == seed && earlyPairs >= pairs) return; // (begun for this pair, with as many)
+        const int pairs = pairsShown(o);
+        if (earlySeed == seed && earlyPairs >= pairs) {
+            if (p.knownPairs <= 3) return;
+            const auto& visible = o.mine();
+            bool same = earlyPairs == pairs && earlySourceTarget == id && samePair(colors, earlySourceColors) && earlySourceField == self.field;
+            for (int i = 0; same && i < pairs; ++i) same = samePair(early.pair[i], visible.pair(self.nextPair + i));
+            if (same) return;
+        }
         dropEarly();
         earlySeed = seed, earlyPairs = pairs;
         if (!pairs) return;
+        if (p.knownPairs > 3) {
+            earlySourceTarget = id;
+            earlySourceColors = colors;
+            earlySourceField = self.field;
+        }
         Early& e = early;
         e.field = self.field;
         place(e.field, placement(id), colors);
         Trial chain;
         if (o.rules.clearCount != 4 || e.field.f.hasClear()) runTrialChain(e.field.f, o.rules, o.timing, chain, false);
-        if (e.field.dead()) return;
         e.pairs = pairs;
         for (int i = 0; i < pairs; ++i) e.pair[i] = o.mine().pair(self.nextPair + i);
+        if (e.field.dead()) return;
         Params q = p; // (as searchBuild and search make them for a choice that builds)
         if (!valuesWanted()) q.beamLastValues = 0;
-        int h[W];
-        e.field.heights(h);
-        q.beamThirdMax = thirdLimit(h);
-        const int queues = q.queues(), depth = q.depth();
-        const int most = p.thinkWidthMax > p.beamWidth ? p.thinkWidthMax : p.beamWidth;
+        q.beamThirdMax = thirdLimit(e.field);
+        const int queues = q.queues(), depth = q.depth(), most = widest();
         const int64_t left = int64_t(frames > 0 ? frames : 0) * (1000000000 / 60) * 7 / 10, each = unitNs * depth * queues;
         const int64_t wide = each > 0 ? left / each : most;
         q.beamWidth = int(wide > most ? most : wide < p.thinkWidthMin ? p.thinkWidthMin : wide);
@@ -293,7 +442,7 @@ protected:
         e.job = std::async(std::launch::async, [this, q, rules = o.rules, timing = o.timing] {
             const Builder::Clock::time_point t0 = Builder::Clock::now();
             const BuildResult r = earlyBuilder.search(early.field, early.pair, early.pairs, rules, timing, q, early.seed, p.searchThreads);
-            return std::make_pair(r, int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Builder::Clock::now() - t0).count()));
+            return std::make_pair(r, nanos(Builder::Clock::now() - t0));
         });
     }
 
@@ -309,8 +458,7 @@ protected:
     bool autoAhead = false;
     int budgetSet = 0; // Params::thinkBudget as it was given: the time of a choice is never longer
     void chooseAhead() {
-        const int queues = p.queues(), depth = p.depth();
-        const int most = p.thinkWidthMax > p.beamWidth ? p.thinkWidthMax : p.beamWidth;
+        const int queues = p.queues(), depth = p.depth(), most = widest();
         // (With slowNs: the frames hold for a whole round, and the last few searches of the round
         // before may have been fast ones. Seen once, two AIs at the speed of the screen on a machine
         // under load: 12 frames in the first round, 5 in the second, where 13 of 35 first choices then
@@ -333,7 +481,7 @@ protected:
         builder.untimed();
         const Builder::Clock::time_point t0 = Builder::Clock::now();
         builder.search(GameField{}, known, 2, rules, DEFAULT_TIMING, p, 1, p.searchThreads);
-        const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Builder::Clock::now() - t0).count();
+        const int64_t ns = nanos(Builder::Clock::now() - t0);
         const int queues = p.queues(), depth = p.depth(), width = p.width();
         unitNs = ns / (int64_t(width) * depth * queues);
         if (unitNs < 1) unitNs = 1;
@@ -341,7 +489,7 @@ protected:
     }
     // What a search took, for one node of width, one layer and one queue.
     void learn(int64_t sample) {
-        unitNs = unitNs ? (3 * unitNs + sample) / 4 : sample;
+        unitNs = blend(unitNs, sample);
         slowNs = sample > slowNs ? sample : (15 * slowNs + sample) / 16;
     }
 
@@ -356,8 +504,6 @@ protected:
             if (&b == &builder) ownWidth = q.beamWidth;
             return b.search(field, known, count, o.rules, o.timing, q, seed, p.searchThreads);
         }
-        using std::chrono::duration_cast;
-        using std::chrono::nanoseconds;
         const Builder::Clock::time_point end = began + std::chrono::microseconds(int64_t(budgetNow) * 10 * percent), now = Builder::Clock::now();
         const int queues = q.queues(), depth = q.depth();
         // The width the clock allows now.
@@ -365,7 +511,7 @@ protected:
         bool narrower = false;
         if (fit && unitNs > 0) {
             // (seven tenths of the time left: the time of a search varies with the field)
-            const int64_t left = duration_cast<nanoseconds>(end - now).count() * 7 / 10, need = unitNs * q.beamWidth * depth * queues;
+            const int64_t left = nanos(end - now) * 7 / 10, need = unitNs * q.beamWidth * depth * queues;
             if (need > left) {
                 const int64_t narrow = left > 0 ? int64_t(q.beamWidth) * left / need : 0;
                 width = int(narrow > p.thinkWidthMin ? narrow : p.thinkWidthMin < q.beamWidth ? p.thinkWidthMin : q.beamWidth);
@@ -379,40 +525,45 @@ protected:
         if (&b == &builder && fit && early.on) {
             if (early.is(field, known, count, seed, q) && early.width >= width) {
                 // The search begun while the last pair fell is this one. It ends when this one must.
+                searching.store(&earlyBuilder);
                 earlyBuilder.until(end);
+                if (stale.load()) earlyBuilder.until(Builder::Clock::now()); // (cutStale: the choice was dropped meanwhile)
                 const std::pair<BuildResult, int64_t> got = early.job.get();
+                searching.store(nullptr);
+                const bool dropped = stale.load(); // (cutStale: what it took is not learnt)
                 early.on = false;
                 ++earlyTaken;
                 const BuildResult& r = got.first;
                 const int layers = r.cut ? r.layers : depth;
-                if (layers >= 3) {
-                    learn(got.second / (int64_t(early.width < 1 ? 1 : early.width) * layers * queues));
-                }
+                if (layers >= 3 && !dropped) learn(got.second / (int64_t(early.width < 1 ? 1 : early.width) * layers * queues));
                 if (early.width < q.beamWidth) ++narrowSearches;
                 ownWidth = early.width;
-                if (noting && !notes.empty()) notes.back().widths.push_back(early.width);
-                cutSearches += r.cut;
-                if (r.cut && noting && !notes.empty()) ++notes.back().cut;
+                if (Note* n = note()) n->widths.push_back(early.width), n->cut += r.cut;
+                cutSearches += dropped ? 0 : r.cut;
                 return r;
             }
             dropEarly();
         }
+        searching.store(&b);
         b.until(end);
+        if (stale.load()) b.until(Builder::Clock::now()); // (cutStale: the choice was dropped meanwhile)
         if (narrower) ++narrowSearches, againNarrow += choosingAgain;
         q.beamWidth = width;
         if (&b == &builder) ownWidth = q.beamWidth;
-        if (fit && noting && !notes.empty()) notes.back().widths.push_back(q.beamWidth);
+        if (Note* n = note(); n && fit) n->widths.push_back(q.beamWidth);
         BuildResult r = b.search(field, known, count, o.rules, o.timing, q, seed, p.searchThreads);
+        searching.store(nullptr);
+        const bool dropped = stale.load(); // (cutStale: the choice was dropped - what the search took is not learnt)
         const int layers = r.cut ? r.layers : depth;
-        if (layers >= 3) {
-            learn(duration_cast<nanoseconds>(Builder::Clock::now() - now).count() / (int64_t(q.width()) * layers * queues));
-        } else if (r.cut && unitNs) {
+        if (layers >= 3 && !dropped) {
+            learn(nanos(Builder::Clock::now() - now) / (int64_t(q.width()) * layers * queues));
+        } else if (r.cut && unitNs && !dropped) {
             unitNs += unitNs / 2; // (stopped at once: slower than was thought)
             if (unitNs > slowNs) slowNs = unitNs;
         }
-        cutSearches += r.cut;
-        if (r.cut) poor = true, againCut += choosingAgain;
-        if (r.cut && noting && !notes.empty()) ++notes.back().cut;
+        cutSearches += dropped ? 0 : r.cut;
+        if (r.cut) poor = true, againCut += choosingAgain && !dropped;
+        if (Note* n = note()) n->cut += r.cut;
         return r;
     }
 
@@ -420,39 +571,42 @@ protected:
     // beginChoice() and tells plansMade() when its plans are made.
     virtual int decide(const Observation& o, unsigned legal) = 0;
 
+    bool setupChoice() const override { return setupPicked; }
+
     int choose(const Observation& o, Pair, unsigned legal) override {
         const bool secondChoice = choosingAgain;
         const int first = lastChoice; // (the first choice of the same pair, when this is its second)
+        const bool firstSetup = setupPicked;
         // The second choice draws the numbers the first drew: where the third pair changes nothing
         // for it, it is the same choice, and the pair does not turn round by chance.
         if (secondChoice) rng = drawn;
         else drawn = rng;
         int id = decide(o, legal);
+        setupPicked = kind == Build;
         if (secondChoice) {
             // A second choice of which the clock stopped a search, or whose search of the own field
             // was much narrower than that of the first (Params::thinkAgainWidth), is not taken for
             // better than the first: the first stands.
-            const bool narrow = firstWidth > 0 && ownWidth > 0 && int64_t(ownWidth) * 100 < int64_t(firstWidth) * p.thinkAgainWidth;
-            if (first >= 0 && (poor || narrow)) id = first, ++againPoor;
+            const bool narrow = firstWidth > 0 && ownWidth > 0 && !atLeastPercent(ownWidth, p.thinkAgainWidth, firstWidth);
+            if (first >= 0 && (poor || narrow)) id = first, setupPicked = firstSetup, ++againPoor;
             else ++againMade;
         } else {
             firstWidth = ownWidth;
         }
-        if (noting && !notes.empty()) notes.back().id = id;
+        if (Note* n = note()) n->id = id;
         ++counts[kind];
         ++thinkCount;
         return lastChoice = id;
     }
+
+    bool setupPicked = false;
 
     // A choice begins (decide() calls this first): the clock is started - the game - or the notes of the round that is
     // played again are looked up - a tool. Returns the pairs the plans of the choice are made with. secondChoice: it is
     // the second choice of the pair (Params::thinkAgain).
     int beginChoice(const Observation& o, bool secondChoice) {
         poor = false, ownWidth = 0;
-        if (!secondChoice) {
-            firstPairs = 0;
-            for (int i = o.self().nextPair; firstPairs < 3 && firstPairs < p.x2Depth && o.mine().known(i); ++i) ++firstPairs;
-        }
+        if (!secondChoice) firstPairs = pairsShown(o);
         int pairs = p.x2Depth;
         if (p.thinkBudget > 0) {
             // The plans are not stopped by the clock: they are what an answer is made of. With three
@@ -481,10 +635,10 @@ protected:
     // The plans of the choice are made. three: both players had three pairs on the screen for them. (The game: what
     // they took is kept, for beginChoice() and again().)
     void plansMade(int pairs, bool secondChoice, bool three) {
-        if (p.thinkBudget <= 0) return;
-        const int64_t took = std::chrono::duration_cast<std::chrono::nanoseconds>(Builder::Clock::now() - began).count();
-        if (pairs >= 3 && three) plansNs = plansNs ? (3 * plansNs + took) / 4 : took;
-        if (secondChoice) againPlansNs = againPlansNs ? (3 * againPlansNs + took) / 4 : took;
+        if (p.thinkBudget <= 0 || stale.load()) return; // (cutStale: a dropped choice is not learnt from)
+        const int64_t took = nanos(Builder::Clock::now() - began);
+        if (pairs >= 3 && three) plansNs = blend(plansNs, took);
+        if (secondChoice) againPlansNs = blend(againPlansNs, took);
     }
 };
 

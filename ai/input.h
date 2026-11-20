@@ -22,8 +22,14 @@
 // take the buttons of the frame before or after: a tap is then neither lost
 // nor run into the next one; below the auto-repeat's delay).
 #include "../game/control.h"
+#include "fastest.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <future>
+#include <memory>
+#include <optional>
 #include <vector>
 
 namespace juraic::ai {
@@ -34,6 +40,10 @@ struct InputPath {
     int states = 0;               // states the search made (0 = the straight way)
     int frames() const { return int(buttons.size()); }
 };
+
+constexpr int reversePlacement(int id) {
+    return (id + PLACEMENTS / 2) % PLACEMENTS;
+}
 
 class InputPlanner {
 public:
@@ -61,6 +71,52 @@ public:
     // holds the down button only once the pair is turned and moved where it goes (downWhenPlaced) is not lost so.
     bool spareFrame = false;
     int64_t spareWays = 0; // ways planSure took so (for tools)
+    // planSure gives the way whose landing animation is over soonest among the buttons of every frame (ai/fastest.h:
+    // turns that push the pair aside as it falls, a pair moved on the ground, a pair turned over in a groove) when that
+    // is sooner than with the way above. With taps of one frame and every cell of the field sure only. false: the way
+    // above as it is.
+    bool fastest = false;
+    int fastestStates = 50000;                  // (FastestSearch::maxStates of a search made in planSure itself)
+    int64_t fasterWays = 0, framesSaved = 0;    // ways the search made shorter, and by how many frames in all (for tools)
+    // prepareFastest: the search for the way over soonest of a pair that is still to come, on a thread of its own, so
+    // that planSure has it when the pair appears (a search can take longer than the frame its buttons are for).
+    int fastestAhead = 0;                       // (FastestSearch::maxStates of a search made ahead; 0: none is made)
+    // planSure waits for a search made ahead for its pair that is still under way (for tests and tools that play frames
+    // faster than the clock: the same ways whatever the threads do). false: it searches itself within fastestStates.
+    bool aheadWaits = false;
+    int64_t aheadUsed = 0, aheadMissed = 0;     // ways planSure took from a search made before / searched itself (for tools)
+
+    // The search planSure would make for these, begun now on a thread of its own (nothing with `fastest` off). Asked
+    // again for the same pair it does nothing; asked for another, the search under way is given up.
+    void prepareFastest(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent) {
+        if (!fastest || fastestAhead <= 0 || tapHold != 1 || unsure13 || unsure14 || from.locked) return;
+        collect();
+        if (cached && cached->is(field, from, target, speedPercent) && (cached->ahead || !cached->gaveUp)) return;
+        if (ahead.job.valid() && ahead.asked.is(field, from, target, speedPercent)) return;
+        ahead.halt();
+        InputPath straight;
+        if (!planOver(field, from, target, timing, speedPercent, straight)) return;
+        Found a;
+        a.field = field, a.from = from, a.target = target, a.speed = speedPercent, a.ahead = true;
+        a.now = FastestSearch::ends(field, from, straight.buttons, timing, speedPercent);
+        quickest.low = low;
+        if (a.now <= 1 || quickest.estimate(field, from, target, timing, speedPercent) >= a.now) {
+            cached = std::move(a); // (no way can be over sooner: nothing to search)
+            return;
+        }
+        ahead.asked = a;
+        ahead.stop = std::make_shared<std::atomic<bool>>(false);
+        ahead.job = std::async(std::launch::async, [a, timing, speedPercent, states = fastestAhead, lowWay = low, stop = ahead.stop]() mutable {
+            FastestSearch search;
+            search.maxStates = states, search.low = lowWay, search.stop = stop.get();
+            a.found = search.find(a.field, a.from, a.target, timing, speedPercent, a.now - 1, a.buttons, a.soft, a.end);
+            a.states = search.states, a.gaveUp = search.gaveUp;
+            return a;
+        });
+    }
+    // A search made ahead is under way: the thread of prepareFastest has not finished (PlacementAgent, fastestAgain: a way
+    // not waited for is left as it is while one is; and tools and tests).
+    bool preparing() const { return ahead.job.valid() && ahead.job.wait_for(std::chrono::seconds(0)) != std::future_status::ready; }
 
     // A way to `target` when the cells unsure13 and unsure14 may be the other way (each of them on a field of its own):
     //  - plan()'s way, when it locks the pair at the target on each of those fields too (sureWays);
@@ -75,6 +131,28 @@ public:
     //  Then, with spareFrame, the way that holds the down button later when the one found is lost by a frame left out.
     bool planSure(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, InputPath& out) {
         if (!planOver(field, from, target, timing, speedPercent, out)) return false;
+        if (fastest && tapHold == 1 && !unsure13 && !unsure14) {
+            // (the end of the landing animation of the way above: only a way that is over sooner replaces it)
+            const int now = FastestSearch::ends(field, from, out.buttons, timing, speedPercent);
+            if (aheadWaits && ahead.job.valid() && ahead.asked.is(field, from, target, speedPercent)) ahead.job.wait();
+            collect();
+            if (cached && cached->is(field, from, target, speedPercent) && cached->now == now) {
+                ++aheadUsed; // (worked out ahead, or by a call before this one)
+            } else {
+                Found a;
+                a.field = field, a.from = from, a.target = target, a.speed = speedPercent, a.now = now;
+                quickest.maxStates = fastestStates, quickest.low = low, quickest.stop = nullptr;
+                a.found = now > 1 && quickest.find(field, from, target, timing, speedPercent, now - 1, a.buttons, a.soft, a.end);
+                a.states = quickest.states, a.gaveUp = quickest.gaveUp;
+                cached = std::move(a);
+                ++aheadMissed;
+            }
+            out.states += cached->states;
+            if (cached->found && cached->end < now) {
+                ++fasterWays, framesSaved += now - cached->end;
+                out.buttons = cached->buttons, out.softDropRows = cached->soft;
+            }
+        }
         if (spareFrame && tapHold > 1 && !downWhenPlaced && lostBySkip(field, from, target, timing, speedPercent, out)) {
             InputPath later;
             downWhenPlaced = true;
@@ -82,6 +160,45 @@ public:
             downWhenPlaced = false;
             if (found && !lostBySkip(field, from, target, timing, speedPercent, later)) out = std::move(later), ++spareWays;
         }
+        return true;
+    }
+
+    bool canReverse(Pair pair) const {
+        return pair.axis >= 1 && pair.axis <= MAX_COLORS && pair.axis == pair.child &&
+               tapHold == 1 && !unsure13 && !unsure14;
+    }
+
+    // A same-colour pair can reach the same field with its pieces exchanged.
+    // Keep the regular path on ties and bound the extra search within the input frame.
+    bool planEquivalent(const GameField& field, const PairControl& from, int& id, unsigned legal, Pair pair,
+                        const Timing& timing, const Rules& rules, InputPath& out) {
+        const bool planned = (legal >> id & 1) && planSure(field, from, placement(id), timing, rules.speedPercent, out);
+        const int reverse = reversePlacement(id);
+        if (!canReverse(pair) || !(legal >> reverse & 1)) return planned;
+
+        const Placement target = placement(reverse);
+        GameField placed = field;
+        const PlaceResult drop = place(placed, target, pair);
+        Wave wave;
+        if (findWaveFor(placed.f, wave, rules.clearCount, false)) return planned;
+
+        InputPath other;
+        constexpr int REVERSE_STATES = 256;
+        const int stateLimit = planned ? std::min(maxStates, REVERSE_STATES) : maxStates;
+        if (!plan(field, from, target, timing, rules.speedPercent, other, stateLimit)) return planned;
+        const PathTiming alternative = pathTiming(field, from, target, drop, timing, rules.speedPercent, other);
+        if (!alternative.check) return planned;
+        if (planned) {
+            GameField currentField = field;
+            const Placement wanted = placement(id);
+            const PlaceResult currentDrop = place(currentField, wanted, pair);
+            const PathTiming current = pathTiming(field, from, wanted, currentDrop, timing, rules.speedPercent, out);
+            if (current.check && (other.frames() > out.frames() || alternative.check >= current.check ||
+                                  (rules.softDropBonus && alternative.soft < current.soft))) return true;
+        }
+        other.softDropRows = alternative.soft;
+        out = std::move(other);
+        id = reverse;
         return true;
     }
 
@@ -177,7 +294,7 @@ public:
     // the buttons of the frame before). For a pair that is about to appear:
     // spawnPair(timing) with held set.
     bool plan(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent,
-              InputPath& out) {
+              InputPath& out, int stateLimit = -1) {
         out.buttons.clear();
         out.softDropRows = 0;
         out.states = 0;
@@ -189,7 +306,7 @@ public:
         int best = finish(field, from, target, timing, speedPercent, clean, soft, nullptr); // frames of the best path, 0 = none
         int bestNode = -1; // the state the best path leaves the search from; -1 = the straight way from `from`
         if (!best || !clean) {
-            search(field, from, target, timing, speedPercent, best, bestNode);
+            search(field, from, target, timing, speedPercent, best, bestNode, stateLimit < 0 ? maxStates : stateLimit);
             out.states = int(nodes.size());
         }
         if (!best) return false;
@@ -220,6 +337,24 @@ public:
     }
 
 private:
+    struct PathTiming {
+        int check = 0; // Frames through the landing animation, before checking for a chain.
+        int soft = 0;
+    };
+    static PathTiming pathTiming(const GameField& field, PairControl control, Placement target, const PlaceResult& drop,
+                                 const Timing& timing, int speedPercent, const InputPath& path) {
+        int soft = 0;
+        for (const uint8_t b : path.buttons) {
+            if (control.locked) return {};
+            soft += stepPair(control, field, b, timing, speedPercent).dropBonus;
+        }
+        if (!control.locked || control.x != target.x || control.dir != target.dir) return {};
+        const int split = timing.splitFrames(drop.split, target.x, drop.lockY);
+        const int land = split ? timing.landFrames : std::max(timing.lockWait, timing.landFrames - restedFrames(control, timing));
+        // The same settled field has the same waves and next-pair delay.
+        return {path.frames() + split + land, soft};
+    }
+
     static constexpr int MAX_FRAMES = 600;
     static constexpr uint8_t TAPS[8] = {BTN_LEFT,           BTN_RIGHT,           BTN_CW,              BTN_CCW,
                                         BTN_LEFT | BTN_CW,  BTN_LEFT | BTN_CCW,  BTN_RIGHT | BTN_CW,  BTN_RIGHT | BTN_CCW};
@@ -227,6 +362,39 @@ private:
     static constexpr uint8_t TAP_BUTTONS = BTN_LEFT | BTN_RIGHT | BTN_CW | BTN_CCW;
     static constexpr int ROW_13 = 12; // (row index)
     bool low = false; // keepLow for the way being planned
+    FastestSearch quickest; // (planSure with `fastest`)
+    // What a search for the way over soonest found: for which pair, and the end of the straight way it had to beat (`now`).
+    struct Found {
+        GameField field;
+        PairControl from;
+        Placement target{};
+        int speed = 100, now = 0;
+        bool ahead = false; // made by prepareFastest
+        bool found = false, gaveUp = false;
+        std::vector<uint8_t> buttons;
+        int soft = 0, end = 0, states = 0;
+        bool is(const GameField& f, const PairControl& p, Placement t, int s) const { return field == f && from == p && target.x == t.x && target.dir == t.dir && speed == s; }
+    };
+    std::optional<Found> cached; // the last search finished
+    // The search made ahead. (A planner copied takes no search with it; one that goes waits for its thread.)
+    struct Ahead {
+        std::future<Found> job;
+        std::shared_ptr<std::atomic<bool>> stop;
+        Found asked;
+        void halt() {
+            if (stop) stop->store(true);
+            if (job.valid()) job.wait();
+            job = std::future<Found>();
+        }
+        Ahead() = default;
+        Ahead(const Ahead&) {}
+        Ahead& operator=(const Ahead&) { return halt(), *this; }
+        ~Ahead() { halt(); }
+    } ahead;
+    // A search made ahead that has finished becomes the last search finished.
+    void collect() {
+        if (ahead.job.valid() && ahead.job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) cached = ahead.job.get();
+    }
 
     // waitQuickLock: a turn pressed now would not be taken.
     bool locked(const PairControl& p) const { return waitQuickLock && p.quickLock; }
@@ -355,6 +523,14 @@ private:
         k = k << 6 | p.groundFrames;
         k = k << 5 | p.quickWindow;
         k = k << 4 | p.quickLock; // (up to 15: Timing::quickTurnLock is 7 for the real game, play/realgame_read.h)
+        // (both 0 with the frame counts of this engine: Timing::liftWaits, quickRise)
+        k = k << 1 | uint64_t(p.lifted);
+        k = k << 3 | p.rise;
+        k |= uint64_t(p.liftFall) << 42;
+        k |= uint64_t(p.locking) << 50;
+        // (both 0 with the frame counts of this engine: Timing::turnLockFrames, quickFallFrames)
+        k |= uint64_t(p.turnWait & 15) << 51;
+        k |= uint64_t(p.quickFast & 15) << 55;
         return k;
     }
 
@@ -371,7 +547,7 @@ private:
     }
 
     void search(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, int& best,
-                int& bestNode) {
+                int& bestNode, int stateLimit) {
         size_t slots = 1024;
         while (slots < size_t(maxStates) * 4) slots *= 2;
         if (seenKey.size() != slots) seenKey.assign(slots, 0), seenStamp.assign(slots, 0), stamp = 0;
@@ -432,7 +608,7 @@ private:
                 }
                 if (best && int(priority(n)) >= best) continue;
                 if (seen(pack(n.pair))) continue;
-                if (int(nodes.size()) >= maxStates) return;
+                if (int(nodes.size()) >= stateLimit) return;
                 nodes.push_back(n);
                 const int index = int(nodes.size()) - 1;
                 // The straight way from here, unless a column stands in it.

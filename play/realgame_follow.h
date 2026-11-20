@@ -46,6 +46,9 @@ struct SideModel {
     int sends = 0;            // the garbage its chain would send
     int inAir = 0;            // clear readings in a row with one piece more at rest and a piece of a colour in the air
     uint8_t unsure = 0;       // columns read twelve high whose 13th row is a guess (garbage that may have fallen there)
+    // The pieces the notice of this side went down by in its last fall since its last pair appeared (garbage fallen, or
+    // offset by a chain): `falling` while it goes down, `fell` once it has risen again.
+    int fell = 0, falling = 0;
     int64_t lyingSince = -1;  // the frame the pair in play was first found lying
     // The chain of the pair last found put, played with the rules of the game from the frame it was found lying, a frame
     // a reading: what the AI is shown of this side while it runs (complete).
@@ -62,7 +65,7 @@ class Follower {
 public:
     Tracker tracker;
     SideSeen seen[2];           // what each side's events have told (taken as each reading is in)
-    juraic::Rules rules;        // those of the real game
+    juraic::Rules rules = juraic::realGameRules(); // those of the real game
     SideModel model[2];
     int notice[2] = {};         // the notice taken (Tracker's, unless more than the chains reckoned can have sent)
     int slack = 3;              // pieces the notice may rise beyond what was reckoned, and a tenth of the notice more
@@ -155,13 +158,38 @@ public:
                 const juraic::GameField was = m.core.field;
                 m.core.field = withHidden(t.under, was);
                 const bool garbage = m.known && t.under.f.count() > shown(was).f.count() && fits(m.core.field, was);
-                if (garbage && !putUnseen)
+                // (the garbage as the counts have it also after pairs put unseen - a column takes as many pieces whether
+                //  they fell before the pair or after it -, its 13th rows not sure all the same: on the real game two
+                //  pairs were turned and moved into the 13th row of a column eleven and twelve high that three rows
+                //  and one row of garbage had fallen on, taken as empty, and locked a column aside)
+                const int fell = m.falling > 0 ? m.falling : m.fell; // (how many fell, as the notice went down by them last)
+                if (garbage) {
                     m.core.field = withGarbage(t.under, was, rules.maxGarbagePerDrop / juraic::W, m.unsure);
-                else
+                } else {
                     m.unsure &= twelveHigh(t.under);
+                    // (garbage fell - the notice went down and the rows show more of it - on a field that is otherwise
+                    //  than the pairs followed left it too, a chain of a pair put unseen run: what each column took is
+                    //  not shown. As the count of the fall has it - every column fell / W, fell % W columns one more -
+                    //  the 13th row of a column read twelve high is not sure when what every column took, or one
+                    //  more, reaches it (the notice goes down by what a chain offsets too: nothing is taken as
+                    //  garbage for it). On a record of the real game nine pieces fell after a pair put unseen had
+                    //  made a chain, on a column eleven high among others: a pair moved into the 13th row there,
+                    //  taken as empty and sure, and locked a column aside.)
+                    if (m.known && fell > 0 && garbageShown(t.under) > garbageShown(shown(was))) {
+                        int before[juraic::W];
+                        was.heights(before);
+                        const int each = fell / juraic::W;
+                        for (int x = 0; x < juraic::W; ++x) {
+                            if (!(twelveHigh(t.under) >> x & 1) || before[x] > 12 || m.core.field.f.get(x, 12) != juraic::EMPTY) continue;
+                            const int need = 13 - before[x]; // (the pieces that put one into the 13th row)
+                            if (each + 1 >= need) m.unsure |= uint8_t(1u << x);
+                        }
+                    }
+                }
                 if (garbage && putUnseen)
                     for (int x = 0; x < juraic::W; ++x)
                         if ((twelveHigh(t.under) >> x & 1) && was.f.get(x, 12) == juraic::EMPTY) m.unsure |= uint8_t(1u << x);
+                m.fell = m.falling = 0;
                 // (a pair of the round before it, and it appears over no piece at all, or with the words of an all clear
                 //  standing over the field - the game shows them until the next chain takes the bonus, garbage fallen
                 //  under them or not -: the bonus goes with the next chain, so too when the chain that cleared the field
@@ -281,6 +309,13 @@ public:
             for (int y = h[x]; y < r[x]; ++y)
                 if (read.f.get(x, y) != juraic::GARBAGE) return false;
         return true;
+    }
+    // The pieces of garbage in the twelve rows of `read`.
+    static int garbageShown(const juraic::GameField& read) {
+        int n = 0;
+        for (int x = 0; x < juraic::W; ++x)
+            for (int y = 0; y < 12; ++y) n += read.f.get(x, y) == juraic::GARBAGE;
+        return n;
     }
     // The columns of `read` twelve high.
     static uint8_t twelveHigh(const juraic::GameField& read) {
@@ -669,6 +704,8 @@ private:
             const int fromLeft = std::min(rise, m.left);
             m.left -= fromLeft, m.budget = std::max(0, m.budget - (rise - fromLeft));
         }
+        if (t.notice < notice[s]) m.falling += notice[s] - t.notice;
+        else if (m.falling > 0) m.fell = m.falling, m.falling = 0;
         notice[s] = t.notice;
     }
 };

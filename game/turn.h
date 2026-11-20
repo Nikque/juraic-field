@@ -4,6 +4,7 @@
 // time is taken from the Timing tables. The AI searches with this, and the
 // frame-by-frame game uses the same pieces (convert, offset, dropGarbage).
 #include "../core/rng.h"
+#include <array>
 #include "field.h"
 #include "timing.h"
 
@@ -57,7 +58,8 @@ inline int offset(Incoming& own, int garbage) {
 // first, then the rest one each in distinct random columns.
 // placed[x] = pieces that stayed in column x (the 13th row is the limit).
 // Returns the number taken from `incoming`.
-inline int dropGarbage(GameField& g, Incoming& incoming, const Rules& rules, Rng& rng, int placed[W]) {
+inline int dropGarbage(GameField& g, Incoming& incoming, const Rules& rules, Rng& rng, int placed[W],
+                       const std::array<uint8_t, W>* observedOrder = nullptr) {
     const int n = incoming.confirmed < rules.maxGarbagePerDrop ? incoming.confirmed : rules.maxGarbagePerDrop;
     for (int x = 0; x < W; ++x) placed[x] = 0;
     if (n <= 0) return 0;
@@ -66,7 +68,8 @@ inline int dropGarbage(GameField& g, Incoming& incoming, const Rules& rules, Rng
     rng.partialShuffle(column, size_t(W), size_t(n % W));
     int count[W];
     for (int x = 0; x < W; ++x) count[x] = n / W;
-    for (int i = 0; i < n % W; ++i) ++count[column[i]];
+    // Consume the usual stream even for an observed drop so subsequent simulated drops keep their order.
+    for (int i = 0; i < n % W; ++i) ++count[observedOrder ? int((*observedOrder)[size_t(i)]) : column[i]];
     for (int x = 0; x < W; ++x) placed[x] = addGarbage(g, x, count[x]);
     return n;
 }
@@ -114,6 +117,7 @@ inline bool chainWave(PlayerCore& me, Incoming& opponent, const Rules& rules, in
     BitField& f = me.field.f;
     report = {};
     if (!findWaveFor(f, report.wave, rules.clearCount)) return false;
+    if (rules.clearTopGarbage) addTopGarbage(f, report.wave);
     ++chain.chains;
     const FieldBits erased = report.wave.cleared | report.wave.garbage;
     report.longestFall = longestFall(f, erased);

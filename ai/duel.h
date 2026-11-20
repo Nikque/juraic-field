@@ -62,6 +62,61 @@ struct DuelPlayer : PlayerCore {
     int fallen = 0;          // garbage pieces taken by all drops since the Duel was made
 };
 
+// The spawn input on a fixed board depends on occupied cells, timing, speed
+// and target. Colours affect the chain after lock, which is always simulated.
+struct SpawnInput {
+    int frames = 0, soft = 0, rested = 0;
+};
+
+inline SpawnInput tallSpawnInput(const GameField& field, Placement target, const Timing& timing, int speed) {
+    static thread_local InputPlanner planner;
+    static thread_local InputPath path;
+    PairControl pair = spawnPair(timing);
+    if (!planner.plan(field, pair, target, timing, speed, path)) return {};
+    for (const uint8_t b : path.buttons) stepPair(pair, field, b, timing, speed);
+    return {path.frames(), path.softDropRows, int(pair.groundFrames)};
+}
+
+class SpawnInputCache {
+public:
+    void configure(const Timing& timing, int speed) {
+        if (slots.empty()) slots.resize(512);
+        else if (speed == speedPercent && timing == clock) return;
+        clock = timing;
+        speedPercent = speed;
+        for (auto& slot : slots) slot.known = 0;
+    }
+
+    SpawnInput get(const GameField& field, Placement target) {
+        const FieldBits occupied = field.f.occupied();
+        unsigned ceiling = 0;
+        for (int x = 0; x < W; ++x) ceiling |= unsigned(field.row14[x] != EMPTY) << x;
+        uint64_t key = occupied.low() ^ std::rotl(occupied.high(), 25) ^ uint64_t(ceiling);
+        Slot& slot = slots[splitmix64(key) % slots.size()];
+        if (!slot.known || slot.occupied != occupied || slot.ceiling != ceiling) {
+            slot.occupied = occupied;
+            slot.ceiling = ceiling;
+            slot.known = 0;
+        }
+        const int id = placementId(target);
+        if (!(slot.known >> id & 1)) {
+            slot.input[id] = tallSpawnInput(field, target, clock, speedPercent);
+            slot.known |= 1u << id; // Includes unreachable routes, as in the ordinary table fallback.
+        }
+        return slot.input[id];
+    }
+
+private:
+    struct Slot {
+        FieldBits occupied{};
+        unsigned ceiling = 0, known = 0;
+        std::array<SpawnInput, PLACEMENTS> input{};
+    };
+    std::vector<Slot> slots;
+    Timing clock{};
+    int speedPercent = 0;
+};
+
 struct Duel {
     const Rules* rules = nullptr;   // of the Observation, which must outlive the Duel
     const Timing* timing = nullptr;
@@ -71,10 +126,12 @@ struct Duel {
     // The columns of garbage that does not fill a row are random in the game;
     // the AI cannot know them, so its reading takes them from here.
     Rng garbageRng[2]{Rng(0), Rng(0)};
+    std::array<std::optional<std::array<uint8_t, W>>, 2> nextGarbageOrder{};
     // Params::x3TallPaths. 0: placeFast takes the frame of the lock from the Timing tables, whatever
     // the field. n: from the buttons of InputPlanner when a column of n pieces or more stands between
     // the column the pair appears in and its placement (both pieces), or next to them.
     int tallPaths = 0;
+    SpawnInputCache* spawnInputs = nullptr; // Borrowed for one Gaze search, including its copied duels.
     // Params::handWait of the player who reads, for his own seat: player i leaves a pair alone this many
     // frames before its first button, so placeFast locks it that many frames later. 0 = the fastest input.
     // (On the safe side: the pair falls a little while it waits and a wait may end early, so the real lock is
@@ -84,7 +141,7 @@ struct Duel {
 
     Duel() = default;
     // The observation must be of two players.
-    explicit Duel(const Observation& o, uint64_t garbageSeed = 0) : rules(&o.rules), timing(&o.timing), frame(o.frame), state(o.state) {
+    explicit Duel(const Observation& o, uint64_t garbageSeed = 0) : rules(&o.rules), timing(&o.timing), frame(o.frame), state(o.state), nextGarbageOrder(o.nextGarbageOrder) {
         for (int i = 0; i < 2; ++i) {
             garbageRng[i] = Rng(garbageSeed, DUEL_GARBAGE_STREAM + uint64_t(i));
             const Player& s = o.player[i];
@@ -96,7 +153,11 @@ struct Duel {
             // A phase with `wait` frames left ends in the step of frame + wait - 1.
             const int64_t end = frame + s.wait - 1;
             switch (s.phase) {
-            case Phase::Next: p.phase = DuelPhase::Spawn, p.at = end; break;
+            case Phase::Next:
+                // (Observation::busyLeft: the seat's landing or chain ends first, as after a pair put)
+                if (o.busyLeft[i] > 0) p.phase = DuelPhase::Check, p.at = frame + o.busyLeft[i] - 1, p.chain.chains = o.busyChain[i] ? 1 : 0;
+                else p.phase = DuelPhase::Spawn, p.at = end;
+                break;
             case Phase::Control: p.phase = DuelPhase::Control; break;
             case Phase::Split: p.phase = DuelPhase::Check, p.at = end + timing->landFrames; break;
             case Phase::Land:
@@ -118,6 +179,7 @@ struct Duel {
             for (const DuelPlayer& p : player)
                 if (p.phase != DuelPhase::Control && p.phase != DuelPhase::Dead && p.at < next) next = p.at;
             if (next >= until) break;
+            if (next < frame) next = frame; // (a phase given with no frame left: ended in this frame)
             frame = next;
             int spawned = 0;
             for (int i = 0; i < 2; ++i) {
@@ -148,7 +210,9 @@ struct Duel {
                 if (p.phase != DuelPhase::Settle || p.at != frame) continue;
                 int heights[W], placed[W];
                 p.field.heights(heights);
-                p.dropped = dropGarbage(p.field, p.incoming, *rules, garbageRng[i], placed);
+                auto& order = nextGarbageOrder[size_t(i)];
+                p.dropped = dropGarbage(p.field, p.incoming, *rules, garbageRng[i], placed, order ? &*order : nullptr);
+                if (p.dropped > 0) order.reset();
                 p.fallen += p.dropped;
                 p.phase = DuelPhase::Spawn;
                 p.at = frame + (p.dropped ? timing->garbageFrames(heights, placed) : 0) + timing->nextFrames;
@@ -165,44 +229,34 @@ struct Duel {
     // Player i (in Control) puts the pair with the fastest input. The pair must
     // have appeared in this Duel (spawnFrame known), and the way to the
     // placement must be the straight one the Timing tables describe.
-    void placeFast(int i, Placement target, Pair pair) { put(i, target, pair, -1, 0, 0); }
+    void placeFast(int i, Placement target, Pair pair) { place(i, target, pair, -1, 0, 0); }
 
     // The same with the frame of the lock and the rows of soft drop given (a
     // pair observed in mid-air, a path that is not the straight one, waiting).
     // The first wave must not lie before `frame`. rested: the frames the pair will have lain on the ground
     // at that lock; the landing waited for after the lock is shorter by them (0 = none, or not counted).
+    // (lockFrame -1: placeFast)
     void place(int i, Placement target, Pair pair, int64_t lockFrame, int softDropRows, int rested = 0) {
-        put(i, target, pair, lockFrame, softDropRows, rested);
-    }
-
-private:
-    void put(int i, Placement target, Pair pair, int64_t lockFrame, int softDropRows, int rested) {
         DuelPlayer& p = player[i];
         const bool fastest = lockFrame < 0; // (placeFast: the frame of the lock is worked out here)
         int buttonFrames = 0, buttonSoft = 0; // the fastest buttons, when the tables do not describe the way (tallPaths)
-        if (lockFrame < 0 && tallPaths > 0) {
+        if (fastest && tallPaths > 0) {
             int h[W], top = 0;
             p.field.heights(h);
             const int childX = target.childX();
             const int from = std::min(int(target.x), std::min(childX, SPAWN_X)), to = std::max(int(target.x), std::max(childX, SPAWN_X));
             for (int x = from > 0 ? from - 1 : 0; x <= to + 1 && x < W; ++x) top = h[x] > top ? h[x] : top;
             if (top >= tallPaths) {
-                static thread_local InputPlanner planner;
-                static thread_local InputPath path;
-                if (planner.plan(p.field, spawnPair(*timing), target, *timing, rules->speedPercent, path)) {
-                    buttonFrames = path.frames(), buttonSoft = path.softDropRows;
-                    // (a pair that lay on the ground before its lock has that much less of the landing left: advancePlayer)
-                    PairControl q = spawnPair(*timing);
-                    for (const uint8_t b : path.buttons) stepPair(q, p.field, b, *timing, rules->speedPercent);
-                    rested = int(q.groundFrames);
-                }
+                const SpawnInput input = spawnInputs ? spawnInputs->get(p.field, target)
+                    : tallSpawnInput(p.field, target, *timing, rules->speedPercent);
+                buttonFrames = input.frames, buttonSoft = input.soft, rested = input.rested;
             }
         }
         const PlaceResult r = juraic::place(p.field, target, pair);
-        if (lockFrame < 0 && buttonFrames > 0) {
+        if (fastest && buttonFrames > 0) {
             lockFrame = p.spawnFrame + buttonFrames - 1; // (the first button moves the pair in the frame it appears)
             softDropRows = buttonSoft;
-        } else if (lockFrame < 0) {
+        } else if (fastest) {
             lockFrame = p.spawnFrame + timing->placeFrames(target.x, r.lockY) - timing->landFrames - timing->nextFrames;
             softDropRows = SPAWN_Y - r.lockY + timing->dropLockPoints + timing->dropLandPoints; // a point for every row with the down key, and those of landing with it
         }

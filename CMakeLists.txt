@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(juraic_field VERSION 0.9.7.5 LANGUAGES CXX)
+project(juraic_field VERSION 0.9.8 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
@@ -184,7 +184,10 @@ if(BUILD_TESTING)
     add_test(NAME arena_lines_on_this_machine COMMAND arena_tests)
     # Versus AI (ai/).
     add_executable(ai_tests tests/ai_tests.cpp ai/observe.h ai/duel.h ai/input.h ai/detect.h ai/params.h ai/build.h ai/gaze.h ai/value.h ai/exchange.h ai/pace.h ai/tactics.h ai/level.h)
-target_link_libraries(ai_tests PRIVATE Threads::Threads)
+    target_link_libraries(ai_tests PRIVATE Threads::Threads)
+    if(MSVC)
+        target_link_options(ai_tests PRIVATE /STACK:8388608)
+    endif()
     add_test(NAME ai COMMAND ai_tests)
     # The reading of the real game's screen (play/realgame_read.h, realgame_follow.h), with pictures drawn from rounds of this program.
     add_executable(realgame_tests tests/realgame_tests.cpp play/realgame_read.h play/realgame_follow.h play/realgame_drive.h play/realgame_film.h play/realgame_log.h play/realgame_menu.h play/realgame_pace.h ai/observe.h ai/agents.h)

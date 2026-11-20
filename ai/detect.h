@@ -61,12 +61,32 @@ inline constexpr auto COLUMN_BYTES = [] {
 }();
 // The cells and their neighbours above, below, left and right.
 inline FieldBits around(FieldBits b) { return b | b.up() | b.down() | b.left() | b.right(); }
+// The lowest free cell of every column, within the twelve rows.
+inline FieldBits lowestFree(FieldBits occupied) { return (occupied.up() | FieldBits::fill(1)).without(occupied) & MASK_12; }
+
+// On a field where no group of four stands, by the links of its pieces (BitField::links): the pieces of a group of two
+// or three, and the pieces of a group of three.
+struct Groups {
+    FieldBits linked, three;
+};
+inline Groups groupsOf(const Links& k) {
+    const FieldBits upDown = k.u | k.d, leftRight = k.l | k.r;
+    const FieldBits middle = (k.u & k.d) | (k.l & k.r) | (upDown & leftRight); // the middle one of three
+    return {upDown | leftRight, middle | (middle & k.u).up() | (middle & k.d).down() | (middle & k.r).right() | (middle & k.l).left()};
+}
+
+// Does something clear on `f`? (four: the test without a flood fill; any other clear count: the full search)
+inline bool anyClear(const BitField& f, const Rules& rules) {
+    Wave w;
+    return rules.clearCount == 4 ? f.hasClear() : findWaveFor(f, w, rules.clearCount, false);
+}
 
 // Runs the chain of a field in which something may clear. Returns the number of waves.
 // timed = false: the frames are not counted (Trial::frames stays as it is).
 inline int runTrialChain(BitField& f, const Rules& rules, const Timing& timing, Trial& t, bool timed = true) {
     Wave w;
     while (findWaveFor(f, w, rules.clearCount)) {
+        if (rules.clearTopGarbage) addTopGarbage(f, w);
         ++t.chains;
         const FieldBits erased = w.cleared | w.garbage;
         if (timed) t.frames += timing.waveFrames(longestFall(f, erased));
@@ -109,9 +129,7 @@ inline int detectPlain(const GameField& g, const Rules& rules, const Timing& tim
             BitField f = g.f;
             for (int n = 1; n <= maxAdd && h[x] + n <= 12; ++n) {
                 f.set(x, h[x] + n - 1, color);
-                // (four: the test without a flood fill; any other clear count: the full search)
-                Wave w;
-                if (rules.clearCount == 4 ? !f.hasClear() : !findWaveFor(f, w, rules.clearCount, false)) continue;
+                if (!anyClear(f, rules)) continue;
                 Trial& t = out.item[out.count];
                 t = Trial{int8_t(x), color, int8_t(n), int8_t(h[x])};
                 runTrialChain(f, rules, timing, t, timed);
@@ -153,12 +171,9 @@ inline int detect(const GameField& g, const Rules& rules, const Timing& timing, 
     if (!(g.f.normal() & MASK_12).subsetOf(known)) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
     out.count = 0;
     out.quiet = true;
-    const FieldBits upDown = k.u | k.d, leftRight = k.l | k.r;
-    const FieldBits linked = upDown | leftRight;                               // a piece of a group of two or three
-    const FieldBits middle = (k.u & k.d) | (k.l & k.r) | (upDown & leftRight); // the middle one of three
-    const FieldBits three = middle | (middle & k.u).up() | (middle & k.d).down() | (middle & k.r).right() | (middle & k.l).left();
+    const auto [linked, three] = groupsOf(k);
     // The cells the first, second and third piece added to a column would fill (within the twelve rows).
-    const FieldBits top1 = (occ.up() | floor).without(occ) & MASK_12, top2 = top1.up() & MASK_12, top3 = top2.up() & MASK_12;
+    const FieldBits top1 = lowestFree(occ), top2 = top1.up() & MASK_12, top3 = top2.up() & MASK_12;
     const FieldBits has2 = top2.down(), has3 = top3.down().down(); // the first cell of the columns that have a second, a third
     uint64_t needs[3] = {0, 0, 0}; // bit 8 * x + c of needs[n - 1]: n pieces of colour number c are the fewest that clear on column x
     for (int c = 0; c < colors; ++c) {
@@ -193,7 +208,9 @@ inline int detect(const GameField& g, const Rules& rules, const Timing& timing, 
         t = Trial{int8_t(x), color, int8_t(n), int8_t(h[x])};
         Wave w;
         w.cleared = group, w.pieces = size, w.colors = w.groups = 1, w.groupBonus = groupBonus(size);
-        const FieldBits erased = group | g.f.garbageNextTo(group);
+        w.garbage = g.f.garbageNextTo(group);
+        if (rules.clearTopGarbage) addTopGarbage(g.f, w);
+        const FieldBits erased = group | w.garbage;
         t.chains = 1;
         if (timed) t.frames = timing.waveFrames(longestFall(g.f, erased)); // (the added pieces lie on top: nothing falls because of them)
         t.points = gameWaveScore(w, 1);
@@ -228,11 +245,6 @@ struct KeyPlan {
     int8_t keyX = 0;
     Cell keyColor = EMPTY;
 };
-
-inline bool anyClear(const BitField& f, const Rules& rules) {
-    Wave w;
-    return rules.clearCount == 4 ? f.hasClear() : findWaveFor(f, w, rules.clearCount, false);
-}
 
 // Runs the trial of `k.t` (added pieces of color on column x) with the key piece
 // of k on the field: on another column it is there first, on the trigger's
@@ -289,13 +301,8 @@ inline int stallKeys(const BitField& stall, const Rules& rules, int8_t keyX[], C
 // pieces or more together. All columns at once; the answers come in the order of stallKeys (by
 // column: the colour of the piece on the left, then of the one on the right, then of the one below).
 inline int stallKeysQuiet(const BitField& stall, int8_t keyX[], Cell keyColor[], int most) {
-    const Links k = stall.links();
-    const FieldBits upDown = k.u | k.d, leftRight = k.l | k.r;
-    const FieldBits linked = upDown | leftRight;                               // a piece of a group of two or three
-    const FieldBits middle = (k.u & k.d) | (k.l & k.r) | (upDown & leftRight); // the middle one of three
-    const FieldBits three = middle | (middle & k.u).up() | (middle & k.d).down() | (middle & k.r).right() | (middle & k.l).left();
-    const FieldBits occ = stall.occupied();
-    const FieldBits top = (occ.up() | FieldBits::fill(1)).without(occ) & MASK_12; // the lowest free cell of each column
+    const auto [linked, three] = groupsOf(stall.links());
+    const FieldBits top = lowestFree(stall.occupied());
     const FieldBits normal = stall.normal() & MASK_12;
     // Seen from a free cell: the piece on its left (l), on its right (r) and below it (b).
     const FieldBits nl = normal.right(), nr = normal.left(), nb = normal.up();

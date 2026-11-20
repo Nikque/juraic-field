@@ -240,6 +240,40 @@ static void testGarbage() {
     check(h[0] == 7 && h[1] == 5 && h[5] == 5, "garbage rows");
 }
 
+// ---- garbage of the 13th row (Rules::clearTopGarbage) ----------------------------------------
+static void testTopGarbage() {
+    // Rows 1-11 garbage. Row 12: colour 1 in columns 1-4 (they clear), colour 2 in column 5, colour 3 in column 6.
+    // Row 13: colour 2 above column 1, garbage right above column 2 (above a cleared piece), garbage above column 5
+    // (diagonal to the cleared piece of column 4) and above column 6 (beside that one).
+    PlayerCore start;
+    for (int x = 0; x < W; ++x)
+        for (int y = 0; y < 11; ++y) start.field.f.set(x, y, GARBAGE);
+    for (int x = 0; x < 4; ++x) start.field.f.set(x, 11, 1);
+    start.field.f.set(4, 11, 2), start.field.f.set(5, 11, 3);
+    start.field.f.set(0, 12, 2), start.field.f.set(1, 12, GARBAGE), start.field.f.set(4, 12, GARBAGE), start.field.f.set(5, 12, GARBAGE);
+    for (int on = 0; on < 2; ++on) {
+        Rules r;
+        r.clearTopGarbage = on != 0;
+        PlayerCore me = start;
+        Incoming opp;
+        ChainState chain;
+        WaveReport w;
+        check(chainWave(me, opp, r, 70, chain, w), "13th row: the wave does not clear");
+        check(w.points == 40 && me.scoring.score == 40, "13th row: the garbage of the 13th row changes the score");
+        check(w.wave.garbage.count() == (on ? 5 : 4), "13th row: wrong garbage cleared");
+        const BitField& f = me.field.f;
+        int h[W];
+        f.heights(h);
+        check(h[0] == 11 && f.get(0, 10) == 2 && h[2] == 10 && h[3] == 10 && h[4] == 13 && h[5] == 13 && f.get(4, 12) == GARBAGE &&
+                  f.get(5, 12) == GARBAGE,
+              "13th row: the garbage diagonal to or beside a cleared piece is not left");
+        check(on ? h[1] == 10 && f.get(1, 10) == EMPTY : h[1] == 11 && f.get(1, 10) == GARBAGE,
+              "13th row: the garbage right above a cleared piece");
+        check(!chainWave(me, opp, r, 70, chain, w), "13th row: a second wave");
+    }
+    check(Rules{}.clearTopGarbage && realGameRules().clearTopGarbage, "13th row: the defaults");
+}
+
 // ---- log for the independent Python simulator ---------------------------------------------
 static std::string cells(const GameField& g) {
     std::string s;
@@ -320,6 +354,7 @@ int main(int argc, char** argv) {
         testWaves();
         testPlacements();
         testGarbage();
+        testTopGarbage();
         if (argc > 1) writeLog(argv[1], 600);
         std::cout << "game tests passed\n";
         return 0;

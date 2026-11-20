@@ -28,6 +28,10 @@ namespace juraic::ai {
 
 constexpr uint64_t QUEUE_STREAM = 0x7175657565; // random streams of the made-up pairs
 
+// The placements of `legal` that give different fields for `pair`: a pair of one colour gives the same fields down and
+// left as up and right (placements 0 to 10).
+inline unsigned differentFields(unsigned legal, Pair pair) { return pair.axis == pair.child ? legal & ((1u << 11) - 1) : legal; }
+
 // The bases human players build on: the forms a round is started with, as they
 // are named and drawn in guides for players (folds such as GTR and its
 // relatives, stairs, stacked rows of three, and others), and as seen in match
@@ -131,9 +135,9 @@ inline int buildValue(const GameField& g, const Rules& rules, const Timing& timi
         const int value = t.chains * p.evChain - t.added * p.evKey + t.y * p.evFireHeight;
         if (value > best) best = value;
     }
-    // A key piece left out is a debt: the fuller the field, the less room and time to pay it. (The
-    // user: with two or more left out a short attack is hard to answer, with one it is easier. So
-    // one at most is counted; from keyNoneFrom cells on, none.)
+    // A key piece left out is a debt: the fuller the field, the less room and time to pay it. (With
+    // two or more left out a short attack is hard to answer, with one it is easier. So one at most
+    // is counted; from keyNoneFrom cells on, none.)
     if (p.evKeyed && !(p.keyNoneFrom > 0 && g.f.count() >= p.keyNoneFrom)) {
         // The same chains carried on with a key piece (detect.h): a chain that one piece more
         // would make longer is worth the waves that stand, evKeyedWave for each wave the key
@@ -431,13 +435,14 @@ public:
         return {rules.palette[size_t(pair / colors)], rules.palette[size_t(pair % colors)]};
     }
 
-    // Made-up pairs of four colours that keep every colour coming: the six pairs of two different
-    // colours in turn, ordered so that two pairs in a row share no colour where that can be (the
-    // three ways to split four colours in two and two, one after the other). Queue q starts at
-    // pair q of the round, so the six queues begin with the six pairs. The pair number n of queue q.
+    // The six pairs of two different colours of four, ordered so that two pairs in a row share no colour where that can
+    // be (the three ways to split four colours in two and two, one after the other): the round of turnPair and mixPair.
+    static constexpr int8_t TWO_COLORS[6][2] = {{0, 1}, {2, 3}, {0, 2}, {1, 3}, {0, 3}, {1, 2}};
+
+    // Made-up pairs of four colours that keep every colour coming: the six pairs of TWO_COLORS in turn. Queue q starts
+    // at pair q of the round, so the six queues begin with the six pairs. The pair number n of queue q.
     static Pair turnPair(const Rules& rules, int q, int n) {
-        static constexpr int8_t ROUND[6][2] = {{0, 1}, {2, 3}, {0, 2}, {1, 3}, {0, 3}, {1, 2}};
-        const int8_t* c = ROUND[(q + n) % 6];
+        const int8_t* c = TWO_COLORS[(q + n) % 6];
         return {rules.palette[size_t(c[0])], rules.palette[size_t(c[1])]};
     }
 
@@ -449,13 +454,12 @@ public:
     // of one colour; a queue has every colour eight times in sixteen pairs. The pair number n of queue q
     // (for any number of queues: queue q + 8 starts where queue q does, with other pairs of one colour).
     static Pair mixPair(const Rules& rules, int q, int n) {
-        static constexpr int8_t ROUND[6][2] = {{0, 1}, {2, 3}, {0, 2}, {1, 3}, {0, 3}, {1, 2}};
         const int at = q + n; // the place counted from the start of queue 0; before it stand at / 4 pairs of one colour
         if (at % 4 == 3) {
             const Cell one = rules.palette[size_t((at / 4 + q) % 4)];
             return {one, one};
         }
-        const int8_t* c = ROUND[(at - at / 4) % 6];
+        const int8_t* c = TWO_COLORS[(at - at / 4) % 6];
         return {rules.palette[size_t(c[0])], rules.palette[size_t(c[1])]};
     }
 
@@ -509,6 +513,7 @@ private:
         }
     };
     struct Work {
+        unsigned digRoots = 0; // First placements which open the field with a small clear.
         std::vector<Node> layer, next;
         std::vector<std::vector<Made>> made; // the fields of a layer by the part that made them (with a Crew)
         std::vector<Tally> tally;
@@ -547,6 +552,7 @@ private:
     }
     // A search that starts at the root.
     static void start(Work& w, const GameField& root, const Params& p) {
+        w.digRoots = 0;
         w.seen.assign(slotsFor(p), 0);
         w.nodes = 0, w.cut = false, w.layers = 0;
         for (int id = 0; id < PLACEMENTS; ++id) {
@@ -559,6 +565,7 @@ private:
     // A search that goes on from the layers another has made. (The placements tried there count
     // for every queue, as when each made them itself.)
     static void resume(Work& w, const Work& from, const Params& p) {
+        w.digRoots = from.digRoots;
         w.seen.assign(slotsFor(p), 0);
         w.nodes = from.nodes, w.cut = from.cut, w.layers = from.layers;
         for (int id = 0; id < PLACEMENTS; ++id) {
@@ -566,6 +573,31 @@ private:
             for (int n = 0; n < HORIZONS; ++n) w.at[id][n] = from.at[id][n];
         }
         w.layer = from.layer;
+    }
+
+    static bool betterNode(const Node& a, const Node& b) {
+        return a.value != b.value ? a.value > b.value : a.order < b.order;
+    }
+
+    // Keep one continuation of a small digging move alive. The chain found
+    // underneath still has to compete with those under the ordinary moves.
+    static void trimLayer(std::vector<Node>& nodes, size_t keep, unsigned digRoots) {
+        if (nodes.size() <= keep) return;
+        const auto middle = nodes.begin() + std::ptrdiff_t(keep);
+        if (!digRoots) {
+            std::nth_element(nodes.begin(), middle, nodes.end(), betterNode);
+        } else {
+            const Node* best = nullptr;
+            for (const Node& node : nodes) {
+                if ((digRoots >> node.first & 1) && (!best || betterNode(node, *best))) best = &node;
+            }
+            const int order = best ? best->order : -1;
+            std::nth_element(nodes.begin(), middle, nodes.end(), [&](const Node& a, const Node& b) {
+                const bool keepA = a.order == order, keepB = b.order == order;
+                return keepA != keepB ? keepA : betterNode(a, b);
+            });
+        }
+        nodes.resize(keep);
     }
 
     // With a Crew: the fields of a layer are made in parts of MAKE_GRAIN fields of the layer before
@@ -614,6 +646,16 @@ private:
                 if (placed.split) c.lost += p.evTearFrame * timing.splitFrames(placed.split, placement(id).x, placed.lockY);
                 return true;
             };
+            // Every placement of the pair on field n, into c: made(c) for each field of the next layer (none when the
+            // layer is blind).
+            const auto children = [&](const Node& n, Node& c, Tally& t, const auto& made) {
+                const unsigned legal = differentFields(legalPlacements(n.g), pair);
+                for (int id = 0; id < PLACEMENTS; ++id) {
+                    if (!(legal >> id & 1)) continue;
+                    ++t.nodes;
+                    if (child(n, id, c, t) && !blind) made(c);
+                }
+            };
             const auto take = [&](const Tally& t) {
                 w.nodes += t.nodes;
                 for (int id = 0; id < PLACEMENTS; ++id) {
@@ -632,16 +674,11 @@ private:
                         w.cut = true;
                         break;
                     }
-                    unsigned legal = legalPlacements(n.g);
-                    if (pair.axis == pair.child) legal &= (1u << 11) - 1; // the other two directions give the same field
-                    for (int id = 0; id < PLACEMENTS; ++id) {
-                        if (!(legal >> id & 1)) continue;
-                        ++t.nodes;
-                        if (!child(n, id, c, t) || blind) continue;
-                        if (!insert(w.seen, KeyHash()(c.g.f.key()))) continue;
-                        c.order = int(w.next.size());
-                        w.next.push_back(c);
-                    }
+                    children(n, c, t, [&](Node& made) {
+                        if (!insert(w.seen, KeyHash()(made.g.f.key()))) return;
+                        made.order = int(w.next.size());
+                        w.next.push_back(made);
+                    });
                 }
                 take(t);
             } else {
@@ -660,18 +697,11 @@ private:
                     } else {
                         Made c;
                         const size_t end = (k + 1) * MAKE_GRAIN < parents ? (k + 1) * MAKE_GRAIN : parents;
-                        for (size_t i = k * MAKE_GRAIN; i < end; ++i) {
-                            const Node& n = w.layer[i];
-                            unsigned legal = legalPlacements(n.g);
-                            if (pair.axis == pair.child) legal &= (1u << 11) - 1;
-                            for (int id = 0; id < PLACEMENTS; ++id) {
-                                if (!(legal >> id & 1)) continue;
-                                ++t.nodes;
-                                if (!child(n, id, c.node, t) || blind) continue;
-                                c.key = KeyHash()(c.node.g.f.key());
+                        for (size_t i = k * MAKE_GRAIN; i < end; ++i)
+                            children(w.layer[i], c.node, t, [&](const Node& made) {
+                                c.key = KeyHash()(made.g.f.key());
                                 out.push_back(c);
-                            }
-                        }
+                            });
                     }
                     w.tally[k] = t;
                 });
@@ -722,20 +752,24 @@ private:
                 }
             }
             // The best `width`, in one fixed order whatever the library does with equal values.
-            const auto better = [](const Node& a, const Node& b) { return a.value != b.value ? a.value > b.value : a.order < b.order; };
+            if (p.readMidgame && depth == 0 && knownCount > 0 && width >= 16) {
+                const auto& root = w.layer.front().g.f;
+                const int garbage = root.garbage().count();
+                if (garbage) {
+                    const int colors = root.normal().count();
+                    for (const Node& node : w.next) {
+                        if (node.g.f.garbage().count() < garbage && colors + 2 - node.g.f.normal().count() <= 8)
+                            w.digRoots |= 1u << node.first;
+                    }
+                }
+            }
             if (sift) {
                 const size_t keep = size_t(width) * size_t(p.beamSift);
-                if (w.next.size() > keep) {
-                    std::nth_element(w.next.begin(), w.next.begin() + std::ptrdiff_t(keep), w.next.end(), better);
-                    w.next.resize(keep);
-                }
+                trimLayer(w.next, keep, w.digRoots);
                 for (Node& n : w.next) n.value = buildValue(n.g, rules, timing, p) - n.lost;
             }
-            if (int(w.next.size()) > width) {
-                std::nth_element(w.next.begin(), w.next.begin() + width, w.next.end(), better);
-                w.next.resize(size_t(width));
-            }
-            std::sort(w.next.begin(), w.next.end(), better);
+            trimLayer(w.next, size_t(width), w.digRoots);
+            std::sort(w.next.begin(), w.next.end(), betterNode);
             w.layer.swap(w.next);
             w.layers = depth + 1;
             {

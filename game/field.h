@@ -146,6 +146,12 @@ inline bool findWaveFor(const BitField& f, Wave& w, int clearCount, bool details
     return true;
 }
 
+// Rules::clearTopGarbage: the garbage in the 13th row right above a cleared piece joins the garbage of the wave `w`
+// found on `f` (no points: the score of a wave counts the coloured pieces alone).
+inline void addTopGarbage(const BitField& f, Wave& w) {
+    w.garbage |= (w.cleared.up() & f.garbage()).without(MASK_12);
+}
+
 // Score of one wave. Unlike waveScore of core/ the multiplier is capped at 999
 // and the chain bonus goes on beyond the 19th chain (32 more per chain).
 constexpr int chainBonus(int chain) {
