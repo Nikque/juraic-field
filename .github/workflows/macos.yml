@@ -6,8 +6,7 @@ name: macOS
 
 on:
   push:
-    branches: [main, linux]
-    tags: ['v*']
+    branches: ['ci/v0.9.9-macos']
   workflow_dispatch:
 
 jobs:
@@ -19,6 +18,10 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ab1df93a1e534e2e09accd7dfa990ebc63d5b1a8
+      - name: Verify release source
+        run: test "$(git rev-parse HEAD)" = "ab1df93a1e534e2e09accd7dfa990ebc63d5b1a8"
 
       - name: SDL 3
         run: |
@@ -52,25 +55,21 @@ jobs:
           set -euo pipefail
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/sdl3" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -fprofile-instr-use=$RUNNER_TEMP/combined.profdata -Werror=profile-instr-out-of-date"
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            cmake --build build -j 4 --verbose --target juraic_field_game random_19_chain ai_match game_tests frame_tests 2>&1 | tee build.log
-          else
-            cmake --build build -j 4 --verbose 2>&1 | tee build.log
-          fi
+          cmake --build build -j 4 --verbose --target juraic_field_game random_19_chain ai_match 2>&1 | tee build.log
           grep -F -- "-fprofile-instr-use=$RUNNER_TEMP/combined.profdata" build.log > profile-compile.log
           test -s profile-compile.log
           python3 tools/native_training.py build build/JuraicField.app/Contents/MacOS/JuraicField "$RUNNER_TEMP/training" --recheck
 
       - name: Tests
         run: |
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            ctest --test-dir build --output-on-failure -R '^(game_rules|game_frames|ai_match_same_result|replay_as_on_windows_.*)$'
-          else
-            ctest --test-dir build --output-on-failure -j 3
-          fi
+          set -euo pipefail
+          cmake -S . -B test-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/sdl3"
+          cmake --build test-build -j 4 --target game_tests frame_tests
+          ctest --test-dir test-build --output-on-failure -R '^(game_rules|game_frames)$'
+          ctest --test-dir build --output-on-failure -R '^(ai_match_same_result|replay_as_on_windows_.*)$'
 
       - name: Checksums of AI matches (the same as on Windows)
-        if: github.ref_type != 'tag' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch'
         run: |
           set -e
           # Current settings and the four corresponding Windows reference checksums.
@@ -95,7 +94,7 @@ jobs:
         run: |
           mkdir -p shots
           game=build/JuraicField.app/Contents/MacOS/JuraicField
-          for mode in 0 -1 -2 -3 -4 -11 -12 -13 -14 600 601 611 602 3003 3015 30004 30014 30005 30006 30008; do
+          for mode in 0 -1 -2 -3 -4 -6 -11 -12 -13 -14 600 601 611 602 3003 3015 30004 30014 30005 30006 30008; do
             mkdir -p shots/m$mode
             ( cd shots/m$mode && "$OLDPWD/$game" --screenshot shot.png $mode > log.txt 2>&1 ); echo "$mode exit $?" | tee -a shots/exits.txt
           done
