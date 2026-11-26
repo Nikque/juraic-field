@@ -4,8 +4,7 @@ name: Android
 
 on:
   push:
-    branches: [main, linux]
-    tags: ['v*']
+    branches: ['ci/v0.9.9-android']
   workflow_dispatch:
 
 jobs:
@@ -16,6 +15,10 @@ jobs:
       SDL_SHA256: 9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ab1df93a1e534e2e09accd7dfa990ebc63d5b1a8
+      - name: Verify release source
+        run: test "$(git rev-parse HEAD)" = "ab1df93a1e534e2e09accd7dfa990ebc63d5b1a8"
 
       - uses: actions/setup-java@v5
         with:
@@ -32,19 +35,38 @@ jobs:
           cp -r "$RUNNER_TEMP/SDL3-$SDL_VERSION/android-project/gradlew" "$RUNNER_TEMP/SDL3-$SDL_VERSION/android-project/gradle" android/
           echo "NDK: $ANDROID_NDK_LATEST_HOME"
 
+      - name: Use the Google Cloud mirror of Maven Central
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/central.gradle" <<'GRADLE'
+          beforeProject { project ->
+              [project.buildscript.repositories, project.repositories].each { repos ->
+                  repos.google()
+                  repos.maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }
+                  repos.withType(org.gradle.api.artifacts.repositories.MavenArtifactRepository).all { repository ->
+                      if (repository.url?.host in ["repo.maven.apache.org", "repo1.maven.org"]) {
+                          repository.url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+                      }
+                  }
+              }
+          }
+          GRADLE
+          curl --fail --silent --show-error --retry 3 -o "$RUNNER_TEMP/kotlin.pom" "https://maven-central.storage-download.googleapis.com/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/1.9.20/kotlin-stdlib-jdk8-1.9.20.pom"
+
       - name: APK
         working-directory: android
         env:
           RELEASE_KEY: ${{ secrets.ANDROID_RELEASE_KEY }}
           RELEASE_PASSWORD: ${{ secrets.ANDROID_RELEASE_PASSWORD }}
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug 2>&1 | tee ../gradle.log
+          ./gradlew --init-script "$RUNNER_TEMP/central.gradle" --no-daemon assembleDebug 2>&1 | tee ../gradle.log
           # (the APK to give out, signed with the key of the repository's secrets when they are there; the file of the
           #  key is in the temporary folder of the job, which goes with it)
           if [ -n "$RELEASE_KEY" ]; then
             echo "$RELEASE_KEY" | base64 -d > "$RUNNER_TEMP/release.p12"
-            ./gradlew --no-daemon assembleRelease -PreleaseStore="$RUNNER_TEMP/release.p12" -PreleasePassword="$RELEASE_PASSWORD" -PreleaseAlias=juraicfield 2>&1 | tee -a ../gradle.log
+            ./gradlew --init-script "$RUNNER_TEMP/central.gradle" --no-daemon assembleRelease -PreleaseStore="$RUNNER_TEMP/release.p12" -PreleasePassword="$RELEASE_PASSWORD" -PreleaseAlias=juraicfield 2>&1 | tee -a ../gradle.log
             ls -l app/build/outputs/apk/release/
             # (the signature checked, and whose it is)
             apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
@@ -57,7 +79,7 @@ jobs:
             unzip -p "$apk" assets/game/files.txt > ../release-assets.txt
             test -s ../release-assets.txt
             sha256sum "$apk" > ../release-sha256.txt
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          else
             echo "A tagged Android distribution requires the repository signing key." >&2
             exit 1
           fi
@@ -83,64 +105,3 @@ jobs:
             android/app/build/outputs/apk/debug/app-debug.apk
             android/app/build/outputs/apk/release/*.apk
 
-  # The game started on an emulator of Android (x86_64, Android 14): installed, opened, the screen taken after half a
-  # minute, the log kept, and whether the game still runs.
-  emulator:
-    runs-on: ubuntu-24.04
-    env:
-      SDL_VERSION: 3.4.18
-      SDL_SHA256: 9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: SDL 3
-        run: |
-          curl -sSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz"
-          echo "$SDL_SHA256  sdl.tar.gz" | sha256sum -c
-          tar xzf sdl.tar.gz -C "$RUNNER_TEMP"
-          echo "JURAIC_SDL_SOURCE=$RUNNER_TEMP/SDL3-$SDL_VERSION" >> "$GITHUB_ENV"
-          cp -r "$RUNNER_TEMP/SDL3-$SDL_VERSION/android-project/gradlew" "$RUNNER_TEMP/SDL3-$SDL_VERSION/android-project/gradle" android/
-
-      - name: APK for the emulator
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug -Pabi=x86_64
-
-      - name: KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Run on the emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          target: google_apis
-          disable-animations: true
-          script: |
-            adb install android/app/build/outputs/apk/debug/app-debug.apk
-            adb shell am start -W -n io.github.nikque.juraicfield/.JuraicFieldActivity
-            sleep 45
-            adb exec-out screencap -p > emulator-screen.png
-            adb logcat -d > emulator-logcat.txt
-            adb shell pidof io.github.nikque.juraicfield > emulator-running.txt || echo "not running" > emulator-running.txt
-            adb shell run-as io.github.nikque.juraicfield ls -R files > emulator-files.txt 2>&1 || true
-            adb shell ls -R /sdcard/Android/data/io.github.nikque.juraicfield/files >> emulator-files.txt 2>&1 || true
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: android-emulator
-          path: |
-            emulator-screen.png
-            emulator-logcat.txt
-            emulator-running.txt
-            emulator-files.txt
