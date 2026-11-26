@@ -1056,6 +1056,22 @@ static void testRow13Kept() {
     check(f.tracker.side[1].pairs == 1, "the first pair is not seen");
     Reading landed = window(tall, {1, 2}, {3, 3});
     landed.side[1].point[1][22] = landed.side[1].point[1][23] = 5;
+    // A layout showing a quarter-cell above row 12 directly identifies which
+    // column took the hidden child. On the twelve-row layout below it is ambiguous.
+    {
+        Follower partial = f;
+        int64_t frame = at;
+        Reading top = landed;
+        top.side[1].point[0][24] = 5;
+        top.side[1].point[1][24] = EMPTY;
+        for (int k = 0; k < 6; ++k) partial.step(top, frame++);
+        Reading spawn = window(top, {3, 3}, {4, 4});
+        spawn.side[1].point[SPAWN_X][23] = 1;
+        partial.step(spawn, frame);
+        const auto& field = partial.model[1].core.field;
+        check(partial.model[1].followed == 0 && field.f.get(0, 12) == 5 && field.f.get(1, 12) == EMPTY,
+              "the partly visible thirteenth row puts the child in the wrong column");
+    }
     for (int k = 0; k < 6; ++k) f.step(landed, at++);
     // The next pair (1 2) appears.
     Reading next = window(landed, {3, 3}, {4, 4});

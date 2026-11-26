@@ -554,6 +554,20 @@ private:
                 const juraic::Pair colors{t.colors.axis, t.colors.child ? t.colors.child : child};
                 if (colors.child && showsSeen(base, toldId, colors, on, true)) found = toldId, foundColors = colors, foundOn = on;
             }
+            // Some layouts expose the lower half of row 13. A positive colour at
+            // rest there distinguishes landings that have the same twelve full rows.
+            // Preserve the told placement and the original guess if none fits the fringe.
+            if (found >= 0 && toldId < 0 && !(seen.f == t.resting.f)) {
+                for (int id = found; id < juraic::PLACEMENTS; ++id) {
+                    if (!showsSeen(base, id, foundColors, on)) continue;
+                    juraic::GameField candidate = on;
+                    juraic::place(candidate, juraic::placement(id), foundColors);
+                    if (contains(candidate, t.resting)) {
+                        found = id, foundOn = on;
+                        break;
+                    }
+                }
+            }
             if (found >= 0) take(s, foundOn, found, foundColors, was, at);
             else notLying(m);
         } else if (m.lying) {
