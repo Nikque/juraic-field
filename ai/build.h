@@ -130,22 +130,30 @@ struct BuildCuts {
     int value() const { return tail.value() + (head.valid() ? lv38_tail::Shape{head.fire.points, head.fire.chains, head.fire.added}.value() : 0); }
 };
 
+// A worker reuses these arrays across consecutive field evaluations. detect()
+// writes the active prefix before any trial or intermediate field is read.
+struct BuildTrials {
+    Trials trials;
+    BitField after[W * MAX_COLORS];
+    FirstWaves first;
+};
+
 // The value of a field for building (larger is better). Only the field: what
 // was lost on the way to it is kept in the node. mainPoints, when given,
 // receives the points of the largest chain a trial drop starts (the main chain
 // as far as it can be seen on the field; with evKeyed, key pieces included).
 // (The points of a trial drop and the terms for valleys and hills are put together
 // as in Ama's evaluation: licenses/Ama-NOTICE.txt.)
-inline int buildValue(const GameField& g, const Rules& rules, const Timing& timing, const Params& p, int* mainPoints = nullptr,
+inline int buildValue(BuildTrials& scratch, const GameField& g, const Rules& rules, const Timing& timing, const Params& p, int* mainPoints = nullptr,
                       KeyPlan* mainTrigger = nullptr, bool building = false, BuildCuts* cuts = nullptr) {
     int h[W];
     g.heights(h);
     int v = 0;
     // The chain that a few pieces would start: long, cheap to start, started high up.
-    Trials trials;
-    BitField after[W * MAX_COLORS];
-    FirstWaves first;
-    detect(g, rules, timing, p.trialMaxAdd, trials, p.evKeyed ? after : nullptr, false, p.evKeyed ? &first : nullptr); // (the frames of the chains are not used here)
+    auto& [trials, after, first] = scratch;
+    const Links k = g.f.links();
+    const bool useKeys = p.evKeyed && p.keyRuns > 0 && !(p.keyNoneFrom > 0 && g.f.count() >= p.keyNoneFrom);
+    detect(g, rules, timing, p.trialMaxAdd, trials, useKeys ? after : nullptr, false, useKeys ? &first : nullptr, &k, h); // (the frames of the chains are not used here)
     int best = 0, longest = 0;
     const bool cutWindow = (building || cuts) && p.lv38Midgame && lv38_tail::inWindow(g.f.normal().count(), p.lv38CutFrom);
     const bool tail = building && cutWindow && p.lv38Plan5 > 0 && lv38PartEnabled(p.lv38TailValue, Lv38Part::TailValue);
@@ -171,7 +179,7 @@ inline int buildValue(const GameField& g, const Rules& rules, const Timing& timi
     // A key piece left out is a debt: the fuller the field, the less room and time to pay it. (With
     // two or more left out a short attack is hard to answer, with one it is easier. So one at most
     // is counted; from keyNoneFrom cells on, none.)
-    if (p.evKeyed && !(p.keyNoneFrom > 0 && g.f.count() >= p.keyNoneFrom)) {
+    if (useKeys) {
         // The same chains carried on with a key piece (detect.h): a chain that one piece more
         // would make longer is worth the waves that stand, evKeyedWave for each wave the key
         // piece adds, less evKeyed for it. Tried for the longest chains first (those one wave
@@ -247,7 +255,6 @@ inline int buildValue(const GameField& g, const Rules& rules, const Timing& timi
         v += p.evFire * pairHolds(std::popcount(fire), colors) / 1000;
     }
     // Pieces of one colour next to each other.
-    const Links k = g.f.links();
     v += p.evLink * (BitField::cells(k.u) + BitField::cells(k.r));
     if (p.evThird && h[DEATH_X] > p.evThirdFrom) v -= p.evThird * (h[DEATH_X] - p.evThirdFrom) * (h[DEATH_X] - p.evThirdFrom);
     if (p.evBase) v += p.evBase * baseCells(g.f, p.evBaseForms);
@@ -272,6 +279,12 @@ inline int buildValue(const GameField& g, const Rules& rules, const Timing& timi
         if (h[x] > h[x - 1] && h[x] > h[x + 1]) v -= p.evHill * (h[x] - std::max(h[x - 1], h[x + 1]));
     }
     return v;
+}
+
+inline int buildValue(const GameField& g, const Rules& rules, const Timing& timing, const Params& p, int* mainPoints = nullptr,
+                      KeyPlan* mainTrigger = nullptr, bool building = false, BuildCuts* cuts = nullptr) {
+    BuildTrials scratch;
+    return buildValue(scratch, g, rules, timing, p, mainPoints, mainTrigger, building, cuts);
 }
 
 constexpr int HORIZONS = 24; // depths for which a search also reports what a shallower one finds
@@ -871,17 +884,18 @@ private:
                 // The values of the fields (nearly all of the time of a search). False: out of time.
                 const Params& how = sift ? light : p;
                 const auto value = [&](size_t begin, size_t end) {
+                    BuildTrials scratch;
                     for (size_t i = begin; i < end; ++i) {
                         if (depth && i % PLACEMENTS == 0 && expired(stop)) return false;
                         Node& c = w.next[i];
                         if (readCuts) {
                             BuildCuts cuts;
-                            c.fullValue = buildValue(c.g, rules, timing, p, nullptr, nullptr, true, &cuts) - c.lost;
+                            c.fullValue = buildValue(scratch, c.g, rules, timing, p, nullptr, nullptr, true, &cuts) - c.lost;
                             c.cutMain = cuts.main;
                             c.cutShape = cuts.count() > 0;
-                            c.value = sift ? buildValue(c.g, rules, timing, how) - c.lost : c.fullValue;
+                            c.value = sift ? buildValue(scratch, c.g, rules, timing, how) - c.lost : c.fullValue;
                         } else {
-                            c.value = buildValue(c.g, rules, timing, how, nullptr, nullptr, !sift) - c.lost;
+                            c.value = buildValue(scratch, c.g, rules, timing, how, nullptr, nullptr, !sift) - c.lost;
                         }
                     }
                     return true;
@@ -938,8 +952,9 @@ private:
             if (sift) {
                 const size_t keep = size_t(width) * size_t(p.beamSift);
                 trimLayer(w.next, keep, w.digRoots);
+                BuildTrials scratch;
                 for (Node& n : w.next)
-                    n.value = readCuts ? n.fullValue : buildValue(n.g, rules, timing, p, nullptr, nullptr, true) - n.lost;
+                    n.value = readCuts ? n.fullValue : buildValue(scratch, n.g, rules, timing, p, nullptr, nullptr, true) - n.lost;
             }
             trimLayer(w.next, size_t(width), w.digRoots);
             std::sort(w.next.begin(), w.next.end(), betterNode);

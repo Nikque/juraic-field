@@ -153,9 +153,9 @@ inline int detectPlain(const GameField& g, const Rules& rules, const Timing& tim
 // once, by colour. The pieces added then are one group with the groups they touch: it is the first
 // wave, and the only thing in it.
 inline int detect(const GameField& g, const Rules& rules, const Timing& timing, int maxAdd, Trials& out, BitField* after = nullptr, bool timed = true,
-                  FirstWaves* first = nullptr) {
+                  FirstWaves* first = nullptr, const Links* fieldLinks = nullptr, const int* heights = nullptr) {
     if (!quickTrials || rules.clearCount != 4 || maxAdd >= 4 || maxAdd < 1) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
-    const Links k = g.f.links();
+    const Links k = fieldLinks ? *fieldLinks : g.f.links();
     const BitField::Seeds seed = BitField::seeds(k);
     const FieldBits occ = g.f.occupied(), floor = FieldBits::fill(1);
     // (a group of four stands, or a piece hangs in the air: the plain way)
@@ -190,8 +190,11 @@ inline int detect(const GameField& g, const Rules& rules, const Timing& timing, 
         if (maxAdd >= 3) thrice = ((any | sideOf2 | sideOf3) & has3).without(one | twice);
         needs[0] |= COLUMN_BYTES[one.columnsUsed()] << c, needs[1] |= COLUMN_BYTES[twice.columnsUsed()] << c, needs[2] |= COLUMN_BYTES[thrice.columnsUsed()] << c;
     }
-    int h[W];
-    g.heights(h);
+    int localHeights[W];
+    if (!heights) {
+        g.heights(localHeights);
+        heights = localHeights;
+    }
     for (int x = 0; x < W; ++x) out.alone[x] = 0;
     // (by column, and by colour on a column, as the plain way finds them)
     for (uint64_t left = needs[0] | needs[1] | needs[2]; left; left &= left - 1) {
@@ -199,13 +202,13 @@ inline int detect(const GameField& g, const Rules& rules, const Timing& timing, 
         const int n = 3 - 2 * int(needs[0] >> at & 1) - int(needs[1] >> at & 1);
         const Cell color = rules.palette[size_t(c)];
         if (n == 1) out.alone[x] |= uint8_t(1u << color);
-        const FieldBits added = FieldBits::columnCells(x, uint16_t(((1u << n) - 1) << h[x])), within = ofColor[c] | added;
+        const FieldBits added = FieldBits::columnCells(x, uint16_t(((1u << n) - 1) << heights[x])), within = ofColor[c] | added;
         // (three steps reach every piece of the groups the added ones touch: none has more than three)
         FieldBits group = added;
         for (int step = 0; step < 3; ++step) group = around(group) & within;
         const int size = BitField::cells(group);
         Trial& t = out.item[out.count];
-        t = Trial{int8_t(x), color, int8_t(n), int8_t(h[x])};
+        t = Trial{int8_t(x), color, int8_t(n), int8_t(heights[x])};
         Wave w;
         w.cleared = group, w.pieces = size, w.colors = w.groups = 1, w.groupBonus = groupBonus(size);
         w.garbage = g.f.garbageNextTo(group);

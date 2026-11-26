@@ -171,11 +171,12 @@ struct BitField {
     // False when no cell had to move.
     bool drop() {
         const FieldBits occ = occupied();
+        // Each occupied cell above the floor must be supported by the cell below.
+        if (occ.down().subsetOf(occ)) return false;
         const uint64_t keep[2] = {occ.low(), occ.high()};
         // Where the cells of each column come to rest: as many cells as it holds, from the floor up
         // (FieldBits::settled: all columns at once, in the register).
         const FieldBits rest = occ.settled();
-        if (rest == occ) return false;
         if (detail::fastPext) {
             const uint64_t to[2] = {rest.low(), rest.high()};
             for (auto& p : plane)
