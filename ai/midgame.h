@@ -31,33 +31,40 @@ struct MidgameAttacks {
 // uses a full observed pair, and is replayed with input paths before it is used.
 class MidgameBeam {
 public:
+    // Returns false when `stop` cuts the beam before its last layer: set.tactical then holds the layers made before.
     template<class Stop>
-    static void extend(const Observation& o, const Params& p, uint64_t seed, PlanSet& set, Stop stop) {
+    static bool extend(const Observation& o, const Params& p, uint64_t seed, PlanSet& set, Stop stop) {
         const int limit = std::min(set.knownCount, MIDGAME_PLAN_PAIRS);
-        if (!set.pairCount || limit < 2 || p.handWait > 0 || stop()) return;
+        if (!set.pairCount || limit < 2 || p.handWait > 0) return true;
+        if (stop()) return false;
         const int who = set.who;
         const int other = 1 - who;
         const int64_t end = o.frame + 6000;
         const int rate = o.rules.rateAt(o.frame);
         if (limit <= set.pairCount && std::none_of(set.plans.begin(), set.plans.end(), [&](const Plan& plan) {
             return plan.fireDepth && plan.fireDepth < limit && plan.chains == 1 && !plan.allClear && plan.points < W * rate;
-        })) return;
+        })) return true;
         Node root{Duel(o, seed)};
         root.duel.tallPaths = p.x3TallPaths;
-        if (p.readMidgame && p.x3TallPaths > 0) {
+        // (Timing::landThenLock: Duel::place takes the buttons of placeFast on every field)
+        if ((p.readMidgame && p.x3TallPaths > 0) || o.timing.landThenLock) {
             static thread_local SpawnInputCache inputs;
             inputs.configure(o.timing, o.rules.speedPercent);
             root.duel.spawnInputs = &inputs;
         }
         const DuelPlayer& initial = root.duel.player[who];
-        const int baseSent = root.duel.player[other].incoming.total();
+        // (what waits above him and what of it has fallen since: garbage that was waiting falls on him while he lands or his
+        //  chain ends, and is no part of what these plans send)
+        // (Params::x3SentAfterHis: nor is what his chain that runs offsets of it)
+        const int baseSent = p.x3SentAfterHis ? aboveAfterHis(root.duel, who, end)
+                                              : root.duel.player[other].fallen + root.duel.player[other].incoming.total();
         const int baseScore = initial.scoring.score;
         const int baseColors = colors(initial.field);
         Duel unopposed = root.duel;
         if (unopposed.player[other].phase == DuelPhase::Check || unopposed.player[other].phase == DuelPhase::Settle)
             toPairOf(unopposed, other, end);
         const int incoming = unopposed.player[who].fallen + unopposed.player[who].incoming.total();
-        if (!set.midAir && !toPairOf(root.duel, who, end)) return;
+        if (!set.midAir && !toPairOf(root.duel, who, end)) return true;
         std::vector<Node> current{std::move(root)}, next;
         for (int depth = 0; depth < limit && !current.empty(); ++depth) {
             next.clear();
@@ -68,7 +75,7 @@ public:
             std::array<MidgameAttacks, PLACEMENTS * ROWS> attacks{};
             std::array<Plan, PLACEMENTS> mains{};
             for (const Node& parent : current) {
-                if (stop()) return;
+                if (stop()) return false;
                 const auto& field = parent.duel.player[who].field;
                 const unsigned legal = knownPlacements(field, set, depth, p);
                 for (int id = 0; id < PLACEMENTS; ++id) {
@@ -87,7 +94,9 @@ public:
                         self.scoring.score - parent.duel.player[who].scoring.score < W * rate;
                     if (self.chain.chains && !reshape) {
                         if ((depth < set.pairCount && !parent.reshaped) || self.scoring.allClear) continue;
-                        const int sent = child.duel.player[other].incoming.total() - baseSent;
+                        // (Params::x3SentAfterHis: taken when his chain that runs is over too, as baseSent is)
+                        const int sent = (p.x3SentAfterHis ? aboveAfterHis(child.duel, who, end)
+                                                           : child.duel.player[other].fallen + child.duel.player[other].incoming.total()) - baseSent;
                         const int damage = self.fallen + self.incoming.total();
                         if (sent < W && incoming - damage < W) continue;
                         plan.fireDepth = plan.count;
@@ -98,6 +107,7 @@ public:
                         plan.used = baseColors + 2 * plan.count - colors(self.field);
                         plan.lockFrame = self.lockFrame;
                         plan.endFrame = child.duel.frame;
+                        plan.confirmFrame = self.settleFrame > 0 ? self.settleFrame : 0;
                         // A large known return must not evict the shorter side
                         // chain in the same garbage bucket. Keep the most
                         // effective main under each first placement separately.
@@ -123,11 +133,12 @@ public:
                     next.push_back(std::move(child));
                 }
             }
-            if (stop()) return;
+            if (stop()) return false;
             for (const auto& slot : attacks) slot.appendTo(set.tactical);
             for (const Plan& main : mains) if (main.count) set.tactical.push_back(main);
             shrink(next, current, who);
         }
+        return true;
     }
 
 private:
@@ -144,7 +155,7 @@ private:
         bool reshaped = false;
     };
 
-    static int colors(const GameField& field) { return field.f.count() - field.f.garbage().count(); }
+    static int colors(const GameField& field) { return colouredPieces(field); }
 
     static Side sideFire(const GameField& field, const Observation& o, const Params& p, int rate, bool reshaped) {
         Trials trials;
@@ -209,7 +220,7 @@ struct MidgameShelter {
 
 template<class Stop>
 MidgameShelter findMidgameShelter(const Observation& o, const PlanSet& mine, const PlanSet& theirs, unsigned legal,
-                                const Params& p, uint64_t seed, Stop stop) {
+                                const Params& p, uint64_t seed, Stop stop, int ahead = 1) {
     if (p.handWait > 0 || !mine.pairCount || !theirs.pairCount || o.self().field.f.count() < 36 || stop()) return {};
     unsigned starts = legal;
     for (const Plan& plan : mine.plans) if (plan.fireDepth == 1) starts &= ~(1u << plan.id[0]);
@@ -227,7 +238,11 @@ MidgameShelter findMidgameShelter(const Observation& o, const PlanSet& mine, con
         const Placement at = placement(threat.id[0]);
         GameField field = before.player[theirs.who].field;
         const PlaceResult placed = juraic::place(field, at, theirs.pair[0]);
-        const int64_t reveals = fire.lockFrame + o.timing.landFrames + o.timing.splitFrames(placed.split, at.x, placed.lockY);
+        const int64_t landed = fire.lockFrame + o.timing.landFrames + o.timing.splitFrames(placed.split, at.x, placed.lockY);
+        // (FASTEST_BOUND: no sooner than the straight way shows the chain; a chain the straight way does not fire is not
+        //  counted on as seen)
+        const int64_t straight = rivalSeenCheck(o, mine, nullptr, theirs, &threat, p, seed, landed, stop);
+        const int64_t reveals = straight < 0 ? INT64_MAX : straight;
         std::array<int64_t, PLACEMENTS> nextOwn{};
         std::array<std::optional<Duel>, PLACEMENTS> afterHold;
         for (unsigned pending = starts; pending; pending &= pending - 1) {
@@ -244,7 +259,7 @@ MidgameShelter findMidgameShelter(const Observation& o, const PlanSet& mine, con
         for (const auto* replies : {&mine.plans, &mine.tactical}) for (const Plan& reply : *replies) {
             if (!reply.fireDepth || reply.allClear || reply.mainAfter < threat.points) continue;
             const unsigned bit = 1u << reply.id[0];
-            if (!(bit & result.safe) || (bit & answered) || nextOwn[reply.id[0]] <= reveals) continue;
+            if (!(bit & result.safe) || (bit & answered) || !seenBeforeChoice(reveals, nextOwn[reply.id[0]], ahead, p.seeLate)) continue;
             if (stop()) return {};
             const Duel exchange = playOut(o, mine, &reply, theirs, &threat, p, seed, true);
             const auto& own = exchange.player[mine.who];

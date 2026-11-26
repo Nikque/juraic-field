@@ -5,6 +5,7 @@
 // And what an end does with datagrams that are not those of a match played by the rules: callers a host
 // cannot use, frames further ahead than a round allows, a delay no round can take, a clock that is no time.
 #include "../play/net.h"
+#include "../play/netplay.h"
 #include <initializer_list>
 #include <iostream>
 #include <stdexcept>
@@ -350,8 +351,50 @@ static void testClock() {
     std::cout << "clock: a clock that is no time, one from the future and one older than a line may be silent are passed over; the round trip of a welcome is one a line can have\n";
 }
 
+// A round that one end has ended and the other not yet: the way toward the other end is cut from that moment for
+// longer than the pause after a round (150 frames) and shorter than the silence a line is given up after. The end
+// that has ended must keep the buttons of its seat until the other has them, so that both end the round and the next.
+static void testRoundLeftTogether() {
+    auto wire = std::make_shared<FakeWire>();
+    wire->delay = 2;
+    Settings s;
+    s.rules.colors = 3;
+    s.rules.winsNeeded = 5;
+    NetPlay end[2];
+    end[0].host(std::make_unique<FakeLine>(wire, 0), s, "h", 77, 2);
+    end[1].join(std::make_unique<FakeLine>(wire, 1), s, "g");
+    Hands hands[2] = {Hands(5), Hands(6)};
+    int cut = -1, cutFor = 0;
+    size_t need = 0; // the rounds both ends must have ended once the way has been cut
+    const auto none = [](int, const PlayerEvents&) {};
+    int tick = 0;
+    for (; tick < 200000; ++tick) {
+        for (int m = 0; m < 2; ++m) {
+            end[m].tick(end[m].stage == NetPlay::Play ? hands[m].next() : uint8_t(0), none);
+            check(end[m].stage != NetPlay::Over, "a match was broken off at end " + std::to_string(m));
+            check(end[m].stage != NetPlay::MatchEnd, "the match ended before the round after the cut");
+            // (this end has ended the round, and the other has not all the buttons of this end's seat it needs to end it)
+            if (cut < 0 && end[m].stage == NetPlay::RoundEnd && end[1 - m].stage == NetPlay::Play && end[1 - m].peer.buttons[m].size() < size_t(end[m].link.round.frame))
+                cut = 1 - m, cutFor = 200, need = end[m].replay.rounds.size() + 1;
+            if (cutFor > 0) wire->toward[cut].clear();
+        }
+        if (cutFor > 0) --cutFor;
+        if (cut >= 0 && cutFor == 0 && end[0].replay.rounds.size() >= need && end[1].replay.rounds.size() >= need) break;
+    }
+    check(cut >= 0, "no round ended at one end before the other");
+    check(end[0].replay.rounds.size() >= need && end[1].replay.rounds.size() >= need,
+          "after the cut the two ends did not both end the round and the next: rounds " + std::to_string(end[0].replay.rounds.size()) + " and " +
+              std::to_string(end[1].replay.rounds.size()) + ", wanted " + std::to_string(need));
+    for (size_t r = 0; r < need; ++r)
+        check(end[0].replay.rounds[r].seed == end[1].replay.rounds[r].seed && end[0].replay.rounds[r].frames == end[1].replay.rounds[r].frames,
+              "the two ends kept round " + std::to_string(r + 1) + " differently");
+    std::cout << "round left together: the way toward end " << cut << " cut for 200 ticks after the other ended round " << need - 1 << "; both ended round " << need
+              << " (tick " << tick << ")\n";
+}
+
 int main() {
     try {
+        testRoundLeftTogether();
         testDelayFor();
         testEnds();
         testDoor();

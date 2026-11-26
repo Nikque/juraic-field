@@ -9,7 +9,7 @@ namespace juraic::ai {
 template<class Stop>
 int preferCommittedAnswer(const Observation& o, const PlanSet& mine, const PlanSet& theirs,
                           int ordinary, unsigned legal, int arriving, const Params& p, uint64_t seed, Stop stop) {
-    if (!p.readMidgame || !p.checkKnownExchange || p.handWait || o.players != 2 || o.rules.cancel || ordinary < 0 ||
+    if (!p.readMidgame || !p.checkKnownExchange || p.handWait || o.players != 2 || ordinary < 0 ||
         !(legal >> ordinary & 1u) || arriving <= 0 || arriving >= W || arriving != o.self().incoming.confirmed ||
         o.self().incoming.pending || o.opponent().incoming.total() || o.self().scoring.allClear || o.opponent().scoring.allClear ||
         o.busyLeft[o.me] || o.busyLeft[1 - o.me] || o.opponent().phase != Phase::Next ||

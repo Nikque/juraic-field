@@ -317,7 +317,8 @@ static void writeLog(const std::string& path, int games) {
         out << "GAME " << r.colors << ' ' << r.clearCount << ' ' << r.targetPoints << ' ' << r.marginSeconds << ' '
             << r.marginStepSeconds << ' ' << r.marginSteps;
         for (int i = 0; i < r.marginSteps; ++i) out << ' ' << r.marginRates[size_t(i)];
-        out << ' ' << r.chainRequirement << ' ' << r.allClearBonus << ' ' << int(r.softDropBonus) << ' ' << r.maxGarbagePerDrop << '\n';
+        out << ' ' << r.chainRequirement << ' ' << r.allClearBonus << ' ' << int(r.softDropBonus) << ' ' << r.maxGarbagePerDrop << ' '
+            << int(r.clearTopGarbage) << '\n';
         PlayerCore player[2];
         int next[2] = {0, 0};
         int64_t frame = 0;

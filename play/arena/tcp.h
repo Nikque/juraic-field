@@ -43,6 +43,13 @@ constexpr Socket NO_SOCKET = -1;
 inline void closeSocket(Socket s) { close(s); }
 inline bool wouldBlock() { return errno == EAGAIN || errno == EWOULDBLOCK; }
 #endif
+// Flags of send: a connection closed by the other end is a failure of send, not a SIGPIPE that ends the program (where
+// there is no MSG_NOSIGNAL the socket is told so instead, SO_NOSIGPIPE in noBlockNoDelay).
+#if defined(MSG_NOSIGNAL)
+constexpr int SEND_FLAGS = MSG_NOSIGNAL;
+#else
+constexpr int SEND_FLAGS = 0;
+#endif
 
 struct NetStart {
     NetStart() {
@@ -66,6 +73,9 @@ inline void noBlockNoDelay(Socket s) {
     fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
 #endif
     int one = 1;
+#if defined(SO_NOSIGPIPE)
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof one);
 }
 
@@ -113,7 +123,7 @@ struct Line {
         }
         while (outAt < out.size() && !closed) {
             const size_t left = out.size() - outAt;
-            const int n = int(::send(s, out.data() + outAt, int(left > 1 << 20 ? 1 << 20 : left), 0));
+            const int n = int(::send(s, out.data() + outAt, int(left > 1 << 20 ? 1 << 20 : left), SEND_FLAGS));
             if (n > 0) {
                 outAt += size_t(n);
                 continue;

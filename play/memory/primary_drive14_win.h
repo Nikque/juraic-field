@@ -42,7 +42,8 @@ public:
     struct Status {
         PrimaryRuntime14::Status reader;
         bool cpuSeat = false;      // most recent verified controller of the selected seat
-        bool round = false;       // a round is being played, as the memory shows it
+        uint64_t seatReadUs = 0;   // the reader's clock of the last sample that read the seat (0: none; primarySeatFresh14)
+        bool round = false;      // a round is being played, as the memory shows it
         long rounds = 0, frames = 0, skipped = 0, filled = 0, recovered = 0, corrections = 0, repaired = 0;
         int delay = 0, measured = -1; // the frames a button is reckoned to take, and as last measured (PrimaryPlayer14::measured)
         long delayChanges = 0;        // times the delay was set to what was measured
@@ -56,8 +57,9 @@ public:
         std::array<int64_t, 6> thinking{};
         std::array<int, 2> notice{};
     };
-    // Sets the buttons on the pad (game/control.h Button bits, the turns as they go out). Called on the thread of the play.
-    std::function<void(uint8_t)> press;
+    // Sets the buttons on the pad (game/control.h Button bits, the turns as they go out), and tells what became of them
+    // (PressResult14). Called on the thread of the play.
+    std::function<PressResult14(uint8_t)> press;
     // The garbage waiting above each field, as far as known (empty: none known). Called on the thread of the play.
     std::function<std::array<int, 2>()> notice;
     // The trial of buttons set late, while set: a side button or a turn newly pressed is set 0, 2, .. 14 ms after its
@@ -185,38 +187,19 @@ public:
     }
     std::optional<PrimarySample14> sample() const { return runtime_.sample(); }
 
-    static void prepare(juraic::ai::Agent* agent, bool cancel) {
-        if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) {
-            placing->tapHold = 1, placing->holdSecond = true, placing->holdLevel = true, placing->waitQuickLock = true, placing->askInAir = true, placing->fastestWays = cancel;
-            // The search for the way over soonest is made ahead, on a thread of its own, once the placement of the pair
-            // to come is chosen (PlacementAgent::fastestAhead). One made in the frame the buttons are for - the pair
-            // put right in the air, a placement chosen as the pair appears - is kept short: a search of 4000 states
-            // took up to 19 ms on the fields of the records of the real game, and buttons set 12 ms after a frame did
-            // not reach the game in it. A search that gives up leaves the straight way.
-            placing->fastestStates = PRIMARY_FASTEST_NOW14, placing->fastestAhead = PRIMARY_FASTEST_AHEAD14;
-            // The way made ahead is kept while a second choice is on its way and that way itself goes straight down
-            // (records of the real game: a pair in five went to another placement in the air, and every pair held
-            // straight down for a second choice had its way planned again within the frame - mostly the straight
-            // one). A way planned in the air is searched once more as the one made ahead is, from where the pair is
-            // a few frames on.
-            placing->holdKeepsWay = cancel, placing->fastestAgain = cancel ? PRIMARY_FASTEST_AGAIN14 : 0;
-            // (a choice dropped stops its searches; a first choice that comes late is asked for again in the air; the way
-            //  over soonest is searched on while a second choice is awaited; with the pairs beyond the window read, the
-            //  choice is made once more as the pair appears, by the fields as they are then)
-            placing->cutStale = true, placing->retryInAir = true, placing->searchWhileSecond = cancel;
-            placing->againFresh = primaryListedPairs14.load();
-        }
-    }
+    static void prepare(juraic::ai::Agent* agent, bool cancel) { preparePrimaryAgent14(agent, cancel); }
     // The record of the play: a row for every frame played (also written by tools that play made-up rounds).
     static void recordHead(std::ostream& to) {
         to << "us\tread_us\tserial\ttick\toperating\tpairs\tx\ty\tupper\tdir\tphase\tactive\tshown_phase\tshown_wait\tfore_frame\tfore_phase\tfore_wait\tfore_x\tfore_y\tfore_upper\tfore_dir"
               "\ttarget\tbuttons\tsent\tcorrections\trepaired\trecovered\tskipped\tfilled\tother_operating\tother_pairs\tplaced\tfield_state\tplayer_state\texp_phase\texp_x\texp_y\texp_upper"
               "\texp_dir\tnotice\tpending\tpieces\tgarbage_pieces\tsixth\tchain\tother_chain\thidden\thidden_sure\tcolumns\tother_columns\ttray\tother_tray\tnext\twindow\tfield\tinput_delay\tmeasured_delay\tmeasured_run"
-              "\ttray_flying\ttray_pending\ttray_confirmed\tother_tray_flying\tother_tray_pending\tother_tray_confirmed\tother_shown_phase\tother_shown_wait\tbonus\tother_bonus\tshown_bonus\tother_shown_bonus\tgarbage_random\tother_garbage_random\tother_input\tscore\tscore_pool\tscore_wave\tother_score\tother_score_pool\tother_score_wave\tdriver_begin_us\tdriver_reply_us\n";
+              "\ttray_flying\ttray_pending\ttray_confirmed\tother_tray_flying\tother_tray_pending\tother_tray_confirmed\tother_shown_phase\tother_shown_wait\tbonus\tother_bonus\tshown_bonus\tother_shown_bonus\tgarbage_random\tother_garbage_random\tother_input\tscore\tscore_pool\tscore_wave\tother_score\tother_score_pool\tother_score_wave\tdriver_begin_us\tdriver_reply_us\tplayed\n";
     }
-    // (lastField: the own field as the last row had it - a row has "=" for a field that is the same; 84 digits, the 14th row first)
+    // (lastField: the own field as the last row had it - a row has "=" for a field that is the same; 84 digits, the 14th row first;
+    //  played: the buttons of the play on the pad after this sample as the AI names them - the turns not swapped -, -1
+    //  where it is not known what the pad has, the buttons having been held back or not sent)
     static void recordRow(std::ostream& to, uint64_t now, const PrimarySample14& s, int me, const PrimaryPlayer14& player, int target, uint8_t buttons, uint8_t out, std::string& lastField,
-                          uint64_t driverBegin = 0, uint64_t driverReply = 0) {
+                          uint64_t driverBegin, uint64_t driverReply, int played) {
         if (!s.seat[size_t(me)]) return;
         const PrimarySeat14& seat = *s.seat[size_t(me)];
         const OwnedPublicPose14& p = seat.pose;
@@ -288,7 +271,7 @@ public:
             else to << "\t-1\t-1\t-1";
         };
         score(&seat), score(other ? &*other : nullptr);
-        to << '\t' << driverBegin << '\t' << driverReply;
+        to << '\t' << driverBegin << '\t' << driverReply << '\t' << played;
         to << '\n';
         lastField = cells;
     }
@@ -478,24 +461,21 @@ private:
         const auto make = [&] {
             // (the agent's settings as the play began with them: a player before this one may have left the ways over
             //  soonest switched off for a field not sure of, and the new one takes what it finds as what was asked for)
-            prepare(agent_.get(), setup_.cancel);
-            player = std::make_unique<PrimaryPlayer14>(*agent_, setup_.me, setup_.delay);
-            player->observer.rules = juraic::realGameRules(), player->observer.timing = primaryTiming14(setup_.cancel);
+            player = makePrimaryPlayer14(*agent_, setup_.me, setup_.delay, setup_.cancel);
             player->seed = setup_.seed;
             player->onRound = [this] { noteThinking(); };
         };
         make();
-        uint64_t serial = 0, slowest = 0;
+        uint64_t serial = 0, slowest = 0, statusGeneration = 0;
         long delayChanges = 0;
-        uint8_t sent = 0;
-        bool sentAny = false;
+        PadButtons14 pad; // the buttons of the play known to be on the pad
         int idle = 0; // samples in a row with no round played
         while (!stopped()) {
             runtime_.wait(serial, 50);
             const auto fresh = runtime_.since(serial);
             if (fresh.empty()) {
                 // (the seats are not read: nothing is held)
-                if (!runtime_.sample() && sentAny && sent) send(sent = 0);
+                if (!runtime_.sample() && pad.releaseDue()) pad.took(0, send(0));
                 continue;
             }
             // (the newest only: of frames that came while the AI was busy the buttons stayed, which the player reckons
@@ -503,14 +483,12 @@ private:
             const PrimarySample14& s = fresh.back();
             serial = s.serial;
             // The frames a button takes, measured otherwise than reckoned DELAY_RUN taps in a row (a match over a network
-            // takes the buttons some frames later): the player is made anew with what was measured, while no pair of
+            // takes the buttons some frames later): update the input prediction while no pair of
             // the seat is in the hands.
             if (player->measuredRun() >= DELAY_RUN && player->measured() != player->delay() && player->measured() <= DELAY_MOST &&
                 !(s.seat[size_t(setup_.me)] && s.seat[size_t(setup_.me)]->pose.operating)) {
                 setup_.delay = player->measured();
-                const uint64_t seed = player->seed;
-                make();
-                player->seed = seed;
+                player->setDelay(setup_.delay);
                 ++delayChanges;
             }
             // Another agent takes over while no pair of the seat is in the hands.
@@ -538,16 +516,19 @@ private:
             const uint8_t buttons = player->frame(s, waiting);
             const uint64_t driverReply = PrimaryRuntime14::clockUs();
             const uint8_t out = setup_.turnsSwapped ? swapTurns(buttons) : buttons;
-            if (resend_.exchange(false)) sentAny = false;
-            if (!sentAny || out != sent) {
-                if (lateTrial.load() && (out & ~sent & (juraic::BTN_LEFT | juraic::BTN_RIGHT | juraic::BTN_CW | juraic::BTN_CCW))) {
+            if (resend_.exchange(false)) pad.lent();
+            if (pad.due(out)) {
+                if (lateTrial.load() && (out & ~pad.onPad & (juraic::BTN_LEFT | juraic::BTN_RIGHT | juraic::BTN_CW | juraic::BTN_CCW))) {
                     const uint64_t until = s.observedUs + uint64_t(lateStep_++ % 8) * 2000;
                     while (PrimaryRuntime14::clockUs() < until) YieldProcessor();
                 }
-                send(out), sent = out, sentAny = true;
-                // (buttons set too late for the frame they answer: that frame went by with the buttons before them)
-                if (!lateTrial.load() && PrimaryRuntime14::clockUs() - s.observedUs > LATE_US) player->undelivered();
+                // (buttons held back or not sent: that frame went by without them, and they are sent again with the next
+                //  sample; buttons set too late for the frame they answer: that frame went by with the buttons before them)
+                if (!pad.took(out, send(out))) player->undelivered();
+                else if (!lateTrial.load() && PrimaryRuntime14::clockUs() - s.observedUs > LATE_US) player->undelivered();
             }
+            // (the buttons of the play on the pad after this sample: none known there when they were held back or not sent)
+            const uint8_t onPad = pad.known ? pad.onPad : uint8_t(0);
             const uint64_t now = PrimaryRuntime14::clockUs();
             const bool round = player->observer.tickOf(s, setup_.me) >= 0 && s.seat[0] && s.seat[1] && PrimaryObserver14::playing(s.seat[0]->pose) && PrimaryObserver14::playing(s.seat[1]->pose);
             if (round && now - s.observedUs > slowest) slowest = now - s.observedUs;
@@ -557,7 +538,12 @@ private:
             const auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent_.get());
             {
                 std::lock_guard<std::mutex> hold(lock_);
-                if (s.seat[size_t(setup_.me)]) status_.cpuSeat = s.seat[size_t(setup_.me)]->pose.cpuControlled;
+                if (s.generation != statusGeneration) {
+                    statusGeneration = s.generation;
+                    status_.cpuSeat = false;
+                    status_.seatReadUs = 0;
+                }
+                if (s.seat[size_t(setup_.me)]) status_.cpuSeat = s.seat[size_t(setup_.me)]->pose.cpuControlled, status_.seatReadUs = s.observedUs;
                 status_.round = round, status_.rounds = player->rounds, status_.frames = player->frames, status_.skipped = player->skipped, status_.filled = player->filled;
                 status_.recovered = player->recovered, status_.corrections = player->corrections(), status_.repaired = player->repaired();
                 status_.pairs = s.seat[size_t(setup_.me)] ? int(s.seat[size_t(setup_.me)]->pose.lockedPairs) : status_.pairs;
@@ -568,14 +554,15 @@ private:
             if (recordPlay_) {
                 std::ostringstream line;
                 std::string field = recordedField_;
-                recordRow(line, now, s, setup_.me, *player, placing ? placing->targetPlacement() : -1, buttons, out, field, driverBegin, driverReply);
+                const int played = pad.known ? int(setup_.turnsSwapped ? swapTurns(pad.onPad) : pad.onPad) : -1;
+                recordRow(line, now, s, setup_.me, *player, placing ? placing->targetPlacement() : -1, buttons, onPad, field, driverBegin, driverReply, played);
                 if (queueRecord(false, std::move(line).str())) recordedField_ = std::move(field);
             }
         }
         send(0);
     }
-    void send(uint8_t buttons) {
-        if (press) press(buttons);
+    PressResult14 send(uint8_t buttons) {
+        return press ? press(buttons) : PressResult14::Failed;
     }
 };
 

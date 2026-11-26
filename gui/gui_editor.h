@@ -1,6 +1,7 @@
 #pragma once
 #include "gui_model.h"
 #include <algorithm>
+#include <bit>
 
 namespace juraic_gui {
 // The editor allows empty cells, floating cells and kinds the generator never
@@ -152,5 +153,30 @@ inline Board loadBoard(const std::filesystem::path& path) {
     std::string extra;
     if (in >> extra) throw std::runtime_error("盤面ファイルに余分なデータがあります。");
     return b;
+}
+
+// A board of 10 x 18 given where only 6 x 13 can be played.
+struct WideBoardRefused : std::runtime_error {
+    WideBoardRefused() : std::runtime_error("10 x 18 の盤面は、6 x 13 の盤面の代わりには使えません。") {}
+};
+// The 6 x 13 board a practice of the game starts from: an edited board, or a result of the generator with its last
+// pair taken away (finding it is the exercise). A 10 x 18 one throws WideBoardRefused; a file that cannot be read,
+// another exception.
+inline BitField practiceField(const std::filesystem::path& path) {
+    std::string magic;
+    {
+        std::ifstream in(path, std::ios::binary);
+        in >> magic;
+    }
+    if (magic == "JURAIC_FIELD_BOARD") {
+        const Board b = loadBoard(path);
+        if (b.wide()) throw WideBoardRefused();
+        return bitsFromBoard(b);
+    }
+    const Record r = loadRecord(path);
+    if (r.wide) throw WideBoardRefused();
+    BitField f = r.solution.field;
+    if (r.solution.firePairs) f.erase(pairCells(r.solution.field, std::countr_zero(r.solution.firePairs)));
+    return f;
 }
 } // namespace juraic_gui

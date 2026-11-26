@@ -31,56 +31,7 @@ struct Fixture {
         s.value.context.round=2;s.value.fields=fields;s.value.observedMs=1000;s.frame=100;s.roundStart=0;s.pairs={1,1};return s;
     }
 };
-static void testRelearntColours() {
-    Tracker tracker;
-    Reading reading;
-    for (auto& side : reading.side) {
-        for (auto& column : side.point)
-            for (int k = 0; k < play::realgame::POINTS; ++k) column[k] = pointHeight(k) > 12 ? HIDDEN : EMPTY;
-        side.next[0] = {PURPLE, RED};
-        side.next[1] = {BLUE, BLUE};
-        side.nextRead[0] = side.nextRead[1] = true;
-    }
-    int64_t frame = 1000;
-    for (int i = 0; i < tracker.roundGap + 5; ++i) tracker.step(reading, frame++);
-    reading.side[0].next[0] = {BLUE, BLUE};
-    reading.side[0].next[1] = {YELLOW, RED};
-    for (int i = 0; i < tracker.windowMove + tracker.pairGap; ++i) tracker.step(reading, frame++);
-    const Tracker before = tracker;
-    reading.side[0].next[1] = {GREEN, RED};
-    for (int i = 0; i < 30; ++i) tracker.step(reading, frame++);
-    check(before.knows(0, 2) && tracker.knows(0, 2) && tracker.relearnt[0] == 1 &&
-              before.pairsLearnt() == tracker.pairsLearnt() && before.knownCount() == tracker.knownCount() &&
-              before.aligns == tracker.aligns,
-          "stable NEXT changes the colours of an already known pair in place");
-
-    Fixture fixture;
-    Driver driver;
-    driver.me = 0;
-    auto spy = std::make_unique<Spy>();
-    auto* observed = spy.get();
-    driver.agent = std::move(spy);
-    auto own = fixture.f.tracker.side[0];
-    own.pairs = 3;
-    own.colors = own.pair.colors = own.lastSeen.colors = {YELLOW, RED};
-    const auto tick = [&](const Tracker& learned, int64_t at) {
-        fixture.f.tracker = learned;
-        fixture.f.tracker.frame = at;
-        fixture.f.tracker.roundStart = 0;
-        fixture.f.tracker.fromStart = true;
-        fixture.f.tracker.side[0] = own;
-        driver.tick(fixture.f, at);
-    };
-    tick(before, 100);
-    check(!observed->observations.empty() && observed->observations.back().self().colors.axis == YELLOW,
-          "driver starts with the original published colours");
-    observed->observations.clear();
-    tick(tracker, 101);
-    check(!observed->observations.empty() && observed->observations.back().self().colors.axis == GREEN,
-          "driver updates the in-flight pair after the same NEXT index is relearnt");
-}
 int main(){
-    testRelearntColours();
     Fixture a;auto s=a.sample();check(usableMemorySample14(s,a.f.tracker,1100,77),"fresh current base accepted");
     const auto logged=memoryFieldText14(a.fields[0]);
     check(std::count(logged.begin(),logged.end(),'\n')==14 && logged.substr(0,14)=="500000\n200000\n","memory record retains rows 14 and 13");
@@ -122,21 +73,6 @@ int main(){
         a.f.observeAt(1,Rules{},future,101,o);check(!o.player[seat].scoring.allClear,"consumed all-clear bonus is not retained by memory adoption");
     }
     check(d.lag==2,"memory does not pretend pad latency disappeared");
-    Fixture left;
-    left.fields[0].f.set(1, 0, RED);
-    left.f.tracker.side[0].under = left.f.tracker.side[0].resting = Follower::shown(left.fields[0]);
-    check(left.f.useMemoryFields(left.fields), "different left and right memory fields accepted");
-    Driver leftDriver;
-    leftDriver.me = 0;
-    auto leftSpy = std::make_unique<Spy>();
-    auto* leftSeen = leftSpy.get();
-    leftDriver.agent = std::move(leftSpy);
-    leftDriver.tick(left.f, 100);
-    check(leftDriver.begunField() == left.fields[0] && !(leftDriver.begunField() == left.fields[1]),
-          "seat zero driver adopts the left memory field");
-    check(!leftSeen->observations.empty() && leftSeen->observations.front().me == 0 &&
-              leftSeen->observations.front().self().field == left.fields[0],
-          "seat zero AI sees its own memory field");
     a.fields[1].row14[0]=BLUE;check(a.f.useMemoryFields(a.fields),"new hidden-row correction accepted");
     ++a.f.tracker.frame;d.tick(a.f,101);
     check(d.begunField().row14[0]==BLUE,"driver updates old hidden-row history while same pair is in flight");

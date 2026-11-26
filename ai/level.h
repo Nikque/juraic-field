@@ -20,7 +20,8 @@
 namespace juraic::ai {
 
 constexpr int LEVELS = 36; // calibrated legacy levels; x3 remains level 36
-constexpr int LAST_LEVEL = 37;
+constexpr int LAST_LEVEL = 38;
+constexpr int DEVELOPMENT_LEVEL = 38;
 
 struct LevelSettings {
     int handWait, seeLate, beamWidth, beamDepth, beamQueues, trialMaxAdd, keyRuns, thinkAgain, x2Depth, b0Noise;
@@ -78,7 +79,14 @@ constexpr int levelGroup(int level) { return level <= 9 ? 0 : level <= 20 ? 1 : 
 
 // `p` with the settings of a level. Level LEVELS, and any number that is no level, leaves p as it is.
 inline Params levelParams(Params p, int level) {
-    if (level == LAST_LEVEL) {
+    p.lv38Midgame = level == DEVELOPMENT_LEVEL;
+    if (p.lv38Midgame && p.lv38Plan5 < 0) p.lv38Plan5 = 1;
+    if (p.lv38Midgame && p.lv38ReadyCover < 0) p.lv38ReadyCover = 0;
+    if (p.lv38Midgame && p.lv38TwoWaveNoMain < 0) p.lv38TwoWaveNoMain = 1;
+    if (p.lv38Midgame && p.lv38WinRecheck < 0) p.lv38WinRecheck = 1;
+    if (p.lv38Midgame && p.lv38AnswerLegal < 0) p.lv38AnswerLegal = 1;
+    if (p.lv38Midgame && p.lv38FullOffsetNext < 0) p.lv38FullOffsetNext = 1;
+    if (level == 37 || level == DEVELOPMENT_LEVEL) {
         p.pokeExchange = 2;
         p.pokeExchangeDepth = 3;
         p.pokeExchangeMin = 6;
@@ -87,9 +95,11 @@ inline Params levelParams(Params p, int level) {
         p.knownPairs = MAX_KNOWN;
         p.checkKnownExchange = true;
         p.readMidgame = true;
-        if (p.setupSpeedNear < 0) p.setupSpeedNear = 35;
-        if (p.setupSideNear < 0) p.setupSideNear = 20;
-        p.equivalentSetupRoute = true;
+        if (!lv37PartEnabled(p.lv37SetupSpeed, Lv37Part::SetupSpeed)) p.setupSpeedNear = 0;
+        else if (p.setupSpeedNear < 0) p.setupSpeedNear = 35;
+        if (!lv37PartEnabled(p.lv37Preparation, Lv37Part::Preparation)) p.setupSideNear = 0;
+        else if (p.setupSideNear < 0) p.setupSideNear = 20;
+        p.equivalentSetupRoute = lv37PartEnabled(p.lv37EquivalentRoute, Lv37Part::EquivalentRoute);
         return p;
     }
     if (level < 1 || level >= LEVELS) return p;

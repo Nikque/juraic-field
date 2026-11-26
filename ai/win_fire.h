@@ -40,7 +40,7 @@ bool knownWinFire(const Observation& o, const PlanSet& mine, const PlanSet& thei
         }
         return true;
     };
-    const unsigned first = theirs.midAir ? theirs.firstReach : legalPlacements(start.player[enemy].field);
+    const unsigned first = theirs.firstInAir() ? theirs.firstReach : legalPlacements(start.player[enemy].field);
     return first && replies(replies, first, 0) && !stop();
 }
 

@@ -57,7 +57,29 @@ public:
         int id = -1;
         bool setup = false;
     };
-    Choice diagnosticChoose(const Observation& o,Pair pair,unsigned legal,uint64_t decision,int reason){
+    // The settings of the ways a choice reads its own seat by, as they stand when the choice begins (taken on the thread
+    // of frame(): a choice on a thread of its own reads these, not the members, which frame() may set meanwhile).
+    struct WayRead {
+        bool fastest = false;
+        int states = 0, target = -1, soft = 0;
+        int64_t check = -1, lock = -1;
+    };
+    virtual WayRead wayRead() const { return {fastestWays, fastestStates, wayTarget, waySoft, wayCheck, wayLock}; }
+    Choice diagnosticChoose(const Observation& shown,Pair pair,unsigned legal,uint64_t decision,int reason,const WayRead& way){
+        // (Observation::fastestRead: the reading takes this seat's pairs the way they go - the way over soonest with
+        //  fastestWays - and, with the cancel, the other seat's the soonest way too. Without either, `shown` as it is.)
+        thread_local Observation marked;
+        const bool rival = shown.rules.cancel && shown.players == 2;
+        const Observation* use = &shown;
+        if (way.fastest || rival || way.target >= 0) {
+            marked = shown;
+            marked.fastestRead[shown.me] = way.fastest ? Observation::FASTEST_OWN : 0;
+            marked.fastestReadStates[shown.me] = way.fastest ? way.states : 0;
+            if (way.fastest || way.target >= 0) marked.ownWayTarget = way.target, marked.ownWayCheck = way.check, marked.ownWayLock = way.lock, marked.ownWaySoft = way.soft;
+            if (shown.players == 2) marked.fastestRead[1 - shown.me] = rival ? Observation::FASTEST_BOUND : 0;
+            use = &marked;
+        }
+        const Observation& o = *use;
         const auto begin=inputdiag::clock();const int result=choose(o,pair,legal);
         inputdiag::trace.emit(inputdiag::CHOSEN,{int64_t(diagnosticAgent),int64_t(diagnosticRound),int64_t(decision),o.frame,
             o.self().nextPair+1,reason,result,(inputdiag::clock()-begin)/10});
@@ -154,6 +176,11 @@ public:
     // The way to the placement chosen is the one of the fewest frames among the buttons of every frame, when that is
     // shorter than the straight way (InputPlanner::fastest). false: the straight way (the default).
     bool fastestWays = false;
+    bool exFlip = false;
+    bool fastQuietInput = false; // Explicit Lv38, ordinary controls only.
+    bool fastSoft = false, fastBusy = false;
+    int fastStates = 0;
+    int64_t fastStateLimitHits = 0;
     // Lv 37 considers exchanging the places of two pieces of the same colour.
     bool equivalentSetupRoute = false;
     // ... the states of a search made in the frame the way is needed in, and of one made ahead on a thread of its own
@@ -355,9 +382,7 @@ public:
                 if (againFresh) askedFresh = true;
                 againAsIs = !newInAir;
                 const Observation before = beforeItAppears(o);
-                airFrom = &p.pair;
                 if (made() && again(before)) thinkAgain(sight(before));
-                airFrom = nullptr;
                 againAsIs = false;
             }
             if (second && (++secondFrames, secondHere(true))) {
@@ -450,6 +475,7 @@ protected:
     // `legal` = legalPlacements of the own field, not zero.
     virtual int choose(const Observation& o, Pair pair, unsigned legal) = 0;
     virtual bool setupChoice() const { return false; }
+    virtual void noteEquivalentSetup(const Observation&, Pair, int, int) {}
 
     // The pair `colors` is in the air on its way to placement `id`, with `frames` frames of buttons
     // left: called in every such frame, when no choice is being worked out. For an agent that uses
@@ -535,13 +561,28 @@ private:
         Wave wave;
         return !other.chain.chains && !findWaveFor(other.field.f, wave, o.rules.clearCount, false);
     }
+protected:
+    static bool fastInputAllowed(const Observation& o, bool allowBusy) {
+        return allowBusy ? !o.self().incoming.total() && !o.busyChain[o.me] : quietForSetup(o);
+    }
+#ifdef JURAIC_LV38_REPLAY_AUDIT
+    virtual void auditInput(const Observation&, const PairControl&, int, unsigned, Pair, const InputPath&, bool) {}
+#endif
+private:
     bool planTarget(const Observation& o, const PairControl& from, int& id, InputPath& way, bool setup, unsigned legal = ~0u) {
         const GameField& field = o.self().field;
-        const Pair colors = setup ? currentColors(o) : Pair{};
-        if (!planner.canReverse(colors) || !quietForSetup(o)) return (legal >> id & 1) && sureWayTo(o, from, id, way);
+        const Pair colors = setup || exFlip ? currentColors(o) : Pair{};
+        if (exFlip && planner.canReverse(colors, true)) {
+            const unsigned allowed = legal == ~0u ? legalPlacements(field) | (1u << id) : legal;
+            return planner.planFastestEquivalent(field, from, id, allowed, colors, o.timing, o.rules, way);
+        }
+        if (!planner.canReverse(colors, true) || !quietForSetup(o)) return (legal >> id & 1) && sureWayTo(o, from, id, way);
         // Replanning an airborne pair may still reach its previous target even when the spawn reach mask excludes it.
         if (legal == ~0u) legal = legalPlacements(field) | (1u << id);
-        return planner.planEquivalent(field, from, id, legal, colors, o.timing, o.rules, way);
+        const int before = id;
+        const bool found = planner.planEquivalent(field, from, id, legal, colors, o.timing, o.rules, way);
+        if (found && id != before) noteEquivalentSetup(o, colors, before, id);
+        return found;
     }
     // The pair one frame on, with `buttons` held, on the own field.
     static PairControl stepped(const Observation& o, PairControl pair, uint8_t buttons) {
@@ -556,6 +597,10 @@ private:
     static Observation beforeItAppears(const Observation& o) {
         Observation before = o;
         Player& q = before.player[before.me];
+        // (Observation::ownAir: the reading takes the pair from where it is in mid-air)
+        before.ownAir = q.phase == Phase::Control && !q.pair.locked;
+        before.ownAirPair = q.pair;
+        before.ownAirSeat = before.me;
         q.phase = Phase::Next, q.wait = 1, --q.nextPair;
         before.busyLeft[before.me] = 0;
         return before;
@@ -572,8 +617,11 @@ private:
             int h[W], top = 0;
             p.field.heights(h);
             for (int x = 0; x < W; ++x) top = h[x] > top ? h[x] : top;
-            if (top >= 11 || keepLow) {
-                const PairControl pair = airFrom ? *airFrom : spawnPair(o.timing);
+            // (a choice made in mid-air, ownPairInAir - a second choice, or the pair chosen anew: on any field, the pair
+            //  may be below a column it would have to pass)
+            const PairControl* air = ownPairInAir(o);
+            if (top >= 11 || keepLow || air) {
+                const PairControl pair = air ? *air : spawnPair(o.timing);
                 unsigned reached = reachedFrom(o, pair, legal);
                 if (keepLow && !survives(p.field, reached, colors)) {
                     lowWays = false, climbs += counted;
@@ -605,6 +653,28 @@ private:
         }
         return false;
     }
+    // Observation::ownWayTarget, ownWayCheck: the pair in mid-air and its buttons, as they stand when a choice begins
+    // (taken on the thread of frame(), read by the choice).
+    int wayTarget = -1;
+    int64_t wayCheck = -1, wayLock = -1; // (wayLock, waySoft: Observation::ownWayLock, ownWaySoft)
+    int waySoft = 0;
+    void noteWay(const Observation& o) {
+        wayTarget = -1, wayCheck = -1, wayLock = -1, waySoft = 0;
+        const Player& p = o.self();
+        // (the pair in mid-air: as observed, or as beforeItAppears keeps it - Observation::ownAir; without fastestWays only
+        //  the latter, the choice made in mid-air, whose reading goes on with the buttons the pair is played with too)
+        const PairControl* air = ownPairInAir(o);
+        if (!(fastestWays || o.ownAir) || !air || air->locked || target < 0 || step >= path.frames()) return;
+        const PairControl& pair = *air;
+        const std::vector<uint8_t> rest(path.buttons.begin() + step, path.buttons.end());
+        const int end = FastestSearch::ends(p.field, pair, rest, o.timing, o.rules.speedPercent);
+        if (end <= 0) return;
+        // (the buttons lock the pair with the last of them: ends() gives 0 otherwise)
+        PairControl q = pair;
+        int soft = 0;
+        for (const uint8_t b : rest) soft += stepPair(q, p.field, b, o.timing, o.rules.speedPercent).dropBonus;
+        wayTarget = target, wayCheck = o.frame + end - 1, wayLock = o.frame + int64_t(rest.size()) - 1, waySoft = soft;
+    }
     // Chooses the placement of the pair that appears next.
     void think(const Observation& o) {
         if (again_.valid()) again_.get(); // (a second choice whose pair had come to rest: its thread must have ended)
@@ -624,11 +694,12 @@ private:
         choosingAgain = false;
         choiceBegins();
         const Observation& shown = sight(o);
+        noteWay(shown);
         if (thinking == Thinking::Free || (thinking == Thinking::Thread && p.wait > 1)) {
             seen = shown;
-            job = std::async(std::launch::async, [this, colors, legal, diagnosticRequest] { return diagnosticChoose(seen, colors, legal, diagnosticRequest,0); });
+            job = std::async(std::launch::async, [this, colors, legal, diagnosticRequest, way = wayRead()] { return diagnosticChoose(seen, colors, legal, diagnosticRequest,0,way); });
         } else {
-            chosen = diagnosticChoose(shown, colors, legal,diagnosticRequest,0);
+            chosen = diagnosticChoose(shown, colors, legal,diagnosticRequest,0,wayRead());
         }
     }
     // The pair in the air chosen now (its choice dropped, or its colours known only now), as the pair about to appear;
@@ -657,11 +728,12 @@ private:
         secondBegun = true;
         choosingAgain = true;
         choiceBegins();
+        noteWay(o);
         if (thinking == Thinking::Free) {
             seen = o;
-            again_ = std::async(std::launch::async, [this, legal, diagnosticRequest] { return diagnosticChoose(seen, coming, legal,diagnosticRequest,1); });
+            again_ = std::async(std::launch::async, [this, legal, diagnosticRequest, way = wayRead()] { return diagnosticChoose(seen, coming, legal,diagnosticRequest,1,way); });
         } else {
-            secondChoice = diagnosticChoose(o, coming, legal,diagnosticRequest,1);
+            secondChoice = diagnosticChoose(o, coming, legal,diagnosticRequest,1,wayRead());
             secondAt = againScript ? fromScript(*againScript, secondMove, -1) : againLate;
             if (secondAt < 0) second = false; // (in the round played again it did not come while the pair was in the air)
         }
@@ -830,18 +902,37 @@ private:
         const Player& p = o.self();
         const unsigned legal = legalPlacements(p.field);
         if (!fallen) {
-            // (a placement that is legal and has no path from where a pair appears: the next legal one is taken)
+            // (a placement that is legal and has no path from where a pair appears: the one nearest to it that has, as
+            //  reach() takes it)
             const int wanted = id;
-            for (int tries = 0; id >= 0 && tries < PLACEMENTS; ++tries, id = (id + 1) % PLACEMENTS) {
+            if (id >= 0) {
                 int reached = id;
-                if (planTarget(o, pair, reached, path, id == wanted && targetSetup && !second, legal)) {
+                if (planTarget(o, pair, reached, path, targetSetup && !second, legal)) {
+                    // Once, at the actual spawn; never speed up a provisional
+                    // route that must keep other placements available.
+                    const bool committed = id == wanted && !fastestWays && holdDown == 1 && !idle && !second && !askInAir;
+                    const Pair colors = committed ? currentColors(o) : Pair{};
+#ifdef JURAIC_LV38_REPLAY_AUDIT
+                    auditInput(o, pair, reached, legal, colors, path, committed);
+#endif
+                    if (fastQuietInput && committed && colors.axis && colors.child && fastInputAllowed(o, fastBusy)) {
+                        int cuts = 0;
+                        planner.accelerateQuiet(p.field, pair, reached, legal, colors, o.timing, o.rules, path,
+                                                fastSoft, fastStates, &cuts);
+                        fastStateLimitHits += cuts;
+                    }
                     const int previous=target;target = reached;
                     diagnosticTarget(o,0,diagnosticSelected,previous);
-                    if (id != wanted) ++rerouted, targetSetup = false;
                     return;
                 }
+                ++rerouted;
+                targetSetup = false;
+                const int best = nearest(o, pair, wanted, path);
+                if (best >= 0) {
+                    const int previous=target;target = best;
+                    diagnosticTarget(o,0,diagnosticSelected,previous);
+                }
             }
-            if (wanted >= 0) ++rerouted;
             return;
         }
         if (id >= 0) reach(o, pair, id, legal,1);
@@ -883,7 +974,8 @@ private:
         if (climbing.empty() || climbing.back() != pair) climbing.push_back(pair);
     }
     // The placement `pair` can still reach whose two pieces come down nearest to the columns of placement `id`; of equal
-    // ones the one with the smaller number, and its way (`way`, left as it was when none). -1: none.
+    // ones the one with the smaller number, and its way (`way`, left as it was when none) as a chosen placement has it
+    // (planSure: the cells not sure of, the way over soonest). -1: none.
     int nearest(const Observation& o, const PairControl& pair, int id, InputPath& way) {
         const Player& p = o.self();
         const unsigned legal = legalPlacements(p.field);
@@ -895,8 +987,9 @@ private:
             const Placement t = placement(other);
             const int apart = std::abs(int(t.x) - int(want.x)) + std::abs(t.childX() - want.childX());
             if (best >= 0 && apart >= bestApart) continue;
-            if (wayTo(o, pair, other, there)) best = other, bestApart = apart, std::swap(way, there);
+            if (wayTo(o, pair, other, there)) best = other, bestApart = apart;
         }
+        if (best >= 0 && !sureWayTo(o, pair, best, way)) wayTo(o, pair, best, way);
         return best;
     }
 
@@ -935,7 +1028,6 @@ private:
     int againPair = -1, againTarget = -1; // ... the pair (Player::nextPair then) and the placement it was begun for
     PairControl born;     // the pair as it appears (in the frame it appears)
     int appearedPair = -1; // Player::nextPair of the pair in the air whose appearance was seen (or that was taken up)
-    const PairControl* airFrom = nullptr; // askInAir: the pair in the air a second choice is offered placements for
     int heldRun[2] = {0, 0}; // countHeld: the frames the turn and the move have been held in a row
 };
 

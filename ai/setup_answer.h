@@ -9,7 +9,7 @@ template<class Stop>
 int keepSetupAnswer(const Observation& o, const PlanSet& mine, const PlanSet& theirs,
                     int original, int faster, const Params& p, uint64_t seed, Stop stop) {
     if (original == faster || original < 0 || faster < 0 || !p.readMidgame || !p.checkKnownExchange ||
-        o.rules.cancel || p.handWait || o.self().scoring.allClear || o.opponent().scoring.allClear ||
+        p.handWait || o.self().scoring.allClear || o.opponent().scoring.allClear ||
         o.self().incoming.total() || o.opponent().incoming.total() || mine.knownCount < 2 ||
         p.x3ChokeMin <= 0) return faster;
     if (stop()) return original;

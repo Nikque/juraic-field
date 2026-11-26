@@ -4,6 +4,15 @@
 #include "../ai/level.h"
 #include "level_ex.h"
 #include "../game/rules.h"
+#include <algorithm>
+#include <charconv>
+#include <fcntl.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+#include <string_view>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -83,12 +92,28 @@ struct Settings {
     std::wstring musicFile(int scene) const { return bgm[scene] && !bgmName[scene].empty() ? std::wstring(MUSIC_FOLDERS[scene]) + L"/" + bgmName[scene] : std::wstring(); }
 };
 
+// Both local level pickers use the same order. Choosing Ex opts into the rule it needs.
+inline void stepAiLevel(Settings& s, int seat, int by) {
+    int& style = seat ? s.aiStyle : s.aiStyle1;
+    int& level = seat ? s.aiLevel : s.aiLevel1;
+    int& mark = seat ? s.aiEx : s.aiEx1;
+    const AiLevelPick next = stepAiLevelPick(level, style != 0, levelEx(level, mark != 0, s.rules.cancel), by);
+    if (next.ex && !s.rules.cancel) {
+        // A dormant mark in an older settings file must not change the other player's AI.
+        (seat ? s.aiEx1 : s.aiEx) = 0;
+        s.rules.cancel = true;
+    }
+    style = next.quiet;
+    level = next.level;
+    mark = next.ex;
+}
+
 // The six groups of the AI's levels as the screen names and colours them (ai/level.h levelGroup): levels 1 to 9,
 // 10 to 20, 21 to 25, 26 to 30, 31 to 35, and 36. The colours are 0xRRGGBB, chosen to be told apart on the dark screen.
 inline const wchar_t* const LEVEL_GROUP_NAMES[juraic::ai::LEVEL_GROUPS] = {L"超初心者用", L"初心者用", L"初〜中級者用", L"中〜上級者用", L"上級〜超級者用", L"超級者用"};
 inline constexpr unsigned LEVEL_GROUP_COLORS[juraic::ai::LEVEL_GROUPS] = {0x8FD694, 0x6EC6FF, 0xFFD966, 0xFFA24D, 0xFF6B6B, 0xD18CFF};
 // (ex: the level plays as its Ex - levelEx of play/level_ex.h says when)
-inline std::wstring levelText(int level, bool ex = false) { return L"Lv " + levelNumber(level, ex) + L"　" + LEVEL_GROUP_NAMES[juraic::ai::levelGroup(level)]; }
+inline std::wstring levelText(int level, bool ex = false, bool quiet = false) { return aiLevelName(level, quiet, ex) + L"　" + LEVEL_GROUP_NAMES[juraic::ai::levelGroup(level)]; }
 inline unsigned levelColor(int level) { return LEVEL_GROUP_COLORS[juraic::ai::levelGroup(level)]; }
 
 // The parts of the settings screen.
@@ -187,12 +212,12 @@ struct SettingsTable {
             // (with the cancel the levels from LEVEL_EX_FROM up come twice, the second time as "Ex": the row steps through
             //  both and keeps the mark in aiEx, which has no row of its own - play/level_ex.h)
             {L"AI のレベル（2P 側）", "aiLevel", 1, juraic::ai::LAST_LEVEL, 1, [](Settings& x) -> int& { return x.aiLevel; },
-             [this, &s](int v) { return levelText(styleLevel(v, s.aiStyle), !s.aiStyle && levelEx(v, s.aiEx != 0, cancel != 0)); }},
+             [this, &s](int v) { return levelText(styleLevel(v, s.aiStyle), !s.aiStyle && levelEx(v, s.aiEx != 0, cancel != 0), s.aiStyle != 0); }},
             {L"AI の Ex（2P 側）", "aiEx", 0, 1, 1, [](Settings& x) -> int& { return x.aiEx; }, onOff},
             {L"AI（観戦の 1P 側）", "aiStyle1", 0, 1, 1, [](Settings& x) -> int& { return x.aiStyle1; },
              [](int v) { return std::wstring(v ? L"Juraic 催促（極小）" : L"Juraic 催促（小）"); }},
             {L"AI のレベル（観戦の 1P 側）", "aiLevel1", 1, juraic::ai::LAST_LEVEL, 1, [](Settings& x) -> int& { return x.aiLevel1; },
-             [this, &s](int v) { return levelText(styleLevel(v, s.aiStyle1), !s.aiStyle1 && levelEx(v, s.aiEx1 != 0, cancel != 0)); }},
+             [this, &s](int v) { return levelText(styleLevel(v, s.aiStyle1), !s.aiStyle1 && levelEx(v, s.aiEx1 != 0, cancel != 0), s.aiStyle1 != 0); }},
             {L"AI の Ex（観戦の 1P 側）", "aiEx1", 0, 1, 1, [](Settings& x) -> int& { return x.aiEx1; }, onOff},
             // (the pictures: one for each field and one for the rest of the screen; toko's field is the first player's)
             {L"背景（1P 側のフィールド）", PICTURE_KEYS[PICTURE_FIELD1], 0, int(s.backgroundFiles[PICTURE_FIELD1].size()), 1, [](Settings& x) -> int& { return x.background[PICTURE_FIELD1]; }, picture(PICTURE_FIELD1)},
@@ -212,21 +237,19 @@ struct SettingsTable {
                     if (item.key == key) item.section = section;
         };
         in(SEC_CONTROLS, {"preInput", "cancel", "diagonal", "quickDrop"});
-        in(SEC_AI, {"aiAuto", "aiLead", "aiBudget", "aiThreads", "aiWidth", "aiDepth", "aiQueues", "aiBuildHold", "aiStyle", "aiStyle1", "aiLevel", "aiLevel1"});
-        in(SETTING_SECTIONS, {"aiEx", "aiEx1"}); // (on no part of the screen: kept in the settings file, changed by the rows of the levels)
+        in(SEC_AI, {"aiAuto", "aiLead", "aiBudget", "aiThreads", "aiWidth", "aiDepth", "aiQueues", "aiBuildHold", "aiLevel", "aiLevel1"});
+        in(SETTING_SECTIONS, {"aiStyle", "aiStyle1", "aiEx", "aiEx1"}); // (on no part of the screen: kept in the settings file, changed by the rows of the levels)
         for (SettingItem& item : items) {
             if (item.key == "aiLevel" || item.key == "aiLevel1") item.color = levelColor;
             if (item.key == "aiLevel")
                 item.change = [this](Settings& x, int by) {
-                    if (x.aiStyle) return;
-                    const LevelPick pick = levelStep(x.aiLevel, x.aiEx != 0, by, cancel != 0);
-                    x.aiLevel = pick.level, x.aiEx = pick.ex;
+                    stepAiLevel(x, 1, by);
+                    cancel = x.rules.cancel;
                 };
             if (item.key == "aiLevel1")
                 item.change = [this](Settings& x, int by) {
-                    if (x.aiStyle1) return;
-                    const LevelPick pick = levelStep(x.aiLevel1, x.aiEx1 != 0, by, cancel != 0);
-                    x.aiLevel1 = pick.level, x.aiEx1 = pick.ex;
+                    stepAiLevel(x, 0, by);
+                    cancel = x.rules.cancel;
                 };
         }
         in(SEC_VIEW, {"volume", "prediction", "ghost", "background1P", "background2P", "backgroundOther", "backgroundDim", "bgmVersus", "bgmToko", "bgmOther", "bgmVolume"});
@@ -234,8 +257,6 @@ struct SettingsTable {
             for (SettingItem& item : items)
                 if (item.key == key) item.enabled = enabled;
         };
-        when("aiLevel", [](const Settings& x) { return x.aiStyle == 0; });
-        when("aiLevel1", [](const Settings& x) { return x.aiStyle1 == 0; });
         for (const char* key : {"aiWidth", "aiDepth", "aiQueues"}) when(key, [](const Settings& x) { return x.aiAuto == 0; }); // (the automatic search sets them itself)
         when("tsumoCorrection", [](const Settings& x) { return x.rules.colors > 3; }); // (with three colours the first pairs hold no more anyway)
         when("backgroundDim", [](const Settings& x) { return x.background[PICTURE_FIELD1] || x.background[PICTURE_FIELD2] || x.background[PICTURE_OTHER]; });
@@ -264,18 +285,32 @@ struct SettingsTable {
     }
 };
 
-// "key=value" as a tool takes it on its command line (--set): the value is kept within the range of the
-// setting. False for a key that is not known.
+// Accept a complete decimal integer, including the signs and whitespace allowed in old INI files.
+inline bool settingInteger(std::string_view value, int& result) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return false;
+    value = value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+    if (value.front() == '+') {
+        value.remove_prefix(1);
+        if (value.empty() || value.front() < '0' || value.front() > '9') return false;
+    }
+    const char* end = value.data() + value.size();
+    const auto parsed = std::from_chars(value.data(), end, result);
+    return parsed.ec == std::errc{} && parsed.ptr == end;
+}
+
+// Valid values are clamped to the range offered by the settings screen.
 inline bool setByText(SettingsTable& table, Settings& s, const std::string& pair) {
-    const size_t eq = pair.find('=');
-    bool known = false;
-    for (auto& item : table.items)
-        if (eq != std::string::npos && item.key == pair.substr(0, eq)) {
-            const int v = std::atoi(pair.c_str() + eq + 1);
-            item.value(s) = v < item.low ? item.low : v > item.high ? item.high : v;
-            known = true;
+    const auto eq = pair.find('=');
+    int value;
+    if (eq == std::string::npos || !settingInteger(std::string_view(pair).substr(eq + 1), value)) return false;
+    for (auto& item : table.items) {
+        if (pair.compare(0, eq, item.key) == 0) {
+            item.value(s) = std::clamp(value, item.low, item.high);
+            return true;
         }
-    return known;
+    }
+    return false;
 }
 
 // The place of `name` among `files`, counted from 1; 0 = it is not there. A file of the same name with another
@@ -316,7 +351,15 @@ inline std::wstring fromUtf8(const std::string& u) {
     return out;
 }
 
-inline void loadSettings(const std::filesystem::path& path, Settings& s) {
+// The milliseconds a choice of the AI may take in a game played live (Params::thinkBudget), from Settings::aiLead (the
+// frames before its pair the choice begins, 0: automatic) and Settings::aiBudget: what is left 20 ms before the pair,
+// a millisecond at least - never 0 or less, which would be a search without a clock.
+inline int liveThinkBudget(int lead, int budget) {
+    return lead > 0 ? std::max(1, std::min(budget, lead * 1000 / 60 - 20)) : budget;
+}
+
+inline void loadSettings(const std::filesystem::path& path, Settings& s,
+                         const std::function<void(const std::string&, size_t)>& readExtra = {}) {
     SettingsTable table(s);
     std::ifstream in(path);
     std::string line;
@@ -330,14 +373,8 @@ inline void loadSettings(const std::filesystem::path& path, Settings& s) {
             if (line.substr(0, eq) == std::string(PICTURE_KEYS[k]) + "File") pictureNamed[k] = true, picture[k] = fromUtf8(line.substr(eq + 1));
         for (int k = 0; k < MUSIC_SCENES; ++k)
             if (line.substr(0, eq) == std::string(MUSIC_KEYS[k]) + "File") musicNamed[k] = true, music[k] = fromUtf8(line.substr(eq + 1));
-        for (auto& item : table.items)
-            if (item.key == line.substr(0, eq)) {
-                try {
-                    const int v = std::stoi(line.substr(eq + 1));
-                    item.value(s) = v < item.low ? item.low : v > item.high ? item.high : v;
-                } catch (...) {
-                }
-            }
+        setByText(table, s, line);
+        if (readExtra) readExtra(line, eq);
     }
     // (the picture and the music by their names: the files of the folders may have changed)
     for (int k = 0; k < PICTURE_PLACES; ++k)
@@ -347,12 +384,63 @@ inline void loadSettings(const std::filesystem::path& path, Settings& s) {
     table.apply(s);
 }
 
-inline void saveSettings(const std::filesystem::path& path, Settings& s) {
+inline bool saveSettings(const std::filesystem::path& path, Settings& s,
+                         const std::function<void(std::ostream&)>& writeExtra = {}) {
+    // Reserve a directory on the same filesystem so concurrent writers always use separate files.
+    std::error_code error;
+    std::filesystem::path staging;
+    for (unsigned id = 0; ; ++id) {
+        staging = path;
+        staging += ".tmp." + std::to_string(id);
+        if (std::filesystem::create_directory(staging, error)) break;
+        if (error && error != std::errc::file_exists) return false;
+    }
+#ifndef _WIN32
+    // The INI can contain a server token. Keep the unpublished file private.
+    std::filesystem::permissions(staging, std::filesystem::perms::owner_all, error);
+    if (error) {
+        std::filesystem::remove(staging, error);
+        return false;
+    }
+#endif
+    const auto temporary = staging / "settings";
     SettingsTable table(s);
-    std::ofstream out(path);
+    std::ofstream out(temporary);
     for (auto& item : table.items) out << item.key << '=' << item.value(s) << '\n';
     for (int k = 0; k < PICTURE_PLACES; ++k) out << PICTURE_KEYS[k] << "File=" << toUtf8(s.backgroundName[k]) << '\n';
     for (int k = 0; k < MUSIC_SCENES; ++k) out << MUSIC_KEYS[k] << "File=" << toUtf8(s.bgmName[k]) << '\n';
+    if (out && writeExtra) writeExtra(out);
+    out.close();
+    bool saved = false;
+    if (out) {
+        // Persist complete contents before publishing the new directory entry.
+#ifdef _WIN32
+        const int fd = _wopen(temporary.c_str(), _O_WRONLY | _O_BINARY);
+        if (fd >= 0) {
+            saved = _commit(fd) == 0;
+            if (_close(fd) != 0) saved = false;
+        }
+#else
+        const int fd = ::open(temporary.c_str(), O_WRONLY);
+        if (fd >= 0) {
+            saved = ::fsync(fd) == 0;
+            if (::close(fd) != 0) saved = false;
+        }
+        if (saved) {
+            const auto old = std::filesystem::status(path, error);
+            if (!error && std::filesystem::exists(old))
+                std::filesystem::permissions(temporary, old.permissions(), error);
+            saved = !error || error == std::errc::no_such_file_or_directory;
+        }
+#endif
+    }
+    if (saved) {
+        std::filesystem::rename(temporary, path, error);
+        saved = !error;
+    }
+    std::filesystem::remove(temporary, error);
+    std::filesystem::remove(staging, error);
+    return saved;
 }
 
 } // namespace play

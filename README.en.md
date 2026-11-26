@@ -2,14 +2,14 @@
 
 [日本語 README](README.md)
 
-[Changes from v0.9.7 to v0.9.8.1 (Japanese)](docs/changes-since-0.9.7.md)
+[Changes from v0.9.7 to v0.9.9 (Japanese)](docs/changes-since-0.9.7.md)
 
 Juraic Field is a falling-block puzzle program for versus and solo play. It has solo chain building ("toko"), two players on one PC, matches against the versus AI "Juraic", AI-versus-AI matches to watch, network matches between two people, saving and playing back replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit), Linux (x86-64), macOS (Apple silicon) and Android (arm64). The screens are in Japanese.
 
 - `JuraicField.exe` (`JuraicField` on Linux, `JuraicField.app` on macOS): the game
 - `JuraicFieldGenerator.exe` / `random_19_chain.exe`: the chain board generator (GUI / CLI; the GUI is Windows only)
 
-The rules follow those of Puyo Puyo Tsu. Juraic Field is an unofficial program made by an individual and is
+Juraic Field is an unofficial program made by an individual and is
 not affiliated with SEGA CORPORATION. "Puyo Puyo" is a registered trademark of SEGA CORPORATION.
 
 ## Getting and starting it
@@ -153,17 +153,17 @@ During a match, the number won is shown between the two fields: up to five as a 
 - There are two kinds, with different play styles:
   - **Juraic 催促（小）**: once its field fills up, it attacks with small chains while keeping its main chain (the default).
   - **Juraic 催促（極小）**: it hardly attacks on its own, and grows its main chain before firing it.
-- Juraic 催促（小） has 37 levels and defaults to Lv 37. Lv 37 reads the opponent's possible replies before making a midgame poke. Juraic 催促（極小） is fixed at Lv 36.
+- Juraic 催促（小） has 38 levels and defaults to Lv 38 on a new installation. Lv 37 reads the opponent's possible replies before making a midgame poke. Juraic 催促（極小） is fixed at Lv 36.
   - Lv 1 to 9: for complete beginners
   - Lv 10 to 20: for beginners
   - Lv 21 to 25: beginner to intermediate
   - Lv 26 to 30: intermediate to advanced
   - Lv 31 to 35: advanced to expert
-  - Lv 36 and 37 are for experts
+  - Levels 36 through 38 are for experts
 - The lower the level, the slower it places pairs, the later it sees the opponent's field, and the less it reads ahead.
 - Adjacent levels through Lv 36 were set by matches of 催促（小） against itself, so that the higher level wins about six rounds in ten.
-- With cancels enabled, the regular AI levels are offered in the order Lv 36, Lv 36Ex, Lv 37, Lv 37Ex. Ex looks for the quickest input sequence to lock the pair in the chosen position.
-- In matches against the AI and in AI-versus-AI matches, you can change the kind and the level of the AI with mouse clicks on the screen shown after the match. The change applies from the next match. Holding the button down on a level keeps changing it.
+- Settings and the arrows after a local match use the same level list. After Lv35 the choices are Lv36催促小, Lv36催促極小, Lv36Ex, Lv37, Lv37Ex, Lv38 and Lv38Ex. Choosing Ex enables cancels for the next match.
+- In matches against the AI and in AI-versus-AI matches, you can change the AI level using a single selector on the screen shown after the match. The change applies from the next match. Holding the button down on a level keeps changing it.
 - It uses up to 24 CPU threads: two fewer than the logical cores of the PC, or one fewer on PCs with fewer than eight logical cores.
 - Each decision is kept within 180 ms; on a slow PC the search is made narrower. After a round in which the AI was short of time, the top of the screen shows 処理落ち: AI が弱くなった可能性 ("slowdown: the AI may have played weaker").
 - A measurement: against the public AI [Ama](https://github.com/citrus610/ama), made to play the same moves every time, 催促（小） at Lv 36 won 1,093 of 1,440 rounds. This was the version of 2026-10-14, with the search size used for measuring.
@@ -174,7 +174,7 @@ During a match, the number won is shown between the two fields: up to five as a 
 
 - Use this mode in an offline two-player match of the real game on the same PC. The person plays on the left and Juraic plays on the right.
 - Open 実機の 2P を Juraic が操作 from the menu. Choose the real game's window with 読み取り開始, then choose 2P の操作を開始.
-- 盤面の取得方法 defaults to メモリ読み取り（キャンセルなし）. It opens the real game's memory for reading only. To select Lv 36Ex or Lv 37Ex, switch to メモリ読み取り（キャンセルあり）.
+- 盤面の取得方法 defaults to メモリ読み取り（キャンセルなし）. Choosing Ex in the default memory mode switches to メモリ読み取り（キャンセルあり）. Screen capture also supports Ex. Screen capture holds each tap for two frames and accepts a faster route only if a one-frame input delay still lands the pair at the same position and orientation.
 - 入力方式 defaults to キー（スキャンコード）. Assign a keyboard to the 2P side in the real game.
 - The kind and the level of the AI can be changed on that screen. Each time it opens, they start from those of the 2P side in the settings.
 - Install the [ViGEmBus driver](#installing-the-virtual-pad-driver-vigembus) if you select 仮想パッド（非推奨）.

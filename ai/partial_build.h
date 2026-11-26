@@ -33,9 +33,9 @@ inline bool stablePartialBuildRoute(const Duel& duel, int who, Placement target,
 template<class Stop>
 int preferKnownPartialBuild(const Observation& o, const PlanSet& mine, const PlanSet& theirs, const BuildResult& beam,
                             int chosen, unsigned allowed, const Params& p, uint64_t seed, int rate, Stop stop) {
-    if (chosen < 0 || o.players != 2 || !p.readMidgame || !p.checkKnownExchange || p.handWait || o.rules.cancel ||
+    if (chosen < 0 || o.players != 2 || !p.readMidgame || !p.checkKnownExchange || p.handWait ||
         beam.cut || beam.told != p.queues() || theirs.pairCount < 2 || mine.pairCount < 2 || mine.pairCount > 3 ||
-        o.self().incoming.total() || o.opponent().incoming.total() || o.opponent().chain.chains ||
+        o.self().incoming.total() || o.opponent().incoming.total() || chainRunning(o, 1 - o.me) ||
         o.self().scoring.allClear || o.opponent().scoring.allClear ||
         (o.self().phase != Phase::Control && (o.self().phase != Phase::Next || o.busyLeft[o.me])) || stop()) return chosen;
 

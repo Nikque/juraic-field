@@ -94,6 +94,39 @@ int main(int argc, char** argv) {
         check(h(juraic::BTN_CW | juraic::BTN_LEFT) == juraic::BTN_LEFT, "held from the menu all through the countdown, the button does not count; one pressed in it does");
     }
 
+    // The devices of two people: a device a player has chosen stays that player's, whatever the other is given.
+    {
+        const auto chosen = [](int first, int second, int padCount, int want0, int want1) {
+            InputConfig config;
+            config.device[0] = first, config.device[1] = second;
+            int device[2] = {-9, -9};
+            chooseDevices(config, padCount, 2, device);
+            return device[0] == want0 && device[1] == want1;
+        };
+        check(chosen(-1, 2, 1, 0, 2), "2P chose controller 1: 1P, choosing nothing, does not take it");
+        check(chosen(-1, 0, 0, 1, 0), "2P chose keyboard 1: 1P, choosing nothing, gets keyboard 2");
+        check(chosen(-1, 3, 2, 2, 3), "2P chose controller 2: 1P, choosing nothing, gets controller 1");
+        check(chosen(-1, 2, 2, 3, 2), "2P chose controller 1: 1P, choosing nothing, gets controller 2");
+        check(chosen(2, -1, 1, 2, 0), "1P chose controller 1: 2P, choosing nothing, gets keyboard 1");
+        check(chosen(-1, -1, 2, 2, 3) && chosen(-1, -1, 1, 2, 0) && chosen(-1, -1, 0, 0, 1), "nobody chose: controllers first, then keyboard 1 and 2");
+        check(chosen(3, -1, 1, 2, 0), "a chosen controller that is gone counts as none chosen");
+        check(chosen(2, 2, 1, 2, 0), "both chose the same controller: 2P gets keyboard 1");
+    }
+
+    // A controller's binding is a bit of the 64 of Pads::raw: 64 to 255 (a key code's range) are not taken from the
+    // settings file, and a bit beyond the 64 is never held (not the bit the shift would wrap round to).
+    {
+        check(InputConfig::fits(LAYOUT_PAD, 0) && InputConfig::fits(LAYOUT_PAD, 63) && InputConfig::fits(LAYOUT_XBOX, 63),
+              "a controller's buttons 0 and 63 can be bound");
+        check(!InputConfig::fits(LAYOUT_PAD, 64) && !InputConfig::fits(LAYOUT_XBOX, 64) && !InputConfig::fits(LAYOUT_PAD, 255) &&
+                  !InputConfig::fits(LAYOUT_PAD, -1),
+              "a controller's binding of 64, 255 or -1 is taken");
+        check(InputConfig::fits(LAYOUT_KEYS1, 255) && InputConfig::fits(LAYOUT_KEYS2, 64) && !InputConfig::fits(LAYOUT_KEYS1, 256),
+              "the key codes 64 to 255 are not taken for a keyboard, or 256 is");
+        check(padHeld(1ull << 63, 63) && padHeld(1, 0) && !padHeld(~0ull, 64) && !padHeld(~0ull, 255) && !padHeld(~0ull, -1),
+              "a button beyond the 64 bits of a controller is held");
+    }
+
     std::printf(failures ? "%d FAILED\n" : "pad tests passed\n", failures);
     return failures ? 1 : 0;
 }

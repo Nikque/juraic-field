@@ -17,6 +17,9 @@ struct Run {
     const Rules* rules = nullptr;
     const ai::Params* params = nullptr;
     int known = 2, goal = 78000, moves = 100;
+    // The frame counts of the game, as a match plays them (game/match.h): with Rules::cancel the rules read off the
+    // records of the real game on top of DEFAULT_TIMING.
+    Timing timing() const { return rules->cancel ? recordedRules(DEFAULT_TIMING) : DEFAULT_TIMING; }
 };
 
 struct GameResult {
@@ -32,13 +35,14 @@ struct GameResult {
     bool illegal = false; // a placement this engine does not allow (the game stops there)
     int theirPoints = 0;  // the last chain as the other AI counted it
     double theirMs = 0;
+    uint64_t seed = 0;    // of the game's tsumo (shown in the list of games; not in the checksum)
 };
 
 // The largest chain a trial drop starts now, after every fifth move.
 inline void checkpoint(const Run& run, const PlayerCore& me, GameResult& g) {
     if (g.moves % 5 || g.moves / 5 > CHECKPOINTS) return;
     ai::Trials trials;
-    ai::detect(me.field, *run.rules, DEFAULT_TIMING, run.params->trialMaxAdd, trials);
+    ai::detect(me.field, *run.rules, run.timing(), run.params->trialMaxAdd, trials);
     g.potential[g.moves / 5 - 1] = trials.best() ? trials.best()->points : 0;
 }
 
@@ -46,7 +50,7 @@ inline void checkpoint(const Run& run, const PlayerCore& me, GameResult& g) {
 // (the goal is reached, or the field is lost).
 inline bool playMove(const Run& run, PlayerCore& me, Incoming& nobody, Placement at, Pair pair, int64_t& frame, Rng& garbage, GameResult& g) {
     const int64_t before = frame;
-    const TurnResult turn = playTurn(me, nobody, at, pair, *run.rules, DEFAULT_TIMING, frame, garbage);
+    const TurnResult turn = playTurn(me, nobody, at, pair, *run.rules, run.timing(), frame, garbage);
     frame += turn.frames;
     ++g.moves;
     g.largest = std::max(g.largest, turn.points);
@@ -66,7 +70,7 @@ inline bool playMove(const Run& run, PlayerCore& me, Incoming& nobody, Placement
 inline GameResult playGame(const Run& run, uint64_t seed, ai::Builder& builder) {
     using Clock = std::chrono::steady_clock;
     const Rules& rules = *run.rules;
-    const Timing& timing = DEFAULT_TIMING;
+    const Timing timing = run.timing();
     const Tsumo tsumo = makeTsumo(rules, seed);
     PlayerCore me;
     Incoming nobody;

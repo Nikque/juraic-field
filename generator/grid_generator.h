@@ -660,9 +660,20 @@ std::optional<GridSolution<G>> gridGenerateOne(int colors, int target, int beamW
         static_assert(T::W == G::W && T::H == G::H && T::CLEAR_H == G::CLEAR_H && T::SPAWN_X == G::SPAWN_X &&
                       T::DEATH_COLUMNS == G::DEATH_COLUMNS);
         if (colors == 3) {
+            std::vector<grid_detail::Node<T>> deadT;
             const auto s = gridGenerateWithPlan<T>(colors, target, beamWidthValue, perParentValue, minExtra, maxExtra, rng,
-                                                   stop, depthOut, cancel);
-            if (!s) return std::nullopt;
+                                                   stop, depthOut, cancel, deadEnd ? &deadT : nullptr);
+            if (!s) {
+                if (deadEnd && !deadT.empty()) { // (the boards of T in the geometry of G: the same cells)
+                    deadEnd->clear();
+                    for (const grid_detail::Node<T>& n : deadT) {
+                        grid_detail::Node<G>& m = deadEnd->emplace_back();
+                        for (int i = 0; i < 3; ++i) m.field.plane[i].c = n.field.plane[i].c;
+                        m.trigger.c = n.trigger.c;
+                    }
+                }
+                return std::nullopt;
+            }
             GridSolution<G> same;
             for (int i = 0; i < 3; ++i) same.field.plane[i].c = s->field.plane[i].c;
             same.trigger.c = s->trigger.c;

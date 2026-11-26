@@ -19,7 +19,7 @@ struct Fixture {
 int main(){int checks=0,failed=0;const auto check=[&](bool ok,const char* name){++checks;if(!ok){++failed;std::printf("FAIL %s\n",name);}};
     {MotionClock14 c;check(c.observe(10,1000)==60 && c.observe(10,1016)==60,"repeated poll does not relabel an unchanged native update");check(c.observe(11,1017)==61,"next native update advances one frame");check(c.observe(11,6000)==61 && c.observe(12,6017)==361,"pause stays frozen and resume anchors to the new host interval");check(c.observe(0,7000)==420,"new match counter resets its clock");}
     {Fixture f;auto p=f.get();check(p && p->frame==100 && p->pair==20 && p->at.x==4 && p->at.y==6 && p->at.upper && p->at.dir==1,"current native pose reaches driver coordinates");}
-    {Fixture f(0);check(bool(f.get(0)) && !f.get(1),"private 1P uses its own seat proof");}
+    {Fixture f;check(bool(f.get(1)) && !f.get(0),"only the bound seat supplies its observed pose");}
     {Fixture f;check(!f.get(-1) && !f.get(2),"invalid seat cannot index arrays");}
     {Fixture f;f.sample.running[1]=false;check(!f.get(),"lock or pause blocks pose correction");}
     {Fixture f;f.sample.bound[1]=false;check(!f.get(),"unbound native owner cannot supply a correction");}

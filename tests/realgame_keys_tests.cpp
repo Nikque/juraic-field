@@ -26,6 +26,16 @@ static void pump() {
     while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&m);
 }
 
+static HWND foreground;
+static bool acceptAll = false;
+static UINT accepted = 0;
+static std::vector<INPUT> attempted;
+static HWND WINAPI testForeground() { return foreground; }
+static UINT WINAPI testSend(UINT count, LPINPUT input, int) {
+    attempted.assign(input, input + count);
+    return acceptAll ? count : accepted;
+}
+
 int main() {
     using play::GameKeys;
     using play::KeySender;
@@ -79,6 +89,36 @@ int main() {
         check(!s.running(), "the keys are stopped");
     }
 
+    // These focus changes and SendInput results are simulated. No system keys are sent.
+    for (const KeySender::How how : {KeySender::SCAN, KeySender::VIRTUAL}) {
+        KeySender s(testForeground, testSend);
+        check(s.start(w, L"", how, error), "begin simulated keyboard input");
+        const int left = s.keys.left;
+        foreground = w;
+        acceptAll = true;
+        check(s.hold({left}) && s.held()[left], "left is initially held");
+        foreground = nullptr;
+        acceptAll = false;
+        accepted = 0;
+        check(!s.hold({left}) && s.held()[left] && attempted.size() == 1 &&
+              (attempted[0].ki.dwFlags & KEYEVENTF_KEYUP), "release away from the window is refused");
+        foreground = w;
+        accepted = 8; // only the eight recovery releases reach the window
+        check(!s.hold({left}) && !s.held()[left] && attempted.size() == 9 &&
+              (attempted[0].ki.dwFlags & KEYEVENTF_KEYUP) && !(attempted.back().ki.dwFlags & KEYEVENTF_KEYUP) &&
+              attempted.back().ki.wScan == KeySender::scanOf(left), "recovery proposes both release and renewed press");
+        acceptAll = true;
+        check(s.hold({left}) && s.held()[left] && attempted.size() == 1 &&
+              !(attempted[0].ki.dwFlags & KEYEVENTF_KEYUP), "the refused renewed press is retried");
+        foreground = nullptr;
+        acceptAll = false;
+        accepted = 0;
+        check(!s.hold({left}) && s.held()[left], "the next release away is refused");
+        foreground = w;
+        acceptAll = true;
+        check(s.hold({left}) && s.held()[left] && attempted.size() == 9, "full recovery restores the requested key");
+    }
+
     // As messages: the window gets them wherever it is, a key once as it goes down and once as it goes up.
     {
         KeySender s;
@@ -98,6 +138,20 @@ int main() {
         pump();
         check(got.size() == 1 && got[0].message == WM_KEYUP && got[0].key == VK_LEFT, "stopped: what was held goes up");
         check(s.sent.load() == 4 && s.refused.load() == 0 && s.away.load() == 0, "four messages were sent");
+    }
+    // As messages to a window that is gone: the system takes none of them. The keys are not taken as held - asked for
+    // again they are sent again -, and none is let go when the keys stop.
+    {
+        const HWND gone = CreateWindowExW(0, c.lpszClassName, L"", WS_OVERLAPPED, 0, 0, 10, 10, nullptr, nullptr, c.hInstance, nullptr);
+        KeySender s;
+        check(gone != nullptr && s.start(gone, L"", KeySender::WINDOW, error), "the keys as messages are begun for a window soon gone");
+        DestroyWindow(gone);
+        s.hold({44, 203});
+        check(s.refused.load() == 2 && s.sent.load() == 0, "a window gone: the two keys are refused");
+        s.hold({44, 203});
+        check(s.refused.load() == 4, "keys refused are taken as held: not sent again when asked for again");
+        s.stop();
+        check(s.refused.load() == 4 && s.sent.load() == 0, "keys refused are let go as the keys stop");
     }
     DestroyWindow(w);
     std::printf("the keys of the real game: %d checks, %d failures\n", checks, failures);

@@ -119,15 +119,8 @@ class Audio {
     }
 
 public:
-#ifndef _WIN32
-    // (the streams are let go of before the samples and this object are gone: the sound runs on a thread of its own)
-    ~Audio() {
-        stopMusic();
-        for (SDL_AudioStream*& v : voice)
-            if (v) SDL_DestroyAudioStream(v), v = nullptr;
-        if (device) SDL_CloseAudioDevice(device), device = 0;
-    }
-#endif
+    // Stop the playback threads before releasing the samples they read.
+    ~Audio() { silence(); }
     bool init() {
         tone(pcm[SND_MOVE], 0, 620, 500, 0.045, 0.25, 0);
         tone(pcm[SND_ROTATE], 0, 860, 1080, 0.05, 0.22, 0);
@@ -160,12 +153,12 @@ public:
         if (!device) return false;
         const SDL_AudioSpec format{SDL_AUDIO_S16, 1, RATE};
         for (auto& v : voice)
-            if (!(v = SDL_CreateAudioStream(&format, nullptr)) || !SDL_BindAudioStream(device, v)) return false;
+            if (!(v = SDL_CreateAudioStream(&format, nullptr)) || !SDL_BindAudioStream(device, v)) return silence(), false;
         SDL_ResumeAudioDevice(device);
         return true;
 #else
-        if (FAILED(XAudio2Create(&engine, 0, XAUDIO2_DEFAULT_PROCESSOR))) return false;
-        if (FAILED(engine->CreateMasteringVoice(&master))) return false;
+        if (FAILED(XAudio2Create(&engine, 0, XAUDIO2_DEFAULT_PROCESSOR))) return engine = nullptr, false;
+        if (FAILED(engine->CreateMasteringVoice(&master))) return master = nullptr, silence(), false;
         WAVEFORMATEX format{};
         format.wFormatTag = WAVE_FORMAT_PCM;
         format.nChannels = 1;
@@ -174,8 +167,23 @@ public:
         format.nBlockAlign = 2;
         format.nAvgBytesPerSec = RATE * 2;
         for (auto& v : voice)
-            if (FAILED(engine->CreateSourceVoice(&v, &format))) return false;
+            if (FAILED(engine->CreateSourceVoice(&v, &format))) return v = nullptr, silence(), false;
         return true;
+#endif
+    }
+    // A sound that could not be set up whole is none: what was made of it is let go of, and play, setVolume and
+    // startMusic then do nothing (they ask for the device, or the mastering voice and the engine, first).
+    void silence() {
+        stopMusic();
+#ifdef _WIN32
+        for (IXAudio2SourceVoice*& v : voice)
+            if (v) v->DestroyVoice(), v = nullptr;
+        if (master) master->DestroyVoice(), master = nullptr;
+        if (engine) engine->Release(), engine = nullptr;
+#else
+        for (SDL_AudioStream*& v : voice)
+            if (v) SDL_DestroyAudioStream(v), v = nullptr;
+        if (device) SDL_CloseAudioDevice(device), device = 0;
 #endif
     }
     // The volume of the sound effects (the music has its own: setMusicVolume).

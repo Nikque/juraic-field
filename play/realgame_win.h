@@ -88,7 +88,7 @@ inline HWND findProgramWindow(const std::wstring& program) {
 }
 
 struct RealGameMode {
-    enum Row { ROW_STYLE, ROW_LEVEL,
+    enum Row { ROW_LEVEL,
 #if JURAIC_REALGAME_MEMORY
         ROW_SOURCE,
 #endif
@@ -97,7 +97,7 @@ struct RealGameMode {
         ROW_WAY, ROW_LATE, ROW_LISTED, ROW_RANDOM, ROW_OPPONENT_INPUT,
 #endif
         ROW_BACK, ROWS };
-    int row = ROW_STYLE;
+    int row = ROW_LEVEL;
     int style = 0;                 // 0: Juraic 催促（小）, 1: Juraic 催促（極小） (as Settings::aiStyle)
     int level = juraic::ai::LAST_LEVEL; // stored normal level
     // The seat is marked "Ex" (as Settings::aiEx, play/level_ex.h): from Lv 36 up, with the real game read by its memory
@@ -138,7 +138,7 @@ struct RealGameMode {
     static int64_t clockFrame() { return realgame::frameAt(clockTime()); }
 
     void open(int settingsStyle, int settingsLevel) {
-        row = ROW_STYLE;
+        row = ROW_LEVEL;
         autoRead = true, notTheGame = nullptr;
 #if JURAIC_REALGAME_MEMORY
         listedPairs = false, realgame::primaryListedPairs14 = false;
@@ -151,6 +151,12 @@ struct RealGameMode {
         level = settingsLevel < 1 ? 1 : settingsLevel > juraic::ai::LAST_LEVEL ? juraic::ai::LAST_LEVEL : settingsLevel;
         stopReading();
     }
+    void useSettingsEx(bool selected) {
+        ex = !style && selected;
+#if JURAIC_REALGAME_MEMORY
+        if (ex && source == SOURCE_FIRST) source = SOURCE_FIRST_CANCEL;
+#endif
+    }
     bool showRow(int i) const {
         (void)i;
         return true;
@@ -159,12 +165,11 @@ struct RealGameMode {
     // (as on the settings screen: Lv 36 → Lv 1). False: the row has no value.
     bool change(int by) {
         const Hold hold(state);
-        if (row == ROW_STYLE) style = ((style + by) % 2 + 2) % 2;
-        else if (row == ROW_LEVEL) {
-            if (style) return false;
-            // (with the cancels: Lv 36, then Lv 36Ex)
-            const LevelPick to = levelStep(level, ex, by, cancelOffered());
-            level = to.level, ex = to.ex;
+        if (row == ROW_LEVEL) {
+            const AiLevelPick to = stepAiLevelPick(level, style != 0, cancels(), by);
+            level = to.level;
+            style = to.quiet;
+            useSettingsEx(to.ex);
         }
 #if JURAIC_REALGAME_MEMORY
         else if(row==ROW_SOURCE){
@@ -244,6 +249,7 @@ struct RealGameMode {
         told = {};
         driver.me = seat;
         realgame::Driver::prepare(agent.get());
+        driver.setPictureRules(agent.get());
         driver.lag = lag, driver.turnsSwapped = turnsSwapped, driver.agent = std::move(agent);
         driver.notes = &notes;
         juraic::inputdiag::trace.seat=driver.me;
@@ -302,8 +308,9 @@ struct RealGameMode {
             if (setup.program.empty()) return error = L"実機の実行ファイルの場所を取得できません", false;
             primary.press = [this](uint8_t b) {
                 // (a press asked for by hand comes first: the menus; and while the driver of the pictures has taken
-                //  over, the pad is its own)
-                if (!handPress.load() && !primaryFallback.load()) pad.press(b);
+                //  over, the pad is its own. Buttons held back so are told so: the play sends them again with the next
+                //  sample, so that the pad has the play's buttons as soon as it is the play's again)
+                return realgame::pressShared14(handPress.load() || primaryFallback.load(), [&] { return pad.press(b); });
             };
             spareAgent = std::move(spare), primaryFallback = false, primaryLost = 0;
             primary.notice = [this] { return std::array<int, 2>{noticeShown[0].load(), noticeShown[1].load()}; };
@@ -318,7 +325,6 @@ struct RealGameMode {
             return true;
         }
 #endif
-        if(!juraic::inputdiag::trace.active())return error=L"診断ログが開始されていないため、画面認識の方式では AI を開始できません",false;
         beginDriver(std::move(agent));
         playing = true;
         record.event(tracker.frame, std::string("the AI plays ") + seatName() + ": lag " + std::to_string(lag) + " to begin with, the two turns sent " + (turnsSwapped ? "swapped" : "as they are"));
@@ -373,6 +379,7 @@ struct RealGameMode {
     bool pressLater(std::wstring& error) {
         const Hold hold(state);
         if (!pad.running() && !pad.start(error)) return false;
+        presser.cancel();
         pressLeft = PRESS_WAIT + PRESS_HOLD, pressBits = PRESS_BUTTON_BITS[pressButton];
 #if JURAIC_REALGAME_MEMORY
         handPress = true;
@@ -393,8 +400,10 @@ struct RealGameMode {
         const Hold hold(state);
         if (pressLeft >= 0) pad.hold(0);
         pressLeft = -1;
+        presser.cancel();
 #if JURAIC_REALGAME_MEMORY
         handPress = false;
+        primary.resend(); // (the pad was the press's: the play's buttons go to it again)
 #endif
     }
     // The mode is left: everything stops and the pad is pulled out. Until then the pad stays plugged in once it is
@@ -421,10 +430,16 @@ struct RealGameMode {
         realgame::SentRecord sent{0, 0, why};
         if (pressLeft >= 0) {
             --pressLeft;
-            pad.hold(pressLeft >= 0 && pressLeft < PRESS_HOLD ? pressBits : USHORT(0));
+            const USHORT buttons = pressLeft >= 0 && pressLeft < PRESS_HOLD ? pressBits : USHORT(0);
+            const bool delivered = pad.hold(buttons);
+            if (buttons) presser.noteDelivery(delivered);
+            if (pressLeft < 0) presser.cancel();
             held.by = 2;
 #if JURAIC_REALGAME_MEMORY
             handPress = pressLeft >= 0;
+            // (the pad is the press's: the play sends its buttons again once it is the play's - those it holds may be the
+            //  same as before the press, which the play would not send again otherwise)
+            if (primaryPlaying) primary.resend();
         } else if (playing && primaryPlaying && !primaryFallback.load()) {
             // (memory first: the pad is set by the thread of PrimaryDrive14, as each frame of the game is read)
             handPress = false;
@@ -506,8 +521,9 @@ struct RealGameMode {
     enum { SOURCE_SCREEN, SOURCE_FIRST, SOURCE_UNDER, SOURCE_FIRST_CANCEL, SOURCES };
     bool sourceFirst() const { return source == SOURCE_FIRST || source == SOURCE_FIRST_CANCEL; }
     // The row of the screen is on the cancels: the levels from Lv 36 up are offered twice (play/level_ex.h).
-    bool cancelOffered() const { return source == SOURCE_FIRST_CANCEL; }
-    // The AI takes the ways over soonest: the cancels are offered and the level chosen is an Ex.
+    bool cancelOffered() const { return source != SOURCE_FIRST; }
+    // The AI takes the ways over soonest: the cancels are offered and the level chosen is an Ex. Juraic 催促（極小）
+    // (style 1) has no Ex and takes the straight ways; so does every level without the cancels (the player's choice).
     bool cancels() const { return !style && levelEx(level, ex, cancelOffered()); }
     int source = SOURCE_FIRST;
     bool restartWanted = false;   // the source was changed while the AI played: it is to be begun again
@@ -540,8 +556,7 @@ struct RealGameMode {
     // program) while the pictures show 2P with a pair in its hands: after PRIMARY_LOST such frames the driver of the
     // pictures takes over with the spare agent (primaryFallback), and gives the pad back once both seats are read in a
     // round again. (In four records of the real game two rounds were not bound at all, and 2P pressed nothing in them.)
-    // The driver of the pictures plays only with the diagnostic log open (startPlaying); without it nothing takes over,
-    // and the screen of the mode tells that the memory is not read (memoryText).
+    // The driver of the pictures takes over with or without the diagnostic log (it is written only when it is open).
     static constexpr int PRIMARY_LOST = 45;
     std::atomic<bool> primaryFallback{false};
     int primaryLost = 0;
@@ -549,9 +564,10 @@ struct RealGameMode {
     std::unique_ptr<juraic::ai::Agent> spareAgent;
     void watchPrimary() {
         const auto s = primary.status();
-        if (s.cpuSeat || s.reader.state == "bound") primaryLost = 0;
+        // (bound, and the seat read in a sample of late: a reader stays bound for seconds while it reads nothing)
+        if (s.cpuSeat || (s.reader.state == "bound" && realgame::primarySeatFresh14(s.seatReadUs, realgame::PrimaryRuntime14::clockUs()))) primaryLost = 0;
         else if (tracker.side[driver.me].inHand) ++primaryLost;
-        if (primaryLost < PRIMARY_LOST || !spareAgent || !juraic::inputdiag::trace.active()) return;
+        if (primaryLost < PRIMARY_LOST || !spareAgent) return;
         beginDriver(std::move(spareAgent));
         primaryFallback = true, primaryLost = 0, ++primaryFallbacks;
         pad.press(0);
@@ -562,7 +578,7 @@ struct RealGameMode {
     bool primaryBack() {
         if (!primaryFallback.load()) return false;
         const auto s = primary.status();
-        if (!s.cpuSeat && (s.reader.state != "bound" || !s.round)) return false;
+        if (!s.cpuSeat && (s.reader.state != "bound" || !s.round || !realgame::primarySeatFresh14(s.seatReadUs, realgame::PrimaryRuntime14::clockUs()))) return false;
         driver.stop();
         if (s.cpuSeat && !handPress.load()) pad.press(0);
         spareAgent = driver.takeAgent();
@@ -617,8 +633,8 @@ struct RealGameMode {
         return L"盤面: メモリを照合中。現在は画面認識";
     }
 #else
-    bool cancelOffered() const { return false; }
-    bool cancels() const { return false; }
+    bool cancelOffered() const { return true; }
+    bool cancels() const { return !style && levelEx(level, ex, true); }
 #endif
     const realgame::Tracker& tracker = follow.tracker;
     WindowCapture capture;
@@ -675,7 +691,7 @@ struct RealGameMode {
         header += "each line: the frame of the clock (1/60 s), then what happened\n";
         if (DEBUG_PARTS && !record.open(folder / L"realgame" / stamp, header)) recordError = L"記録を作成できませんでした（" + (folder / L"realgame").wstring() + L"）";
         if(record.isOpen() && !juraic::inputdiag::trace.open(folder / L"realgame" / stamp / L"input-diagnostics.tsv",&RealGameMode::clockTime))
-            recordError=L"診断ログを作成できません（画面認識の方式では AI を開始できません）";
+            recordError=L"診断ログを作成できません（AI の操作は続けます）";
         if (DEBUG_PARTS && record.isOpen()) film.open(record.folder() / L"film"), topFilm.open(record.folder() / L"film");
         notes.clear();
 #if JURAIC_REALGAME_MEMORY

@@ -25,6 +25,7 @@
 // before it can be moved (Timing::nextShown).
 #include "../ai/observe.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -992,7 +993,17 @@ public:
             for (const uint8_t x : k) n += x != 0;
         return n;
     }
-    uint64_t colourRevision() const { return colourRevision_; }
+    // The pairs as side s is shown them (knows, pairOf), one number each: 0 not known, else 256 + axis * 16 + child. A
+    // pair read again otherwise at the same place changes it while pairsLearnt and knownCount stay as they were.
+    std::vector<uint16_t> pairsShown(int s) const {
+        std::vector<uint16_t> v(pairsLearnt(), 0);
+        for (size_t i = 0; i < v.size(); ++i)
+            if (knows(s, int(i))) {
+                const juraic::Pair p = pairOf(s, int(i));
+                v[i] = uint16_t(256 + (int(p.axis) & 15) * 16 + (int(p.child) & 15));
+            }
+        return v;
+    }
     // Where the two windows' pairs agree: for each shift (maxShift at most either way), the pairs both windows showed
     // standing still (knownOf 1) at the places it puts side by side, from the last of them back - the shift kept while
     // its last two agree (or all, fewer), else another taken whose last alignRun agree, the most of them (one alone).
@@ -1042,8 +1053,9 @@ public:
     std::deque<Event> events[2];
     uint64_t told[2] = {};
     // ... of this tracker as it was made or reset (made anew: the events counted from 0 again)
-    static inline uint64_t made = 0;
-    uint64_t id = ++made;
+    // (counted atomically: trackers are made and reset on the image thread and on the memory worker at once)
+    static inline std::atomic<uint64_t> made{0};
+    uint64_t id = made.fetch_add(1, std::memory_order_relaxed) + 1;
 
     // One picture, of the frame `at` (frames counted by the clock: a frame that was not taken is a number left out).
     void step(const Reading& r, int64_t at) {
@@ -1576,8 +1588,6 @@ private:
         uint8_t& k = known[size_t(index)];
         if (k == 1 && sure && !same(pairs[size_t(index)], p)) ++doubts, ++relearnt[s], relearntFrom[s] = learntAt[s][size_t(index)];
         if (k == 1 && !sure) return;
-        const juraic::Pair previous = pairs[size_t(index)];
-        if (k && (previous.axis != p.axis || previous.child != p.child)) ++colourRevision_;
         const bool changed = k != 1 || !same(pairs[size_t(index)], p);
         pairs[size_t(index)] = p, k = sure ? 1 : 2;
         if (!sure || !changed) return;
@@ -1588,7 +1598,6 @@ private:
         strengthAt(s, index) = 1;
         align();
     }
-    uint64_t colourRevision_ = 0;
     void newRound() {
         ++rounds;
         for (SideTrack& t : side)

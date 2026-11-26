@@ -1,9 +1,19 @@
 #pragma once
 // The frame counts the AI reckons with when it plays the real game by its memory (play/memory/primary_play14.h), on
 // their own: tools that hold records of the real game against the model need nothing else.
+#include "../../game/rules.h"
 #include "../../game/timing.h"
 
 namespace play::realgame {
+
+// The rules the AI reckons with when it plays the real game by its memory: those of the real game, with Rules::cancel
+// where the seat takes the ways over soonest (the reading then takes the other seat's pairs the soonest way too:
+// PlacementAgent, Observation::FASTEST_BOUND).
+inline juraic::Rules primaryRules14(bool cancel) {
+    juraic::Rules r = juraic::realGameRules();
+    r.cancel = cancel;
+    return r;
+}
 
 // The frame counts the AI reckons with when it plays the real game by its memory: those the records of the real game
 // agree with best (juraic::recordedRules; tools/realgame_record_check.cpp plays the buttons of every recorded pair on

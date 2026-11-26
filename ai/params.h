@@ -13,15 +13,125 @@
 #include <sstream>
 #include <string>
 
+#ifdef JURAIC_COUNT_COMPONENTS
+#include <array>
+#include <atomic>
+#include <cstdint>
+#endif
+
 namespace juraic::ai {
+enum class CountedComponent { TwoWave, Reselect, TailAnswer, TailRank, TailValue, CutAhead, Preserve, ExFlip, Count };
+#ifdef JURAIC_COUNT_COMPONENTS
+inline std::array<std::atomic<uint64_t>, static_cast<unsigned>(CountedComponent::Count)> componentCalls{};
+#endif
+inline void countComponent([[maybe_unused]] CountedComponent part) {
+#ifdef JURAIC_COUNT_COMPONENTS
+    componentCalls[static_cast<unsigned>(part)].fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
 
 inline constexpr int MAX_KNOWN = 16;
+
+enum class Lv38Part { TailAnswer, Response, Lifeline, Unannounced, Threat, Foundation, ShelterNarrow, TailRank, TailValue, PartialVeto, TwoWave, ReadyCover, WinRecheck, AnswerLegal, FullOffsetNext, Count };
+
+#ifdef JURAIC_LV38_PART_AUDIT
+inline thread_local Lv38Part bypassLv38Switch = Lv38Part::Count;
+inline thread_local uint32_t calledLv38Parts = 0;
+#endif
+
+inline bool lv38PartEnabled(int setting, [[maybe_unused]] Lv38Part part) {
+#ifdef JURAIC_LV38_PART_AUDIT
+    if (bypassLv38Switch == part) return true;
+#endif
+    return setting != 0;
+}
+
+inline void traceLv38Part([[maybe_unused]] Lv38Part part) {
+#ifdef JURAIC_LV38_PART_AUDIT
+    calledLv38Parts |= uint32_t(1) << unsigned(part);
+#endif
+}
+
+enum class Lv37Part { ReceiveCompare, PartialBuild, KnownPrefix, ProtectAnswer, EarlierWinFire, SplitMain, SmallReceive, SideResponse, AnswerWindow, CommittedAnswer, Shelter, ReadyBuild, Preparation, SetupSpeed, EquivalentRoute, Count };
+
+#ifdef JURAIC_LV37_PART_AUDIT
+inline thread_local Lv37Part bypassLv37Switch = Lv37Part::Count;
+#endif
+
+inline bool lv37PartEnabled(int setting, [[maybe_unused]] Lv37Part part) {
+#ifdef JURAIC_LV37_PART_AUDIT
+    if (bypassLv37Switch == part) return true;
+#endif
+    return setting != 0;
+}
 
 struct Params {
     // The explicit Lv 37 profile can use a longer known prefix in the beam.
     int knownPairs = 3;
     int checkKnownExchange = 0;
     int readMidgame = 0; // Keep tactical alternatives and read pressure with observed pairs.
+    int lv38Midgame = 0; // Lv 38 を明示したときだけ、中盤の攻めと対応を切り替える。
+    int lv37ReceiveCompare = 1;
+    int lv37PartialBuild = 1;
+    int lv37KnownPrefix = 1;
+    int lv37ProtectAnswer = 1;
+    int lv37EarlierWinFire = 1;
+    int lv37SplitMain = 1;
+    int lv37SmallReceive = 1;
+    int lv37SideResponse = 1;
+    int lv37AnswerWindow = 1;
+    int lv37CommittedAnswer = 1;
+    int lv37Shelter = 1;
+    int lv37ReadyBuild = 1;
+    int lv37Preparation = 1;
+    int lv37SetupSpeed = 1;
+    int lv37EquivalentRoute = 1;
+    int lv38TailAnswer = 1;
+    int lv38Response = 1;
+    int lv38Lifeline = 1;
+    int lv38Unannounced = 1;
+    int lv38Threat = 1;
+    int lv38Foundation = 1;
+    int lv38ShelterNarrow = 1;
+    int lv38TailRank = 1;
+    int lv38TailValue = 1;
+    int lv38PartialVeto = 1;
+    int lv38ReadyCover = -1; // Named Lv38 default when negative.
+    int lv38TwoWave = 1;
+    int lv38TwoWaveNoMain = -1; // Named Lv38 default when negative.
+    int lv38TwoWaveReselect = 0;
+    int lv38TwoWaveMainCover = 1;
+    int lv38FastInput = 1;
+    int lv38Plan5 = -1; // Preserve a second firing point and use it to answer (explicit Lv38).
+    int lv38Plan7 = 0; // Build a short offset during an incoming small attack.
+    int lv38Plan7Near = 0; // Maximum ordinary sum loss in thousandths (0 = unrestricted).
+    int lv38Plan7Guard = 0; // Require a safer answer window and rank by full offsets first.
+    int lv38Plan7MinQueues = 4;
+    int lv38WinRecheck = -1; // Check a win picked again after a refuted one the same way (explicit Lv38; -1: on there).
+    int lv38AnswerLegal = -1; // Answer only with tactical plans whose first placement the input reaches (explicit Lv38; -1: on there).
+    int lv38FullOffsetNext = -1; // Count the own placements before a full offset from the frame the pair is ready (explicit Lv38; -1: on there).
+    int lv38KeyRunsFair = 0;
+    int lv38FastSoft = 0;
+    int lv38FastStates = 0; // 0 uses the existing 512-state limit. First proposed setting: 4000.
+    int lv38FastBusy = 0;
+    int lv38ExFlip = 0;          // Try both input routes for a quiet same-colour pair.
+    int lv38ExSetupSaved = 0;    // Minimum saved frames for a nearby quiet setup; 0 uses the usual threshold.
+    int lv38TakeSmall = 0;
+    int lv38FireOrLose = 0; // Minimum number of coloured pieces before checking a fleeting main-chain fire.
+    int lv38Plan11 = 0; // Apply lv38ResponseKeep to the existing short-offset replacement.
+    int lv38ResponseKeep = 50; // Minimum percentage of the main left by that replacement.
+    int lv38Plan12 = 0; // Preserve a short head with a key-separated continuation.
+    int lv38HeadCut = 0;
+    int lv38TailMin = 920;
+    int lv38TailOfMain = 0;
+    int lv38CutWeight = 100;
+    int lv38CutAhead = 0;
+    int lv38CutKeep = 980;
+    int lv38CutQueues = 0;
+    int lv38CutSlots = 0;
+    int lv38CutNear = 100;
+    int lv38CutFrom = 40;
     // -1 uses the level's setting, 0 disables it. Limits are per thousand of the original build sum.
     int setupSpeedNear = -1; // Ordinary build only: accept a faster quiet placement.
     int setupSideNear = -1;  // Keep an executable side chain.
@@ -278,7 +388,7 @@ struct Params {
     // player against X3: 14 times the main chain, lost 1; 20 times garbage fell, lost 20. His small chains came when
     // X3's field was full: 42 of 63 at 50 cells or more.
     int x3AnswerFire = 0; // garbage on its way and this many cells or more on the own field: the largest chain the pairs on the screen can fire is fired when the pair in hand fires it (x3ChokeKeep percent of it, x3ChokeMin garbage or more) and it lets nothing fall (0 = off: the answer that scores best)
-    int x3PokeNet = 3;    // how the gain of a poke is counted against each reply of the opponent (the worst reply decides, x3PokeGain is the threshold). 0: V after the poke and his reply, less V now (in the reading X3 places nothing after the poke, and "now" has nobody firing: as counted, the plans that keep the main chain lose the round by it at the median, and X3 pokes about once in 1,600 decisions). 1: ... less V after the same reply without the poke, X3 placing nothing either (what the poke itself changes). 2: ... less the best V any plan of X3 reaches against the same reply (never above 0: the poke is fired when it is the best plan against every reply but for x3PokeGain, then 0 or below). 3: as 0, but a reply in which he gives up his main chain (x3PokeKeep) to fire at the poke, or after which the reading ends lost, does not count when X3, building on while his chain runs and firing second, offsets it (the reading of x3PokeRead).
+    int x3PokeNet = 0;    // how the gain of a poke is counted against each reply of the opponent (the worst reply decides, x3PokeGain is the threshold). 0: V after the poke and his reply, less V now (in the reading X3 places nothing after the poke, and "now" has nobody firing: as counted, the plans that keep the main chain lose the round by it at the median, and X3 pokes about once in 1,600 decisions). 1: ... less V after the same reply without the poke, X3 placing nothing either (what the poke itself changes). 2: ... less the best V any plan of X3 reaches against the same reply (never above 0: the poke is fired when it is the best plan against every reply but for x3PokeGain, then 0 or below). 3: as 0, but a reply in which he gives up his main chain (x3PokeKeep) to fire at the poke, or after which the reading ends lost, does not count when X3, building on while his chain runs and firing second, offsets it (the reading of x3PokeRead).
     int x3PokeFrom = 60;   // a poke only from this many cells on the own field (0 = always). Against the fixed Ama the ways of judging that poke more lost where the first poke came on fewer than 60 cells, and not from 60 on; near a full field one mostly pokes.
     int x3PokeMainFrom = 0; // ... and only when the own main chain is worth this many points or more (0 = always)
     int x3PokeMost = 0;   // a poke sends at most this many garbage pieces (0 = any number). "Keeps the main chain" compares what a trial drop starts before and after: when that is small before, any chain passes, the main chain too (counted: one poke in ten sent 85 pieces or more).
@@ -370,6 +480,7 @@ struct Params {
     // chain that offsets them all, one that lets two fall and one that sends five more are the same size, zero rows.
     int x3KeepFall = 0;     // 1: of two such plans below five rows the one that lets less garbage fall on the own field (or wait above it) stays, then as before; 2: both stay, that one and the one the rule before keeps
     int x3KeepFine = 0;     // 1: finer sizes - no garbage sent, one to five pieces, every row from one to nine by itself, ten to nineteen rows, twenty or more (0: 0 to 4 rows each, 5 to 9, 10 to 19, 20 or more)
+    int x3SentAfterHis = 0; // what a plan sends, and what an answer leaves above the opponent, are counted from what is above his field ... 0: in the observation; 1: when his landing or chain that runs is over, the own side placing nothing (gaze.h aboveAfterHis): garbage that waited there and that his running chain offsets is no part of the count, as garbage that falls on him is none
 
     // The reading of one exchange (exchange.h).
     int x2Depth = 3;       // pairs of the plans of both players (at most the pairs on the screen)
@@ -535,6 +646,7 @@ inline constexpr ParamItem PARAM_ITEMS[] = {
     {"x3SoonTo", &Params::x3SoonTo},
     {"x3KeepFall", &Params::x3KeepFall},
     {"x3KeepFine", &Params::x3KeepFine},
+    {"x3SentAfterHis", &Params::x3SentAfterHis},
     {"x3Crowd", &Params::x3Crowd},
     {"x3CrowdCurve", &Params::x3CrowdCurve},
     {"x3CrowdFrom", &Params::x3CrowdFrom},
@@ -582,6 +694,67 @@ inline constexpr ParamItem PARAM_ITEMS[] = {
     {"knownPairs", &Params::knownPairs},
     {"checkKnownExchange", &Params::checkKnownExchange},
     {"readMidgame", &Params::readMidgame},
+    {"lv38Midgame", &Params::lv38Midgame},
+    {"lv37ReceiveCompare", &Params::lv37ReceiveCompare},
+    {"lv37PartialBuild", &Params::lv37PartialBuild},
+    {"lv37KnownPrefix", &Params::lv37KnownPrefix},
+    {"lv37ProtectAnswer", &Params::lv37ProtectAnswer},
+    {"lv37EarlierWinFire", &Params::lv37EarlierWinFire},
+    {"lv37SplitMain", &Params::lv37SplitMain},
+    {"lv37SmallReceive", &Params::lv37SmallReceive},
+    {"lv37SideResponse", &Params::lv37SideResponse},
+    {"lv37AnswerWindow", &Params::lv37AnswerWindow},
+    {"lv37CommittedAnswer", &Params::lv37CommittedAnswer},
+    {"lv37Shelter", &Params::lv37Shelter},
+    {"lv37ReadyBuild", &Params::lv37ReadyBuild},
+    {"lv37Preparation", &Params::lv37Preparation},
+    {"lv37SetupSpeed", &Params::lv37SetupSpeed},
+    {"lv37EquivalentRoute", &Params::lv37EquivalentRoute},
+    {"lv38TailAnswer", &Params::lv38TailAnswer},
+    {"lv38Response", &Params::lv38Response},
+    {"lv38Lifeline", &Params::lv38Lifeline},
+    {"lv38Unannounced", &Params::lv38Unannounced},
+    {"lv38Threat", &Params::lv38Threat},
+    {"lv38Foundation", &Params::lv38Foundation},
+    {"lv38ShelterNarrow", &Params::lv38ShelterNarrow},
+    {"lv38TailRank", &Params::lv38TailRank},
+    {"lv38TailValue", &Params::lv38TailValue},
+    {"lv38PartialVeto", &Params::lv38PartialVeto},
+    {"lv38ReadyCover", &Params::lv38ReadyCover},
+    {"lv38TwoWave", &Params::lv38TwoWave},
+    {"lv38TwoWaveNoMain", &Params::lv38TwoWaveNoMain},
+    {"lv38TwoWaveReselect", &Params::lv38TwoWaveReselect},
+    {"lv38TwoWaveMainCover", &Params::lv38TwoWaveMainCover},
+    {"lv38FastInput", &Params::lv38FastInput},
+    {"lv38Plan5", &Params::lv38Plan5},
+    {"lv38Plan7", &Params::lv38Plan7},
+    {"lv38Plan7Near", &Params::lv38Plan7Near},
+    {"lv38Plan7Guard", &Params::lv38Plan7Guard},
+    {"lv38Plan7MinQueues", &Params::lv38Plan7MinQueues},
+    {"lv38WinRecheck", &Params::lv38WinRecheck},
+    {"lv38AnswerLegal", &Params::lv38AnswerLegal},
+    {"lv38FullOffsetNext", &Params::lv38FullOffsetNext},
+    {"lv38KeyRunsFair", &Params::lv38KeyRunsFair},
+    {"lv38FastSoft", &Params::lv38FastSoft},
+    {"lv38FastStates", &Params::lv38FastStates},
+    {"lv38FastBusy", &Params::lv38FastBusy},
+    {"lv38ExFlip", &Params::lv38ExFlip},
+    {"lv38ExSetupSaved", &Params::lv38ExSetupSaved},
+    {"lv38TakeSmall", &Params::lv38TakeSmall},
+    {"lv38FireOrLose", &Params::lv38FireOrLose},
+    {"lv38Plan11", &Params::lv38Plan11},
+    {"lv38ResponseKeep", &Params::lv38ResponseKeep},
+    {"lv38Plan12", &Params::lv38Plan12},
+    {"lv38HeadCut", &Params::lv38HeadCut},
+    {"lv38TailMin", &Params::lv38TailMin},
+    {"lv38TailOfMain", &Params::lv38TailOfMain},
+    {"lv38CutWeight", &Params::lv38CutWeight},
+    {"lv38CutAhead", &Params::lv38CutAhead},
+    {"lv38CutKeep", &Params::lv38CutKeep},
+    {"lv38CutQueues", &Params::lv38CutQueues},
+    {"lv38CutSlots", &Params::lv38CutSlots},
+    {"lv38CutNear", &Params::lv38CutNear},
+    {"lv38CutFrom", &Params::lv38CutFrom},
     {"setupSpeedNear", &Params::setupSpeedNear},
     {"setupSideNear", &Params::setupSideNear},
     {"equivalentSetupRoute", &Params::equivalentSetupRoute},

@@ -19,11 +19,14 @@
 //   --replay FILE        plays the placements another AI chose (its output file) on this
 //                        engine instead of searching, and reports them in the same form,
 //                        with what does not agree: placements this engine does not
-//                        allow, and games whose last chain it counts differently
+//                        allow, and games whose last chain it counts differently; a line with
+//                        fewer moves than it says is not understood
+//   --replay-self-test   reads lines of such a file that must be refused or counted as not allowed
 #ifndef _MSC_VER
 #define sscanf_s sscanf
 #endif
 #include "toko_game.h"
+#include "../generator/thread_pool.h"
 #include "../play/settings.h"
 #include <atomic>
 #include <chrono>
@@ -31,6 +34,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <system_error>
 #include <thread>
 
 using namespace juraic;
@@ -53,7 +57,8 @@ struct Options {
 bool replayGame(const Options& opt, const std::string& line, uint64_t& seed, GameResult& g) {
     std::istringstream in(line);
     int count = 0;
-    if (!(in >> seed >> count >> g.theirPoints >> g.theirMs)) return false;
+    if (!(in >> seed >> count >> g.theirPoints >> g.theirMs) || count < 0) return false;
+    g.seed = seed;
     const Rules& rules = opt.settings.rules;
     const Tsumo tsumo = makeTsumo(rules, seed);
     PlayerCore me;
@@ -62,14 +67,18 @@ bool replayGame(const Options& opt, const std::string& line, uint64_t& seed, Gam
     for (int& p : g.potential) p = -1;
     int64_t frame = 0;
     std::string move;
-    for (int i = 0; i < count && in >> move; ++i) {
+    bool over = false; // (the game here has ended: the moves after it are read, not played)
+    for (int i = 0; i < count; ++i) {
+        if (!(in >> move)) return false; // fewer moves than the line says, also after the game here has ended
         if (move.size() != 2 || move[0] < '0' || move[0] > '5' || move[1] < '0' || move[1] > '3') return false;
+        if (over) continue;
         const Placement target{uint8_t(move[0] - '0'), uint8_t(move[1] - '0')};
-        if (!(legalPlacements(me.field) >> placementId(target) & 1)) {
-            g.illegal = true;
-            break;
+        // (a child outside the field has no placement of its own: placementId would take it for another one)
+        if (target.childX() < 0 || target.childX() >= W || !(legalPlacements(me.field) >> placementId(target) & 1)) {
+            g.illegal = true, over = true;
+            continue;
         }
-        if (!toko::playMove(opt.run(), me, nobody, target, tsumo.pair(i), frame, garbage, g)) break;
+        if (!toko::playMove(opt.run(), me, nobody, target, tsumo.pair(i), frame, garbage, g)) over = true;
     }
     if (!g.points) g.frames = frame;
     return true;
@@ -92,19 +101,31 @@ uint64_t run(const Options& opt, std::vector<GameResult>& results, double& secon
             const int i = next.fetch_add(1);
             if (i >= opt.games) break;
             results[size_t(i)] = toko::playGame(run, opt.seed + uint64_t(i), builder);
+            results[size_t(i)].seed = opt.seed + uint64_t(i);
         }
     };
     if (opt.threads <= 1) {
         worker();
     } else {
-        std::vector<std::thread> pool;
-        for (int i = 0; i < opt.threads; ++i) pool.emplace_back(worker);
-        for (std::thread& t : pool) t.join();
+        try {
+            runOnThreads(opt.threads, worker, [&] { next = opt.games; });
+        } catch (const std::system_error& e) {
+            std::cerr << "a thread could not be started: " << e.what() << '\n';
+            std::exit(1);
+        }
     }
     seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     uint64_t sum = 0x9E3779B97F4A7C15ull;
     for (const GameResult& g : results) sum = mix(mix(mix(mix(sum, uint64_t(g.moves)), uint64_t(g.largest)), uint64_t(g.frames)), uint64_t(g.nodes));
     return sum;
+}
+
+// A game in the list (--list), by the seed it was played with.
+std::string listLine(const GameResult& g) {
+    std::ostringstream out;
+    out << "seed " << g.seed << ": " << g.moves << " moves, " << (g.points ? "chain of " : "FAILED, largest chain ") << (g.points ? g.points : g.largest)
+        << " points, " << g.frames << " frames" << (g.dead ? ", lost" : "");
+    return out.str();
 }
 
 void report(const Options& opt, const std::vector<GameResult>& results, double seconds, uint64_t checksum, bool searched = true) {
@@ -113,9 +134,7 @@ void report(const Options& opt, const std::vector<GameResult>& results, double s
     std::vector<int> moveList;
     for (size_t i = 0; i < results.size(); ++i) {
         const GameResult& g = results[i];
-        if (opt.list)
-            std::cout << "seed " << opt.seed + i << ": " << g.moves << " moves, " << (g.points ? "chain of " : "FAILED, largest chain ")
-                      << (g.points ? g.points : g.largest) << " points, " << g.frames << " frames" << (g.dead ? ", lost" : "") << '\n';
+        if (opt.list) std::cout << listLine(g) << '\n';
         largest += g.largest, nodes += g.nodes, allMoves += g.moves, ns += g.ns, worst = std::max(worst, g.worstNs), dead += g.dead;
         if (!g.points) continue;
         ++done, points += g.points, moves += g.moves, frames += g.frames, over100 += g.points >= 100000;
@@ -153,7 +172,7 @@ void report(const Options& opt, const std::vector<GameResult>& results, double s
 
 int main(int argc, char** argv) {
     Options opt;
-    bool test = false;
+    bool test = false, replayTest = false;
     play::SettingsTable table(opt.settings);
     std::string lines, error;
     for (int i = 1; i < argc; ++i) {
@@ -167,6 +186,7 @@ int main(int argc, char** argv) {
         else if (arg == "--moves") opt.moves = std::atoi(value().c_str());
         else if (arg == "--list") opt.list = true;
         else if (arg == "--self-test") test = true;
+        else if (arg == "--replay-self-test") replayTest = true;
         else if (arg == "--write-tsumo") opt.writeTsumo = value();
         else if (arg == "--replay") opt.replay = value();
         else if (arg == "--param" || arg == "--params") {
@@ -178,7 +198,7 @@ int main(int argc, char** argv) {
         } else if (arg == "--set") {
             const std::string pair = value();
             if (!play::setByText(table, opt.settings, pair)) {
-                std::cerr << "unknown setting: " << pair << '\n';
+                std::cerr << "invalid setting: " << pair << '\n';
                 return 2;
             }
         } else {
@@ -247,6 +267,40 @@ int main(int argc, char** argv) {
                   << " games whose last chain the two count differently; the other AI took " << ms / double(results.size()) << " ms per move\n";
         report(opt, results, 0, 0, false);
         return 0;
+    }
+    if (replayTest) {
+        // Lines of another AI's output that must not be taken as they stand: horizontal pairs whose child is outside
+        // the field (each would pass as another placement), and a line with fewer moves than it says.
+        struct Case {
+            const char* line;
+            bool read, illegal;
+        };
+        const Case cases[] = {{"1 2 0 0 20 20", true, false}, {"1 1 0 0 51", true, true}, {"1 1 0 0 03", true, true},
+                              {"1 2 0 0 20 51", true, true}, {"1 3 0 0 20 20", false, false}, {"1 -1 0 0", false, false},
+                              // (fewer moves than the line says after the game here has ended, by a placement it does not allow)
+                              {"1 3 0 0 51 20", false, false}, {"1 3 0 0 51 20 20", true, true}};
+        int wrong = 0;
+        for (const Case& c : cases) {
+            GameResult g;
+            uint64_t seed = 0;
+            const bool read = replayGame(opt, c.line, seed, g);
+            if (read != c.read || (read && g.illegal != c.illegal)) {
+                ++wrong;
+                std::cout << "replay line \"" << c.line << "\": read " << read << ", illegal " << g.illegal << '\n';
+            }
+        }
+        // The list of games names each by its own seed, also seeds that do not follow one another.
+        for (const char* line : {"41 1 0 0 20", "99 1 0 0 20"}) {
+            GameResult g;
+            uint64_t seed = 0;
+            const std::string want = std::string("seed ") + std::string(line).substr(0, 2) + ":";
+            if (!replayGame(opt, line, seed, g) || listLine(g).rfind(want, 0) != 0) {
+                ++wrong;
+                std::cout << "replay line \"" << line << "\" listed as \"" << listLine(g) << "\"\n";
+            }
+        }
+        std::cout << "replay self test: " << (wrong ? "WRONG\n" : "as expected\n");
+        return wrong ? 1 : 0;
     }
     if (test) {
         // A small search, three times: 1 thread, 1 thread, 4 threads.

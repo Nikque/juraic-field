@@ -50,10 +50,10 @@ Window quietWindow(const Observation& o, const Duel& afterChain, const PlanSet& 
 template<class Stop>
 int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, const PlanSet& theirs,
            int ordinary, unsigned legal, int arriving, const Params& p, uint64_t seed, Ready& ready, Stop stop) {
-    if (!p.readMidgame || !p.checkKnownExchange || p.handWait || o.players != 2 || o.rules.cancel ||
-        o.timing.firstOwnLanding || o.timing.floorKickLimit || mine.knownCount < 2 ||
+    if (!p.readMidgame || !p.checkKnownExchange || p.handWait || o.players != 2 ||
+        mine.knownCount < 2 ||
         ordinary < 0 || !(legal >> ordinary & 1u) || o.busyLeft[o.me] ||
-        o.opponent().phase != Phase::Wave || !o.self().incoming.pending || o.self().incoming.confirmed ||
+        !chainShown(o.opponent()) || !o.self().incoming.pending || o.self().incoming.confirmed ||
         o.opponent().incoming.total() || o.self().scoring.allClear || o.opponent().scoring.allClear ||
         arriving <= W || stop()) return ordinary;
     if (o.self().phase != Phase::Next || o.self().wait != 1 || mine.midAir) return ordinary;

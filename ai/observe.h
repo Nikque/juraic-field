@@ -52,6 +52,31 @@ struct Observation {
     // what its chain sent is sure when the chain ends.
     int busyLeft[2] = {0, 0};
     bool busyChain[2] = {false, false};
+    // The seats whose pairs the reading (Duel) takes to go the way over soonest (ai/fastest.h, PlacementAgent::fastestWays)
+    // rather than the straight way. FASTEST_BOUND: every pair of the seat has its landing over no later than the soonest
+    // any way can make it (FastestSearch::estimate) - the other seat with Rules::cancel, where those ways are open to him:
+    // read so, he is never slower than he can be. FASTEST_OWN: the seat's next pair locks as the way over soonest that a
+    // search finds locks it (the straight way when none is found), its later pairs as the straight way - the own seat when
+    // it takes those ways: read so, it is never faster than it will be. Set by PlacementAgent for the choice it makes;
+    // observe() sets neither.
+    static constexpr uint8_t FASTEST_BOUND = 1, FASTEST_OWN = 2;
+    uint8_t fastestRead[2] = {0, 0};
+    // FASTEST_OWN: the states the seat's own search of the way over soonest takes within a frame
+    // (PlacementAgent::fastestStates); the reading searches no more than that, so it never finds a way the seat would not.
+    int fastestReadStates[2] = {0, 0};
+    // FASTEST_OWN, or ownAir with no fastestRead, the own pair in mid-air: the placement its buttons are on their way to (-1: none), and the frame its
+    // landing is over with them (the check, as Duel counts it). The reading takes that pair there as those buttons do - it
+    // goes on with them - rather than by a way searched anew from where it is.
+    int ownWayTarget = -1;
+    int64_t ownWayCheck = -1;
+    int64_t ownWayLock = -1; // ... the frame those buttons lock it in (-1: not known), and their points of the down key
+    int ownWaySoft = 0;
+    // A choice made in mid-air for the own pair taken as the one about to appear (PlacementAgent, beforeItAppears): the
+    // own seat is shown as Next, and the pair is in mid-air (ownAir) at ownAirPair. The reading takes
+    // that pair from there, as a pair seen in mid-air. observe() sets neither.
+    bool ownAir = false;
+    PairControl ownAirPair{};
+    int ownAirSeat = -1; // seat of the saved pair and its route, even in a replay from the other side
 
     const Player& self() const { return player[me]; }
     const Player& opponent() const { return player[1 - me]; }
@@ -59,6 +84,31 @@ struct Observation {
     const SeenTsumo& pairsOf(int seat) const { return ownTsumo && seat == 1 ? tsumo1 : tsumo; }
     const SeenTsumo& mine() const { return pairsOf(me); }
 };
+
+// The seat's chain runs as its Player shows it: a wave of it (Phase::Wave), or a split or landing shown with the waves
+// of a chain still to come and the end of that chain already in the board (Phase::Split or Land with chain.chains:
+// play/memory/primary_play14.h). The engine itself has chain.chains at 0 while a pair splits or lands.
+inline bool chainShown(const Player& p) {
+    return p.phase == Phase::Wave || ((p.phase == Phase::Land || p.phase == Phase::Split) && p.chain.chains > 0);
+}
+
+// The seat's chain is still being played: chainShown, or Observation::busyChain. Player::chain keeps the waves of the
+// last chain until the next pair locks; in the other phases (Decide, Garbage, Next, Control) they are of a chain that is over.
+inline bool chainRunning(const Observation& o, int seat) {
+    return o.busyChain[seat] || chainShown(o.player[seat]);
+}
+
+// The own pair in mid-air that a choice is made for, where it is: in the seat's hands (Control), or shown as the pair
+// about to appear (Observation::ownAir, the seat as Next); null when there is none - the first pair of the choice then
+// comes from where a pair appears.
+inline const PairControl* pairInAir(const Observation& o, int seat) {
+    const Player& p = o.player[seat];
+    if (p.phase == Phase::Control) return &p.pair;
+    const int owner = o.ownAirSeat >= 0 ? o.ownAirSeat : o.me;
+    return p.phase == Phase::Next && o.ownAir && seat == owner ? &o.ownAirPair : nullptr;
+}
+
+inline const PairControl* ownPairInAir(const Observation& o) { return pairInAir(o, o.me); }
 
 // The pair in hand precedes nextPair in a controlling seat; when pondering its
 // successor the caller instead starts directly at nextPair.
@@ -92,6 +142,8 @@ inline void observe(const Round& r, int me, Observation& o) {
     o.timing = r.timing;
     o.players = r.players;
     o.me = me;
+    o.ownAir = false;
+    o.ownAirSeat = -1;
     o.frame = r.frame;
     o.state = r.state;
     o.player[0] = r.player[0];

@@ -449,7 +449,12 @@ void vigem_disconnect(PVIGEM_CLIENT vigem)
 		vigem->hBusDevice = INVALID_HANDLE_VALUE;
 	}
 
+	// The abort event belongs to the client until vigem_free closes it: kept (and reset) across the clearing.
+	const HANDLE abortEvent = vigem->hDS4OutputReportPickupThreadAbortEvent;
 	RtlZeroMemory(vigem, sizeof(VIGEM_CLIENT));
+	vigem->hDS4OutputReportPickupThreadAbortEvent = abortEvent;
+	if (abortEvent)
+		ResetEvent(abortEvent);
 }
 
 BOOLEAN vigem_target_is_waitable_add_supported(PVIGEM_TARGET target)
@@ -1016,6 +1021,10 @@ VIGEM_ERROR vigem_target_x360_update(
 			DEVICE_IO_CONTROL_END;
 			return VIGEM_ERROR_INVALID_TARGET;
 		}
+
+		// Juraic Field: any other failure to complete the report is a failure, not VIGEM_ERROR_NONE.
+		DEVICE_IO_CONTROL_END;
+		return VIGEM_ERROR_WINAPI;
 	}
 
 	DEVICE_IO_CONTROL_END;
@@ -1203,6 +1212,10 @@ VIGEM_ERROR vigem_target_x360_get_user_index(
 			DEVICE_IO_CONTROL_END;
 			return VIGEM_ERROR_XUSB_USERINDEX_OUT_OF_RANGE;
 		}
+
+		// Any other failure: no index was got (not index 0).
+		DEVICE_IO_CONTROL_END;
+		return VIGEM_ERROR_WINAPI;
 	}
 
 	DEVICE_IO_CONTROL_END;

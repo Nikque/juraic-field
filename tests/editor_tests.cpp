@@ -37,6 +37,18 @@ int wmain(int argc,wchar_t** argv){try{
     b=emptyBoard(true);b.cells[9][4]=Wall;b.cells[9][18]=Iron;b.cells[9][3]=PointPiece;settle(b);check(b.cells[9][4]==Wall&&b.cells[9][5]==Iron&&b.cells[9][0]==PointPiece,"wall divides column gravity on 10 x 19");
     b=emptyBoard(true);b.cells[9][18]=Wall;b.cells[0][0]=Red;saveBoard(root/L"10x19.jfboard",b);check(loadBoard(root/L"10x19.jfboard")==b,"10 x 19 archive roundtrip");
     check(!urlUnavailableReason(b,UrlFormat::Mattulwan).empty(),"a 10 x 19 board has no URL");
+    {   // the game's practice (6 x 13) takes boards and results of that size only: one of 10 x 18 is refused, not cut or emptied
+        const auto refused=[](const std::filesystem::path& p){try{practiceField(p);}catch(const WideBoardRefused&){return true;}return false;};
+        check(refused(root/L"10x19.jfboard"),"a 10 x 18 board is taken for the practice");
+        Board n;n.cells[0][0]=Red;n.cells[5][12]=Green;saveBoard(root/L"6x13.jfboard",n);
+        const BitField f=practiceField(root/L"6x13.jfboard");check(f.get(0,0)==Red&&f.get(5,12)==Green&&f.count()==2,"a 6 x 13 board is not taken for the practice as it is");
+#ifdef JURAIC_EXAMPLES_DIR
+        const std::filesystem::path examples=JURAIC_EXAMPLES_DIR;
+        check(refused(examples/"sample-47chain.jfchain"),"a 10 x 18 result is taken for the practice");
+        const Record r=loadRecord(examples/"sample-19chain.jfchain");const BitField g=practiceField(examples/"sample-19chain.jfchain");
+        check(g.count()>0&&g.count()==r.solution.field.count()-2,"a 6 x 13 result is not taken for the practice without its last pair");
+#endif
+    }
     for(int i=0;i<300;++i){b=emptyBoard(true);for(int x=0;x<10;++x)for(int y=0;y<19;++y)b.cells[x][y]=Cell(rng()%11);if(i<100)for(int x=0;x<4;++x)b.cells[x+3][0]=Red;
         auto frames=editorTimeline(b);auto name="wide-"+std::to_string(i);saveBoard(root/(name+".jfboard"),b);saveBoard(root/(name+".final"),frames.back().board);std::ofstream stats(root/(name+".stats"));stats<<frames.back().chain<<' '<<frames.back().score<<'\n';}
     // Non-point fixture exercises all destinations, row13, holes and leading blanks.

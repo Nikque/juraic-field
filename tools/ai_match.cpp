@@ -44,13 +44,16 @@
 #endif
 #include "../ai/agents.h"
 #include "../ai/answer.h"
+#include "../generator/thread_pool.h"
 #include "../play/replay.h"
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
+#include <system_error>
 #include <thread>
 
 using namespace juraic;
@@ -74,6 +77,13 @@ struct Options {
     bool kinds = false;      // --kinds
     bool traceCrush = false; // --trace-crush
     bool traceAnswers = false; // --trace-answers
+    bool exA = false, exB = false; // --ex-a, --ex-b: that agent takes the way over soonest (PlacementAgent::fastestWays, the Ex of play/level_ex.h)
+};
+
+struct RoundRequest {
+    int pair = -1, aSeat = -1;
+    std::filesystem::path directory, ledger;
+    std::string attempt;
 };
 
 // --trace-crush: a pair placed by a crush, and what followed in the CRUSH_FOLLOW frames after its lock.
@@ -290,6 +300,8 @@ uint64_t mix(uint64_t h, uint64_t v) {
     return h ^ h >> 32;
 }
 
+#include "recorded_round.h"
+
 bool runMatch(const Options& opt, MatchResult& match) {
     if (!ai::makeAgent(opt.a) || !ai::makeAgent(opt.b)) {
         std::cerr << "unknown agent (known: " << ai::agentNames() << ")\n";
@@ -301,7 +313,9 @@ bool runMatch(const Options& opt, MatchResult& match) {
     std::mutex kindsLock;
     const auto start = std::chrono::steady_clock::now();
     const auto worker = [&] {
-        const std::unique_ptr<ai::Agent> a = ai::makeAgent(opt.a, opt.paramsA), b = ai::makeAgent(opt.b, opt.paramsB);
+        const std::unique_ptr<ai::Agent> a = ai::makeConfiguredAgent(opt.a, opt.paramsA), b = ai::makeConfiguredAgent(opt.b, opt.paramsB);
+        if (auto* p = dynamic_cast<ai::PlacementAgent*>(a.get())) p->fastestWays = opt.exA;
+        if (auto* p = dynamic_cast<ai::PlacementAgent*>(b.get())) p->fastestWays = opt.exB;
         for (;;) {
             const int k = next.fetch_add(1);
             if (k >= opt.pairs) break;
@@ -328,7 +342,10 @@ bool runMatch(const Options& opt, MatchResult& match) {
                 const std::filesystem::path file =
                     opt.replayDirectory / ("match-" + std::to_string(opt.seed) + "-" + std::to_string(k) + ".jfreplay");
                 if (!play::saveReplay(file, replay)) failed = true;
-                std::ofstream(file.string() + ".expected", std::ios::binary) << expected;
+                std::ofstream expectedOut(file.string() + ".expected", std::ios::binary);
+                expectedOut << expected;
+                expectedOut.flush();
+                if (!expectedOut) failed = true;
             }
         }
         const std::lock_guard<std::mutex> hold(kindsLock);
@@ -341,12 +358,14 @@ bool runMatch(const Options& opt, MatchResult& match) {
                     c.built += n.built;
             }
     };
-    if (opt.threads <= 1) {
-        worker();
-    } else {
-        std::vector<std::thread> pool;
-        for (int i = 0; i < opt.threads; ++i) pool.emplace_back(worker);
-        for (std::thread& t : pool) t.join();
+    try {
+        runWorkers(opt.threads, worker, [&] { next = opt.pairs; });
+    } catch (const std::exception& e) {
+        std::cerr << "match failed: " << e.what() << '\n';
+        return false;
+    } catch (...) {
+        std::cerr << "match failed with an unknown exception\n";
+        return false;
     }
     match.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     match.checksum = 0x9E3779B97F4A7C15ull;
@@ -504,6 +523,7 @@ void report(const Options& opt, const MatchResult& match) {
     std::cout << "A = " << opt.a << ", B = " << opt.b << ", " << opt.pairs << " pairs (" << rounds << " rounds), seed " << opt.seed << ", "
               << opt.threads << " thread(s)\n";
     if (opt.ownTsumo) std::cout << "each seat draws from a tsumo of its own (--own-tsumo)\n";
+    if (opt.exA || opt.exB) std::cout << "Ex (the way over soonest): a " << (opt.exA ? "on" : "off") << ", b " << (opt.exB ? "on" : "off") << ", cancel " << (opt.settings.rules.cancel ? "on" : "off") << "\n";
     std::cout << "A wins " << wins << ", B wins " << losses << ", draws " << draws << " (" << unfinished << " stopped at the frame limit)\n";
     std::cout << "score of A: " << 100 * mean << " %, 95% interval " << 100 * (mean - half) << " .. " << 100 * (mean + half)
               << " (by pairs)\n";
@@ -582,7 +602,8 @@ int selfTest(Options opt) {
 
 int main(int argc, char** argv) {
     Options opt;
-    bool test = false;
+    RoundRequest request;
+    bool test = false, cancelSet = false;
     std::string linesA, linesB, error;
     play::SettingsTable table(opt.settings);
     for (int i = 1; i < argc; ++i) {
@@ -608,18 +629,31 @@ int main(int argc, char** argv) {
         else if (arg == "--self-test") test = true;
         else if (arg == "--same-seeds") opt.sameSeeds = true;
         else if (arg == "--own-tsumo") opt.ownTsumo = true;
+        else if (arg == "--ex-a") opt.exA = true;
+        else if (arg == "--ex-b") opt.exB = true;
         else if (arg == "--kinds") opt.kinds = true;
         else if (arg == "--trace-crush") opt.traceCrush = true;
         else if (arg == "--trace-answers") opt.traceAnswers = true;
+        else if (arg == "--record-round") {
+            const auto index = value(), seat = value();
+            if (request.pair >= 0 || !readNonnegative(index, request.pair) || !readNonnegative(seat, request.aSeat) || request.aSeat > 1) {
+                std::cerr << "--record-round requires a pair index and A seat 0 or 1\n";
+                return 2;
+            }
+            request.directory = value();
+            request.ledger = value();
+            request.attempt = value();
+        }
         else if (arg == "--replays") {
             opt.replayDirectory = value();
             opt.replays = std::atoi(value().c_str());
         } else if (arg == "--set") {
             const std::string pair = value();
             if (!play::setByText(table, opt.settings, pair)) {
-                std::cerr << "unknown setting: " << pair << '\n';
+                std::cerr << "invalid setting: " << pair << '\n';
                 return 2;
             }
+            if (pair.starts_with("cancel=")) cancelSet = true;
         } else {
             std::cerr << "unknown argument: " << arg << "\nusage: ai_match [--pairs N] [--threads T] [--seed S] [--a NAME] [--b NAME] "
                          "[--set key=value]... [--max-frames F] [--replays DIR N] [--kinds] [--trace-crush] [--trace-answers] [--self-test]\nagents: " << ai::agentNames() << '\n';
@@ -627,10 +661,25 @@ int main(int argc, char** argv) {
         }
     }
     table.apply(opt.settings);
+    const bool namedExA = ai::explicitLv38Ex(opt.a), namedExB = ai::explicitLv38Ex(opt.b);
+    if (namedExA || namedExB) {
+        if (cancelSet && !opt.settings.rules.cancel) {
+            std::cerr << "lv38ex requires cancel=1\n";
+            return 2;
+        }
+        opt.settings.rules.cancel = true;
+        opt.exA = opt.exA || namedExA;
+        opt.exB = opt.exB || namedExB;
+    }
+    opt.paramsA = ai::namedDefaults(opt.a), opt.paramsB = ai::namedDefaults(opt.b);
     std::istringstream inA(linesA), inB(linesB);
     if (!ai::loadParams(inA, opt.paramsA, error) || !ai::loadParams(inB, opt.paramsB, error)) {
         std::cerr << "parameter " << error << '\n';
         return 2;
+    }
+    if (request.pair >= 0) {
+        if (test || opt.threads != 1 || opt.replays || opt.maxFrames < 1 || opt.maxFrames > 216000) return 2;
+        return runRecordedRound(opt, request) ? 0 : 1;
     }
     if (opt.ownTsumo && opt.replays > 0) {
         // (the queue of matches asks for replays of every run: not an error)

@@ -304,6 +304,9 @@ inline Record loadRecord(const std::filesystem::path& path) {
     if (in >> tail) throw std::runtime_error("結果ファイルに余分なデータがあります。");
     const std::string problem = r.wide ? gridVerifySolution(r.wideSolution) : verifySolution(r.solution);
     if (!problem.empty()) throw std::runtime_error("結果ファイルのエンジン検証に失敗しました: " + problem);
+    // Every last pair of the board, as the generator saves them: a file with some of them only is not accepted.
+    const uint64_t all = r.wide ? gridFirePairs(r.wideSolution.field, r.wideSolution.trigger) : firePairs(r.solution.field, r.solution.trigger);
+    if (fire != all) throw std::runtime_error("結果ファイルの最後の1組の候補が盤面と一致しません。");
     if (r.wide) r.solution = {};
     return r;
 }

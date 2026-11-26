@@ -53,6 +53,15 @@ class Driver {
 public:
     int me = 1;                               // the seat played
     const char* seatName() const { return me ? "2P" : "1P"; } // (as the notes name it)
+    // A clear picture of the frame `frame` shows the pair put still in the air, its axis `height` half cells up (overdue):
+    // true when it is the second of two such pictures in a row - pictures of two frames of the game, at most two frames
+    // apart, the second no higher. `seenAt` and `seenHeight` keep the last such picture (-1: none). (A picture driven
+    // again in a frame no picture came in is the same picture: it is not a second one.)
+    static bool secondInAir(int64_t frame, int height, int64_t& seenAt, int& seenHeight) {
+        const bool twice = seenAt >= 0 && frame > seenAt && frame - seenAt <= 2 && height <= seenHeight;
+        if (frame != seenAt) seenAt = frame, seenHeight = height;
+        return twice;
+    }
     // Frames from a button sent to the frame of the game that takes it. The driver begins with it and takes the lag that
     // fits the pictures best (fit) from the next pair on, unless takeLag is false.
     int lag = 2;
@@ -197,6 +206,11 @@ public:
     // A pair begun before it appears (early) is chosen before the third pair shows in the own window: the second choice
     // is asked for in the air too, when the screen shows that pair after the pair has appeared (PlacementAgent::
     // askInAir; in rounds drawn of X3 against X3 the choices that knew two pairs only went from 25% to 0.6%).
+    void setPictureRules(const juraic::ai::Agent* selected) {
+        const auto* placing = dynamic_cast<const juraic::ai::PlacementAgent*>(selected);
+        rules.cancel = placing && placing->fastestWays;
+    }
+
     static void prepare(juraic::ai::Agent* agent) {
         if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent))
             placing->holdSecond = true, placing->tapHold = 2, placing->waitQuickLock = true, placing->spareFrame = true, placing->askInAir = true;
@@ -307,6 +321,7 @@ private:
         if (nextAgent && !active) {
             if (agent) std::thread([before = std::move(agent)]() mutable { before.reset(); }).detach();
             agent = std::move(nextAgent);
+            setPictureRules(agent.get());
             agent->startRound(me, seed++);
             noted = -2;
         }
@@ -885,9 +900,11 @@ private:
     // The pairs the screen has shown since the pair in play was begun, and that pair's colours once they are known (begun
     // before the screen showed it, of the first colour - learnPairs: the AI then waits for it, ai::PlacementAgent).
     void knowColours(const Tracker& t) {
-        const auto now = std::tuple{t.pairsLearnt(), t.knownCount(), t.aligns, t.colourRevision()};
-        if (now == learntAt) return;
-        learntAt = now;
+        const std::tuple<size_t, size_t, int> now{t.pairsLearnt(), t.knownCount(), t.aligns};
+        // (a pair read again otherwise at the same place leaves the three counts as they were: its colours are compared too)
+        std::vector<uint16_t> shown = t.pairsShown(me);
+        if (now == learntAt && shown == coloursShown) return;
+        learntAt = now, coloursShown = std::move(shown);
         learnPairs(t);
         const int i = own.nextPair - 1;
         if (own.phase != juraic::Phase::Control || !t.knows(me, i)) return;
@@ -896,7 +913,8 @@ private:
         for (Past& q : past)
             if (q.state.phase == juraic::Phase::Control && q.state.nextPair - 1 == i) q.state.colors = c;
     }
-    std::tuple<size_t, size_t, int, uint64_t> learntAt{}; // (knowColours: what the screen had shown as it last looked)
+    std::tuple<size_t, size_t, int> learntAt{0, 0, 0}; // (knowColours: what the screen had shown as it last looked)
+    std::vector<uint16_t> coloursShown;                 // (... and the pairs as the own side was shown them, Tracker::pairsShown)
 
     // The engine begins pair `pair` with the 13th and 14th rows the AI is shown (Follower::withHidden: those Follower
     // made out, and the engine's own in the 13th row where Follower has none there), not those the engine made by
@@ -1636,10 +1654,7 @@ private:
             return false;
         }
         const juraic::PairControl& seen = t.side[me].pair.at;
-        const int height = 2 * seen.y + (seen.upper ? 1 : 0);
-        const bool twice = airSeenAt >= 0 && t.frame - airSeenAt <= 2 && height <= airHeight;
-        if (t.frame != airSeenAt) airSeenAt = t.frame, airHeight = height;
-        return twice;
+        return secondInAir(t.frame, 2 * seen.y + (seen.upper ? 1 : 0), airSeenAt, airHeight);
     }
     // ... the engine takes the pair from the last picture, on the field it was begun on, and the way to the placement the
     // agent chose for it is planned again from there (held down where it was, the pair went down elsewhere than the AI
@@ -1694,6 +1709,14 @@ private:
         const bool pictured = side.clear && side.pair.seen && side.inHand && side.pairs == pairsSeen;
         retakeUnseen = pictured ? 0 : retakeUnseen + 1;
         if (retakeUnseen > RETAKE_UNSEEN) retaking = false;
+        // (a piece of the pair above the twelve rows the screen shows, the frame a picture of the last turn or move would
+        //  show it in gone by: no picture shows the pair whole up there, and what was sent for it is taken as taken - the
+        //  way goes on with the down button, and a picture that shows the pair elsewhere once it is in sight puts it right)
+        if (!pictured && own.phase == juraic::Phase::Control && (own.pair.y >= 12 || own.pair.childY() >= 12) &&
+            t.frame >= retakeTapAt + lag + RETAKE_SHOWN) {
+            retaking = false;
+            return;
+        }
         if (!pictured || t.frame < retakeTapAt + lag + RETAKE_SHOWN) return;
         const size_t i = pastIndex(t.frame);
         if (i == past.size() || past[i].state.phase != juraic::Phase::Control) return;

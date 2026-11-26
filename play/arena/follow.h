@@ -114,7 +114,10 @@ struct MatchView {
         }
         if (k == "MATCHEND" && w.size() >= 4) {
             wins[0] = int(toNumber(w[1], 0)), wins[1] = int(toNumber(w[2], 0)), matchEnd = w[3];
-            matchOver = true, roundOn = false;
+            // (a round its END has ended stays on: the frames that came before the end are played still; a round
+            //  without END stops here)
+            matchOver = true;
+            if (!roundEnded) roundOn = false;
             return true;
         }
         return false;

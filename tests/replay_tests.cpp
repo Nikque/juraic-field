@@ -30,8 +30,21 @@ static bool reads(const std::string& name, const std::string& text, Replay* out 
     return ok;
 }
 
+// The time of a choice of the AI in a game played live (liveThinkBudget, play/session.h): a millisecond at least, also
+// for aiLead 1, which the settings file may hold (the screen steps it by two) - never 0 or less, a search without a clock.
+static void testLiveThinkBudget() {
+    check(liveThinkBudget(0, 180) == 180, "aiLead 0: not the time set");
+    check(liveThinkBudget(1, 180) == 1, "aiLead 1: the choice has " + std::to_string(liveThinkBudget(1, 180)) + " ms");
+    check(liveThinkBudget(2, 180) == 13, "aiLead 2: the choice has " + std::to_string(liveThinkBudget(2, 180)) + " ms");
+    check(liveThinkBudget(12, 180) == 180 && liveThinkBudget(12, 100) == 100, "aiLead 12: not the time set");
+    Settings s;
+    loadSettings(written("lead.settings", "aiLead=1\naiBudget=180\n"), s);
+    check(s.aiLead == 1 && liveThinkBudget(s.aiLead, s.aiBudget) > 0, "aiLead 1 read from the settings file leaves the choice without a clock");
+}
+
 int main() {
     try {
+        testLiveThinkBudget();
         const std::string v = std::to_string(TIMING_VERSION), one = "JURAIC_FIELD_REPLAY 1 " + v + "\n", two = "JURAIC_FIELD_REPLAY 2 " + v + "\n";
         const std::string round = "ROUND 1 3\n2x1,0 1x0,8\nEND\n";
 
@@ -63,6 +76,27 @@ int main() {
         check(!reads("no-round.jfreplay", one + "players 2\n"), "a replay without a round was read");
         check(!reads("old.jfreplay", "JURAIC_FIELD_REPLAY 1 " + std::to_string(OLDEST_VERSION - 1) + "\nplayers 2\n" + round), "a replay of a version that is not read any more was read");
         check(!reads("other-word.jfreplay", "SOME_OTHER_REPLAY 1 " + v + "\nplayers 2\n" + round), "a file with another first word was read");
+
+        // An explicit practice board must have every cell, including the hidden row.
+        const std::string board = std::string(juraic::W * juraic::H, '0') + "100006";
+        const std::string practice = one + "players 1\nROUND 1 1";
+        check(reads("board.jfreplay", practice + " BOARD " + board + "\n1x255,255\nEND\n", &r) &&
+              r.rounds[0].hasBoard && r.rounds[0].board.row14[0] == juraic::Cell(1) &&
+              r.rounds[0].board.row14[5] == juraic::Cell(6) && r.rounds[0].frames[0] == 0xFFFF,
+              "the practice board and the highest button masks were not read back");
+        check(!reads("short-board.jfreplay", practice + " BOARD " + board.substr(1) + "\n1x0,0\nEND\n"),
+              "a shortened practice board was read");
+        auto invalidBoard = board;
+        invalidBoard.back() = '7';
+        check(!reads("bad-hidden-cell.jfreplay", practice + " BOARD " + invalidBoard + "\n1x0,0\nEND\n"),
+              "an invalid hidden cell was read");
+        invalidBoard = board;
+        invalidBoard.front() = '?';
+        check(!reads("bad-visible-cell.jfreplay", practice + " BOARD " + invalidBoard + "\n1x0,0\nEND\n"),
+              "an invalid visible cell was read");
+        for (const char* invalid : {"1x256,0", "1x0,256", "1x0,0junk", "1x-1,0", "0x0,0 1x0,0", "42949672960x0,0"})
+            check(!reads("bad-buttons.jfreplay", practice + "\n" + invalid + "\nEND\n"),
+                  std::string("malformed buttons were read: ") + invalid);
 
         // What the game writes is what it reads: both kinds.
         for (const int delay : {0, 7}) {

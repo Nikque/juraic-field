@@ -100,5 +100,21 @@ int main(){
         check(tested && kept,"a pair a column off at the same height keeps the clocks of its fall");
         check(resetOnHeight,"... one at another height begins them anew");
     }
+    {
+        // Buttons four frames late: the AI is shown the frame they reach the game in, the other seat and the busy frames as
+        // of that frame too (its landing of six frames over in the second frame after it: Duel ends a phase in
+        // frame + wait - 1).
+        ProbeAgent d;play::realgame::PredictiveInput ahead(d,4);Round q;q.start(Rules{},50,2);
+        auto now=ai::observe(q,1);
+        now.player[0].phase=Phase::Land;now.player[0].wait=6;now.player[0].chain.chains=0;
+        now.busyLeft[1]=7;now.busyLeft[0]=0;
+        ahead.tick(now);
+        check(ahead.predictionComplete && d.calls==1 && d.last.frame==now.frame+4,"buttons four frames late: the AI is shown the frame they reach the game in");
+        check(d.last.player[0].wait==2 && d.last.player[0].phase==Phase::Land,"... the other seat's landing as of that frame");
+        check(d.last.busyLeft[1]==3 && d.last.busyLeft[0]==0,"... and the own busy frames as of that frame");
+        auto ending=now;ending.frame+=1;ending.player[0].wait=3;ending.busyLeft[1]=2;
+        ahead.tick(ending);
+        check(d.last.player[0].wait==1 && d.last.busyLeft[1]==1,"... what ends before that frame shown in its last frame, not past it");
+    }
     std::printf("predictive input: %d checks, %d failures, %d forecasts matched, %d timer reconstructions\n",checks,failed,matched,equal);return failed?1:0;
 }

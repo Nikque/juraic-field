@@ -25,8 +25,8 @@ template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int ordinary, unsigned legal,
            int arriving, const Params& p, uint64_t seed, Stop outOfTime) {
     const int me = o.me, him = 1 - me;
-    if (!p.readMidgame || !p.checkKnownExchange || p.handWait || o.rules.cancel || o.self().phase != Phase::Next ||
-        o.busyLeft[me] || o.opponent().phase != Phase::Wave || o.opponent().chain.chains > 4 || mine.midAir ||
+    if (!p.readMidgame || !p.checkKnownExchange || p.handWait || o.self().phase != Phase::Next ||
+        o.busyLeft[me] || !chainShown(o.opponent()) || o.opponent().chain.chains > 4 || mine.midAir ||
         theirs.midAir || mine.knownCount != 3 || theirs.knownCount != 2 || arriving <= 0 || arriving >= W ||
         o.self().incoming.confirmed || o.self().incoming.pending != arriving || o.opponent().incoming.total() ||
         o.self().scoring.allClear || o.opponent().scoring.allClear || ordinary < 0 || !(legal >> ordinary & 1u) ||

@@ -1079,6 +1079,127 @@ static void testRecordedTurns() {
     }
 }
 
+// ---- the estimate of a pair that lies (Timing::fallOnGround, the rules of the records) ----
+// A pair that has lain thirteen frames on a ledge one row high, its clock of the landing running (ownFrames 14), moved off
+// it with the down button: the step its fall came to while it lay is made in the frame of the move, it lands in the third
+// frame and locks in the fourth - over in ten frames. The estimate counts on no more, and a search with ten frames finds it.
+static void testGroundCountBound() {
+    const Timing t = recordedRules(Timing{});
+    for (const bool mirror : {false, true}) {
+        const int ledge = mirror ? 3 : 2, low = mirror ? 2 : 3;
+        GameField g;
+        g.f.set(ledge, 0, GARBAGE);
+        PairControl p = spawnPair(t);
+        p.x = int8_t(ledge), p.y = 1, p.dir = UP, p.upper = false, p.grounded = true, p.gain = 0;
+        p.groundFrames = 13, p.owned = true, p.ownFrames = 14;
+        const Placement target{uint8_t(low), UP};
+        const uint8_t side = mirror ? BTN_LEFT : BTN_RIGHT;
+        const std::vector<uint8_t> buttons = {uint8_t(side | BTN_DOWN), BTN_DOWN, BTN_DOWN, BTN_DOWN};
+        const std::string where = mirror ? " (列3の段から列2へ)" : " (列2の段から列3へ)";
+        check(ai::FastestSearch::ends(g, p, buttons, t, 100) == 10, "段を下りる4フレームの入力が10フレームで終わらない" + where);
+        ai::FastestSearch search;
+        const int estimate = search.estimate(g, p, target, t, 100);
+        check(estimate <= 10, "接地中に数えた落下を見積もりが数えない: " + std::to_string(estimate) + where);
+        std::vector<uint8_t> found;
+        int soft = 0, end = 0;
+        const bool ok = search.find(g, p, target, t, 100, 10, found, soft, end);
+        check(ok && end == 10, "上限10フレームで最速の経路が見つからない" + where);
+    }
+    std::cout << "接地中に数えた落下: 段を下りる組の見積もりが下限\n";
+}
+
+// ---- a placement that leaves a piece to fall (the rules of the records) ----
+// Columns 0, 12, 0, 0, 1, 0; the pair on its side at column 3, the child on column 4: the way over soonest the search finds
+// is found again with its own end as the limit (the estimate of a state before such a lock counts the landing as the end
+// of the way does), and the estimate from the spawn is no later.
+static void testSplitAtLimit() {
+    const Timing t = recordedRules(Timing{});
+    const int heights[W] = {0, 12, 0, 0, 1, 0};
+    GameField g;
+    for (int x = 0; x < W; ++x)
+        for (int y = 0; y < heights[x]; ++y) g.f.set(x, y, GARBAGE);
+    const Placement target{3, RIGHT};
+    const PairControl from = spawnPair(t);
+    ai::FastestSearch search;
+    std::vector<uint8_t> buttons, again;
+    int soft = 0, end = 0, softAgain = 0, endAgain = 0;
+    check(search.find(g, from, target, t, 100, 1000, buttons, soft, end), "ちぎりの配置に経路が見つからない");
+    check(ai::FastestSearch::ends(g, from, buttons, t, 100) == end, "ちぎりの経路の終わりが入力と合わない");
+    const int estimate = search.estimate(g, from, target, t, 100);
+    check(estimate <= end, "ちぎりの見積もり " + std::to_string(estimate) + " が経路の終わり " + std::to_string(end) + " より遅い");
+    const bool ok = search.find(g, from, target, t, 100, end, again, softAgain, endAgain);
+    check(ok && endAgain == end, "上限ちょうどでちぎりの経路が見つからない (" + std::to_string(end) + ")");
+    std::cout << "ちぎりの配置: " << buttons.size() << " フレームで固定する経路が上限ちょうどでも見つかる\n";
+}
+
+// ---- the first press of a quick turn ends the wait of the last turn (Timing::quickFirstEndsTurn, the rules of the records) ----
+// An upright pair lying in a groove (columns 0, 4, 0, 4, 0, 0, the pair on column 2), four frames of the wait of its last
+// turn left: the down button with the first press of a quick turn locks it in that frame. What the search counts on for
+// the lock is no more than that frame, its end no later than that of those buttons, and it finds them.
+static void testQuickFirstEndsTurnBound() {
+    const Timing t = recordedRules(Timing{});
+    const int heights[W] = {0, 4, 0, 4, 0, 0};
+    GameField g;
+    for (int x = 0; x < W; ++x)
+        for (int y = 0; y < heights[x]; ++y) g.f.set(x, y, GARBAGE);
+    PairControl p = spawnPair(t);
+    p.x = 2, p.y = 0, p.dir = UP, p.upper = false, p.grounded = true, p.gain = 0, p.held = 0;
+    p.landings = 1, p.groundFrames = 3, p.owned = true, p.ownFrames = 3, p.turnWait = 4;
+    const Placement target{2, UP};
+    const std::vector<uint8_t> press = {uint8_t(BTN_DOWN | BTN_CW)};
+    PairControl q = p;
+    stepPair(q, g, press[0], t);
+    check(q.locked, "溝の中でクイック回転の最初の押下と下入力で固定しない");
+    ai::FastestSearch search;
+    int lock = 0;
+    const int estimate = search.estimate(g, p, target, t, 100, &lock);
+    const int end = ai::FastestSearch::ends(g, p, press, t, 100);
+    check(lock <= 1, "回転待ちが残る組の固定の下限が " + std::to_string(lock) + " (1フレームで固定できる)");
+    check(estimate <= end, "回転待ちが残る組の見積もり " + std::to_string(estimate) + " が入力の終わり " + std::to_string(end) + " より遅い");
+    std::vector<uint8_t> found;
+    int soft = 0, foundEnd = 0;
+    check(search.find(g, p, target, t, 100, end, found, soft, foundEnd) && foundEnd == end && found.size() == 1,
+          "回転待ちが残る組の最速の経路が1フレームの固定でない");
+    std::cout << "クイック回転の最初の押下: 回転待ちが残る組の固定の下限が1フレーム\n";
+}
+
+// ---- a move that pushes the child off a piece in the 14th row turns the pair on its side with no wait of a turn ----
+// Columns 1 to 3 eleven high, a piece in the 14th row of column 3 (or of column 1): an upright pair with its axis in the
+// 13th row of column 2, moved towards that column with the down button held, lies on its side there and locks before the
+// wait of a turn (Timing::turnLockFrames) would be over. What the search counts on for the lock is no more than those
+// frames, its end no later than that of those buttons, and it finds a way with them as the limit.
+static void testRow14PushBound() {
+    const Timing t = recordedRules(Timing{});
+    for (const bool left : {false, true}) {
+        GameField g;
+        for (int x = 1; x <= 3; ++x)
+            for (int y = 0; y < 11; ++y) g.f.set(x, y, GARBAGE);
+        g.row14[size_t(left ? 1 : 3)] = GARBAGE;
+        PairControl p = spawnPair(t);
+        p.x = 2, p.y = ROW_14 - 1, p.dir = UP, p.upper = false, p.gain = 0, p.grounded = false, p.held = 0;
+        const Placement target{uint8_t(left ? 1 : 3), uint8_t(left ? RIGHT : LEFT)};
+        const std::string where = left ? " (左へ)" : " (右へ)";
+        std::vector<uint8_t> buttons{uint8_t((left ? BTN_LEFT : BTN_RIGHT) | BTN_DOWN)};
+        PairControl q = p;
+        const ControlEvents first = stepPair(q, g, buttons[0], t);
+        check(first.moved && first.rotated && q.dir == target.dir && q.turnWait == 0, "14段目の駒で子が押されて横向きにならない" + where);
+        while (!q.locked && buttons.size() < 40) buttons.push_back(BTN_DOWN), stepPair(q, g, BTN_DOWN, t);
+        check(q.locked && q.x == target.x && q.dir == target.dir, "14段目で押された組が目標で固定しない" + where);
+        const int frames = int(buttons.size());
+        check(frames < t.turnLockFrames + 1, "14段目で押された組の固定が回転待ちより遅い: " + std::to_string(frames) + where);
+        ai::FastestSearch search;
+        int lock = 0;
+        const int estimate = search.estimate(g, p, target, t, 100, &lock);
+        const int end = ai::FastestSearch::ends(g, p, buttons, t, 100);
+        check(lock <= frames, "14段目で押される組の固定の下限 " + std::to_string(lock) + " が実際の " + std::to_string(frames) + " より遅い" + where);
+        check(estimate <= end, "14段目で押される組の見積もり " + std::to_string(estimate) + " が入力の終わり " + std::to_string(end) + " より遅い" + where);
+        std::vector<uint8_t> found;
+        int soft = 0, foundEnd = 0;
+        check(search.find(g, p, target, t, 100, end, found, soft, foundEnd) && foundEnd <= end, "14段目で押される組の経路が上限で見つからない" + where);
+    }
+    std::cout << "14段目で押される組: 回転待ちのない向きの変化を下限が数える\n";
+}
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf; // (every line out at once: a run that is stopped still tells how far it came)
     if (argc > 1 && std::string(argv[1]) == "real") {
@@ -1089,6 +1210,10 @@ int main(int argc, char** argv) {
         testRule();
         testRecordedTurns();
         testAirborneDownwardQuickTurn();
+        testGroundCountBound();
+        testSplitAtLimit();
+        testQuickFirstEndsTurnBound();
+        testRow14PushBound();
         if (argc > 1 && std::string(argv[1]) == "rules") {
             std::cout << "実機の回転規則: 成功\n";
             return 0;

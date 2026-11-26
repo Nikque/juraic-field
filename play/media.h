@@ -23,10 +23,7 @@
 #include <wincodec.h>
 #include <windows.h>
 #else
-#include "../third_party/dr_libs/dr_flac.h"
-#include "../third_party/dr_libs/dr_mp3.h"
-#include "../third_party/dr_libs/dr_wav.h"
-#include "../third_party/stb/stb_image.h"
+#include "media_decode.h"
 #endif
 #include <algorithm>
 #include <cwctype>
@@ -127,17 +124,15 @@ class Backdrop {
     Raster::Stamp drawn;
 
     bool load(const std::filesystem::path& file) {
-        int n = 0;
-        unsigned char* p = stbi_load(file.string().c_str(), &width, &height, &n, 4);
-        if (!p) return false;
-        pixels.resize(size_t(width) * size_t(height));
-        for (size_t i = 0; i < pixels.size(); ++i) {
-            const uint32_t a = p[4 * i + 3];
-            const auto ch = [a](uint32_t v) { return (v * a + 127) / 255; };
-            pixels[i] = a << 24 | ch(p[4 * i]) << 16 | ch(p[4 * i + 1]) << 8 | ch(p[4 * i + 2]);
-        }
-        stbi_image_free(p);
-        return true;
+        return decodePicture(file.string(), [&](const uint8_t* p, int w, int h) {
+            width = w, height = h;
+            pixels.resize(size_t(width) * size_t(height));
+            for (size_t i = 0; i < pixels.size(); ++i) {
+                const uint32_t a = p[4 * i + 3];
+                const auto ch = [a](uint32_t v) { return (v * a + 127) / 255; };
+                pixels[i] = a << 24 | ch(p[4 * i]) << 16 | ch(p[4 * i + 1]) << 8 | ch(p[4 * i + 2]);
+            }
+        });
     }
 
 public:
@@ -175,30 +170,12 @@ struct MusicSamples {
     PcmFormat format{};
 };
 #ifndef _WIN32
-// (16 bits, read whole by dr_mp3, dr_wav or dr_flac by the ending of the name)
+// (16 bits, read a part at a time by dr_mp3, dr_wav or dr_flac by the ending of the name: play/media_decode.h)
 inline MusicSamples readMusic(const std::filesystem::path& file) {
     MusicSamples out;
-    std::wstring ending = file.extension().wstring();
-    for (wchar_t& c : ending) c = wchar_t(std::towlower(c));
-    const std::string name = file.string();
     unsigned channels = 0, rate = 0;
-    uint64_t frames = 0;
-    int16_t* samples = nullptr;
-    if (ending == L".flac") {
-        samples = drflac_open_file_and_read_pcm_frames_s16(name.c_str(), &channels, &rate, reinterpret_cast<drflac_uint64*>(&frames), nullptr);
-    } else if (ending == L".wav") {
-        samples = drwav_open_file_and_read_pcm_frames_s16(name.c_str(), &channels, &rate, reinterpret_cast<drwav_uint64*>(&frames), nullptr);
-    } else if (ending == L".mp3") {
-        drmp3_config config{};
-        samples = drmp3_open_file_and_read_pcm_frames_s16(name.c_str(), &config, reinterpret_cast<drmp3_uint64*>(&frames), nullptr);
-        channels = config.channels, rate = config.sampleRate;
-    }
     const size_t limit = size_t(600) << 20; // (about an hour of stereo at 44.1 kHz: more is not read)
-    if (samples && channels && rate) {
-        const size_t bytes = std::min(size_t(frames) * channels * 2, limit / (channels * 2) * (channels * 2));
-        out.pcm.assign(reinterpret_cast<const uint8_t*>(samples), reinterpret_cast<const uint8_t*>(samples) + bytes);
-    }
-    if (samples) ending == L".flac" ? drflac_free(samples, nullptr) : ending == L".wav" ? drwav_free(samples, nullptr) : drmp3_free(samples, nullptr);
+    if (!decodeMusic(file, limit, out.pcm, channels, rate)) out.pcm.clear(), channels = rate = 0;
     out.format.wFormatTag = 1; // (PCM)
     out.format.nChannels = uint16_t(channels);
     out.format.nSamplesPerSec = rate;

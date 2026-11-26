@@ -33,6 +33,11 @@ template <class G> void dumpBoard(const grid_detail::Node<G>& n) {
     }
 }
 
+template <class P> void printPlan() {
+    std::cout << " guide=" << P::GUIDED_STEPS << " plan(slack<=" << P::PLAN_MAX_SLACK << ", steps=" << P::PLAN_STEPS
+              << ", distance=" << P::PLAN_DISTANCE << ", ramp=" << P::PLAN_RAMP << ", greedy=" << P::PLAN_GREEDY << ")";
+}
+
 template <class G> int run(int chain, int attempts, int beam, int perParent, int colors, int extra, uint64_t seed) {
     int dumped = 0;
     int found = 0;
@@ -61,9 +66,11 @@ template <class G> int run(int chain, int attempts, int beam, int perParent, int
     }
     const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     std::cout << "chain=" << chain << " beam=" << beam << " candidates=" << perParent << " colors=" << colors
-              << " extra=" << extra << " guide=" << G::GUIDED_STEPS << " plan(slack<=" << G::PLAN_MAX_SLACK
-              << ", steps=" << G::PLAN_STEPS << ", distance=" << G::PLAN_DISTANCE << ", ramp=" << G::PLAN_RAMP << ", greedy=" << G::PLAN_GREEDY << "): " << found << "/" << attempts
-              << " found, " << total << " s, " << total / attempts << " s per attempt\n";
+              << " extra=" << extra;
+    // The values of the geometry the search used: gridGenerateOne takes those of G::ThreeColors for three colours.
+    if (colors == 3) printPlan<typename G::ThreeColors>();
+    else printPlan<G>();
+    std::cout << ": " << found << "/" << attempts << " found, " << total << " s, " << total / attempts << " s per attempt\n";
     std::cout << "  failed at depth:";
     for (auto [d, n] : failedAt) std::cout << ' ' << d << ':' << n;
     std::cout << '\n';

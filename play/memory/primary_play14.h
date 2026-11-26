@@ -39,6 +39,7 @@
 #include "primary14.h"
 #include "primary_timing14.h"
 #include <functional>
+#include <memory>
 
 namespace play::realgame {
 
@@ -398,13 +399,39 @@ public:
                     //  advancePlayer has it; the lock in the frame before this one)
                     const int64_t from = timing.firstOwnLanding ? lay_[i] : ground_[i];
                     const int rested = from >= 0 ? int(std::max<int64_t>(1, std::min<int64_t>(at - from, 255))) : 1;
-                    const int land = std::max(timing.lockWait, timing.landFrames - rested);
+                    int land = std::max(timing.lockWait, timing.landFrames - rested);
+                    // (a piece that falls apart from the pair: the frames of its fall (Timing::split, by the rows it falls),
+                    //  and after them the landing counted from the pair's first frame lying, a frame sooner with the axis
+                    //  in the 13th row - records of the real game: 109 pairs of 112 so, the other 3 the axis in the 13th
+                    //  row. The placement is the one that puts the pair on the board it was put on and leaves the board of
+                    //  this frame, or a chain that ends in it (chainOf) - none when no placement does, or when two that do
+                    //  fall apart otherwise: garbage not in the board, a board not read whole.)
+                    Running chained;
+                    if (beforeKnown_[i] && !stale[i]) {
+                        int rows = -1;
+                        bool top = false;
+                        const unsigned legal = juraic::legalPlacements(before_[i]);
+                        for (int id = 0; id < juraic::PLACEMENTS && rows != -2; ++id) {
+                            if (!(legal >> id & 1)) continue;
+                            juraic::GameField g = before_[i];
+                            const juraic::PlaceResult r = juraic::place(g, juraic::placement(id), beforePair_[i]);
+                            if (!(g == seat.field)) continue;
+                            if (rows >= 0 && (r.split != rows || (r.lockY >= 12) != top)) rows = -2;
+                            else rows = r.split, top = r.lockY >= 12;
+                        }
+                        chained = chainOf(before_[i], beforePair_[i], seat.field, rules, timing);
+                        if (rows == -1 && chained.waves) rows = chained.split, top = chained.splitTop;
+                        if (rows > 0) {
+                            const int fall = rows <= 11 ? timing.split[rows] : timing.split[11] + 2 * (rows - 11);
+                            land = fall + timing.landFrames - 1 - (top ? 1 : 0);
+                        }
+                    }
                     due_[i] = at - 1 + land + timing.nextFrames;
                     lay_[i] = ground_[i] = -1, restless_[i] = false, cleared_[i] = -1, busy_[i] = -1, busyLast_[i] = false;
                     // (the chain the pair begins: the board has its end in the frame the pair is put)
                     running_[i] = Running{};
                     if (beforeKnown_[i] && !stale[i]) {
-                        running_[i] = chainOf(before_[i], beforePair_[i], seat.field, rules, timing);
+                        running_[i] = chained;
                         running_[i].base = seat.counted ? seat.pieces : -1, running_[i].waveAt = at + 1 + land;
                     }
                     beforeKnown_[i] = false;
@@ -472,19 +499,24 @@ public:
         o.rules = rules, o.timing = timing, o.players = 2, o.me = me;
         o.frame = tick - start_ + 1; // (the frame that is played next)
         o.state = juraic::RoundState::Playing;
-        o.ownTsumo = false, o.tsumo1.pairs.clear();
+        o.tsumo1.pairs.clear();
         o.busyLeft[0] = o.busyLeft[1] = 0, o.busyChain[0] = o.busyChain[1] = false;
-        // The pairs shown: as far as they are known without a gap from the own next pair on. (A round joined on its way,
-        // with the other seat three pairs and more ahead: the pairs between the two windows have not been seen. Shown
-        // to the AI as pairs they would stand for pairs they are not, and the choice made with them would be dropped
-        // as its pair appears and the window shows what they are - the pair then falls for the time of a new choice.)
-        size_t shownPairs = pairs_.size();
-        for (size_t k = size_t(seats[size_t(me)]->pose.lockedPairs); k < pairs_.size(); ++k)
-            if (!learned_[k]) {
-                shownPairs = k;
-                break;
-            }
-        o.tsumo.pairs.assign(pairs_.begin(), pairs_.begin() + std::ptrdiff_t(shownPairs));
+        // The pairs shown to each seat: as far as they are known without a gap from that seat's next pair on. (A round
+        // joined on its way, with one seat three pairs and more ahead of the other: the pairs between the two windows
+        // have not been seen. Shown to the AI as pairs they would stand for pairs they are not: the own choice made with
+        // them would be dropped as its pair appears and the window shows what they are - the pair then falls for the time
+        // of a new choice -, and the reading of the other seat would put pairs he does not have.) Two seats shown as
+        // many share one list; otherwise each has its own (Observation::ownTsumo).
+        std::array<size_t, 2> shownPairs{pairs_.size(), pairs_.size()};
+        for (size_t i = 0; i < 2; ++i)
+            for (size_t k = size_t(seats[i]->pose.lockedPairs); k < pairs_.size(); ++k)
+                if (!learned_[k]) {
+                    shownPairs[i] = k;
+                    break;
+                }
+        o.ownTsumo = shownPairs[0] != shownPairs[1];
+        o.tsumo.pairs.assign(pairs_.begin(), pairs_.begin() + std::ptrdiff_t(o.ownTsumo ? shownPairs[0] : shownPairs[size_t(me)]));
+        if (o.ownTsumo) o.tsumo1.pairs.assign(pairs_.begin(), pairs_.begin() + std::ptrdiff_t(shownPairs[1]));
         for (size_t i = 0; i < 2; ++i) {
             const PrimarySeat14& seat = *seats[i];
             const OwnedPublicPose14& p = seat.pose;
@@ -660,6 +692,8 @@ private:
         int base = -1;                // the pieces the game counted in the field in the frame the pair was put (-1: not read)
         int wave = 0, entered = 0;    // the wave that runs, and how often the field was seen to begin clearing
         int64_t waveAt = 0;           // the counter of the frame that wave began in
+        int split = -1;               // the rows a piece of the pair fell apart from it as it was put (-1: not known)
+        bool splitTop = false;        // ... with its axis in the 13th row or above
     };
     std::array<Running, 2> running_{};
     std::array<juraic::GameField, 2> before_{}; // the board as it was while the seat's pair was in its hands
@@ -680,16 +714,18 @@ private:
     }
     std::array<uint32_t, 2> phaseWas_{};        // the field's phase in the last sample of the seat
     // The chain of the pair put on `before` that leaves the board `after`: the placement is the one whose chain, played
-    // by the model, ends in that board (waves 0: none does).
+    // by the model, ends in that board (waves 0: none does) - the first such; with the rows a piece of the pair fell apart
+    // as it was put, not known when two that do fall apart otherwise.
     static Running chainOf(const juraic::GameField& before, juraic::Pair pair, const juraic::GameField& after, const juraic::Rules& rules, const juraic::Timing& timing) {
         const unsigned legal = juraic::legalPlacements(before);
+        Running found;
         // (top: garbage in the 13th row goes with the piece under it when that clears - the game's board after one
         //  recorded chain of fifteen is the model's only so; the model of a wave leaves the 13th row alone)
         for (int top = 0; top < 2; ++top)
         for (int id = 0; id < juraic::PLACEMENTS; ++id) {
             if (!(legal >> id & 1)) continue;
             juraic::GameField g = before;
-            juraic::place(g, juraic::placement(id), pair);
+            const juraic::PlaceResult placed = juraic::place(g, juraic::placement(id), pair);
             Running r;
             juraic::Wave w;
             int gone = 0;
@@ -702,9 +738,12 @@ private:
                 g.f.erase(erased);
                 if (!g.f.drop()) break;
             }
-            if (r.waves && g == after) return r;
+            if (!r.waves || !(g == after)) continue;
+            r.split = placed.split, r.splitTop = placed.lockY >= 12;
+            if (!found.waves) found = r;
+            else if (found.split != r.split || found.splitTop != r.splitTop) found.split = -1;
         }
-        return Running{};
+        return found;
     }
     // The seat's field is busy with a chain: by its phase, by the garbage the chain makes, or by the bonus it takes.
     bool chaining(size_t i, const PrimarySeat14& seat) const {
@@ -773,6 +812,47 @@ private:
     }
 };
 
+// What became of buttons sent to the pad (PrimaryDrive14::press): on the pad; held back (the pad is not the play's for
+// now - a press asked for by hand, the driver of the pictures, a seat not to be played); not sent (the pad failed).
+enum class PressResult14 : uint8_t { Applied, HeldBack, Failed };
+// The buttons of the play known to be on the pad: buttons asked for are sent while they are not known there, and only
+// those that reached it are known there.
+struct PadButtons14 {
+    uint8_t onPad = 0;  // the buttons on the pad (known)
+    bool known = false; // the pad has the buttons last sent to it by the play
+    bool loose = false; // buttons of the play may be on the pad: some were sent, and no release has reached it since
+    bool due(uint8_t asked) const { return !known || asked != onPad; }
+    // After `asked` was sent: true when it is on the pad; false otherwise - sent again with the next sample, and the
+    // frame it was for went by without it (PrimaryPlayer14::undelivered).
+    bool took(uint8_t asked, PressResult14 result) {
+        if (asked) loose = true;
+        if (result != PressResult14::Applied) return known = false;
+        onPad = asked, known = true;
+        if (!asked) loose = false;
+        return true;
+    }
+    // The seats are not read: nothing of the play is to be held, and a release is sent until one has reached the pad
+    // (one held back or not sent is sent again the next time).
+    bool releaseDue() const { return loose; }
+    // The pad was set by someone else meanwhile (a press asked for by hand, the driver of the pictures, a seat not to be
+    // played): the buttons of the next sample are sent whatever was sent before.
+    void lent() { known = false; }
+};
+// Buttons of the play for a pad that others set too: held back while the pad is not the play's (`heldBack`: a press
+// asked for by hand, the driver of the pictures, a seat not to be played), otherwise sent by `send` (true: the pad took them).
+template <class Send>
+PressResult14 pressShared14(bool heldBack, Send&& send) {
+    if (heldBack) return PressResult14::HeldBack;
+    return send() ? PressResult14::Applied : PressResult14::Failed;
+}
+// The seat played by the memory first is read now: a sample that read it came at most PRIMARY_SEAT_FRESH_US14 before
+// `nowUs` (both of the reader's clock; 0: none came). A reader may stay bound while it reads nothing for seconds - until
+// it binds anew (PrimaryRebind14::goneUs) -, so being bound alone does not tell it.
+constexpr uint64_t PRIMARY_SEAT_FRESH_US14 = 100000;
+inline bool primarySeatFresh14(uint64_t seatReadUs, uint64_t nowUs) {
+    return seatReadUs != 0 && (nowUs <= seatReadUs || nowUs - seatReadUs <= PRIMARY_SEAT_FRESH_US14);
+}
+
 // The AI of one seat played on the samples: a call for every sample, buttons for the frame of the game's counter that
 // the sample is of. The same buttons again for a sample of the same frame.
 class PrimaryPlayer14 {
@@ -795,7 +875,14 @@ public:
     const juraic::ai::Observation& shown() const { return shown_; }           // what the AI was shown last
     const juraic::ai::Observation& foreseen() const { return input_.predicted; } // ... and where it reckoned its buttons take hold
     bool foreseenWhole() const { return input_.predictionComplete; }             // (false: a pair to come is not known yet)
-    int delay() const { return input_.delay; }
+    int delay() const { return input_.delay(); }
+    void setDelay(int frames) {
+        input_.setDelay(frames);
+        pose_.reset();
+        resetMeasure();
+        held_ = 0;
+    }
+    uint8_t plannedAt(int64_t frame) const { return input_.plannedAt(frame); } // the buttons reckoned to reach the game in that frame
     long frames = 0;    // frames of the counter played on
     long skipped = 0;   // ... of them, frames no sample came for
     long filled = 0;    // ... of those, frames played on as the engine has them (the others: begun anew)
@@ -813,6 +900,19 @@ public:
     static constexpr int FILL = 6; // so many frames without a sample are played on as the engine has them
 
     uint8_t frame(const PrimarySample14& s, const std::array<int, 2>& notice) {
+        if (s.generation != generation_) {
+            generation_ = s.generation;
+            observer.reset();
+            input_.reset();
+            pose_.reset();
+            resetMeasure();
+            seen_ = {}, shown_ = {};
+            last_ = otherAt_ = -1;
+            aimless_ = 0;
+            recoveredPair_ = endedSeat_ = -1;
+            held_ = 0;
+            playing_ = false;
+        }
         const auto& own = s.seat[size_t(me_)];
         if (roundEnded(s) || (own && own->pose.cpuControlled)) {
             if (playing_) {
@@ -828,8 +928,17 @@ public:
             return held_ = 0;
         }
         const int64_t tick = PrimaryObserver14::tickOf(s, me_);
-        if (tick < 0) return held_; // (the seat was not read in this sample: the buttons stay)
-        if (tick == last_) return held_;
+        if (tick < 0) {
+            // (the seat was not read in this sample: the buttons stay - for up to FILL frames of the other seat's counter
+            //  since the own seat was last read, which are played on as the engine has them; after that nothing is pressed.
+            //  The other seat not read with it then: counted from the frame before the first sample that reads it.)
+            const int64_t other = PrimaryObserver14::tickOf(s, 1 - me_);
+            if (otherAt_ < 0 && other >= 0) otherAt_ = other - 1;
+            if (otherAt_ >= 0 && other >= 0 && other - otherAt_ > FILL) held_ = 0;
+            return held_;
+        }
+        otherAt_ = PrimaryObserver14::tickOf(s, 1 - me_);
+        if (playing_ && tick == last_) return held_;
         // (a tap being measured is not carried across a new round or a frame not seen)
         if (last_ >= 0 && tick != last_ + 1) resetMeasure();
         if (!observer.observe(s, me_, notice, seen_)) {
@@ -882,6 +991,7 @@ private:
     juraic::ai::Observation seen_, shown_;
     int me_ = 0;
     int64_t last_ = -1;
+    uint64_t generation_ = 0;
     bool playing_ = false;
     int endedSeat_ = -1;
     uint64_t endedGeneration_ = 0;
@@ -909,6 +1019,7 @@ private:
     uint64_t round_ = 0; // the observer's round the agent was last told of (PrimaryObserver14::round)
     int aimless_ = 0, recoveredPair_ = -1;
     uint8_t held_ = 0;
+    int64_t otherAt_ = -1; // the other seat's counter in the last sample the own seat was read in (-1: not read then)
     bool fastest_ = false; // the agent plans the ways over soonest (as it was set when the player was made)
     int measured_ = -1, measuredRun_ = 0;
     int64_t tapAt_ = -1; // the counter of the sample a tap being measured was sent on (-1: none)
@@ -975,6 +1086,12 @@ private:
     juraic::ai::Observation between() const {
         juraic::ai::Observation o = shown_;
         for (int& busy : o.busyLeft) busy = busy > 1 ? busy - 1 : 0; // (a frame further on)
+        for (int i = 0; i < o.players && i < 2; ++i) {
+            // (the other seat a frame further on in what it is doing while no pair is in its hands: no fewer than a frame
+            //  left, what follows is read)
+            juraic::Player& q = o.player[i];
+            if (i != o.me && q.phase != juraic::Phase::Control && q.phase != juraic::Phase::Decide && q.phase != juraic::Phase::Dead && q.wait > 1) --q.wait;
+        }
         juraic::Player& mine = o.player[o.me];
         juraic::Tsumo known{};
         const auto& visible = o.mine();
@@ -992,5 +1109,39 @@ private:
         return o;
     }
 };
+
+// An agent as the play by the memory has it play the real game: buttons as the real game takes them, a second choice
+// waited for in the air, and with `cancel` the ways over soonest.
+inline void preparePrimaryAgent14(juraic::ai::Agent* agent, bool cancel) {
+    if (auto* placing = dynamic_cast<juraic::ai::PlacementAgent*>(agent)) {
+        placing->tapHold = 1, placing->holdSecond = true, placing->holdLevel = true, placing->waitQuickLock = true, placing->askInAir = true, placing->fastestWays = cancel;
+        // The search for the way over soonest is made ahead, on a thread of its own, once the placement of the pair
+        // to come is chosen (PlacementAgent::fastestAhead). One made in the frame the buttons are for - the pair
+        // put right in the air, a placement chosen as the pair appears - is kept short: a search of 4000 states
+        // took up to 19 ms on the fields of the records of the real game, and buttons set 12 ms after a frame did
+        // not reach the game in it. A search that gives up leaves the straight way.
+        placing->fastestStates = PRIMARY_FASTEST_NOW14, placing->fastestAhead = PRIMARY_FASTEST_AHEAD14;
+        // The way made ahead is kept while a second choice is on its way and that way itself goes straight down
+        // (records of the real game: a pair in five went to another placement in the air, and every pair held
+        // straight down for a second choice had its way planned again within the frame - mostly the straight
+        // one). A way planned in the air is searched once more as the one made ahead is, from where the pair is
+        // a few frames on.
+        placing->holdKeepsWay = cancel, placing->fastestAgain = cancel ? PRIMARY_FASTEST_AGAIN14 : 0;
+        // (a choice dropped stops its searches; a first choice that comes late is asked for again in the air; the way
+        //  over soonest is searched on while a second choice is awaited; with the pairs beyond the window read, the
+        //  choice is made once more as the pair appears, by the fields as they are then)
+        placing->cutStale = true, placing->retryInAir = true, placing->searchWhileSecond = cancel;
+        placing->againFresh = primaryListedPairs14.load();
+    }
+}
+// The player of a seat as the play by the memory makes it: its agent prepared for the real game (preparePrimaryAgent14),
+// the rules and the frame counts of the real game - with the cancel where the seat takes the ways over soonest, so that
+// the reading takes the other seat's pairs the soonest way too.
+inline std::unique_ptr<PrimaryPlayer14> makePrimaryPlayer14(juraic::ai::Agent& agent, int me, int delay, bool cancel) {
+    preparePrimaryAgent14(&agent, cancel);
+    auto player = std::make_unique<PrimaryPlayer14>(agent, me, delay);
+    player->observer.rules = primaryRules14(cancel), player->observer.timing = primaryTiming14(cancel);
+    return player;
+}
 
 } // namespace play::realgame

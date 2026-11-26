@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 // What the game plays, without a window or a device of the system: a round with what is drawn of it (Game), toko,
 // a match on one machine with its AI seats (Versus), the viewer of a replay, and the two checks that run without a
 // window (--check-replay, --net-test). play/main.cpp gives them the buttons of the frame and draws them.
@@ -98,6 +99,7 @@ struct MoveStart {
     Round round;
     View view[2];
     size_t frames = 0;
+    int maxChain = 0, lastChain = 0, lastPoints = 0; // the chains shown beside the field then (Toko)
     void take(const Game& g) {
         round = g.round, view[0] = g.view[0], view[1] = g.view[1];
         frames = g.log.frames.size();
@@ -122,10 +124,15 @@ struct Toko {
     void start(const Settings& s) {
         game.start(s.rules, seed, 1, hasBoard ? &startField : nullptr);
         history.clear();
-        before.take(game);
         maxChain = lastChain = lastPoints = 0;
+        keepBefore();
         prediction = {};
         paused = false;
+    }
+    // The state of now as the start of a move: the round, and the chains shown beside the field.
+    void keepBefore() {
+        before.take(game);
+        before.maxChain = maxChain, before.lastChain = lastChain, before.lastPoints = lastPoints;
     }
     static void outcome(const Player& p, const Rules& rules, Placement at, int& chains, int& points) {
         PlayerCore core = p;
@@ -151,7 +158,7 @@ struct Toko {
     PlayerEvents step(uint8_t buttons) {
         PlayerEvents e[2];
         if (paused || game.round.state != RoundState::Playing) return e[0];
-        before.take(game);
+        keepBefore();
         const uint8_t b[2] = {buttons, 0};
         game.step(b, e);
         const Player& p = game.round.player[0];
@@ -167,9 +174,11 @@ struct Toko {
     void undo() {
         if (history.empty()) return;
         if (history.size() > 1 && game.round.frame - history.back().round.frame < 40) history.pop_back();
-        history.back().give(game); // the recorded buttons go back with it
+        const MoveStart& back = history.back();
+        back.give(game); // the recorded buttons go back with it
+        maxChain = back.maxChain, lastChain = back.lastChain, lastPoints = back.lastPoints;
         history.pop_back();
-        before.take(game);
+        keepBefore();
         paused = false;
     }
 };
@@ -179,7 +188,7 @@ struct Toko {
 // lv35, and lv1q to lv35q.
 inline std::string aiOfLevel(int level, int style) {
     if (style) return "x3q";
-    if (level >= ai::LAST_LEVEL) return "lv37";
+    if (level >= ai::LAST_LEVEL) return "lv38";
     if (level == ai::LEVELS) return "x3";
     return "lv" + std::to_string(styleLevel(level, 0));
 }
@@ -209,14 +218,18 @@ struct Versus {
 
     // name = one of ai/agents.h, or empty for a person. live: the match is played at the speed of
     // the screen (a self-test plays its frames as fast as they come).
-    void seat(int i, const std::string& name, const Settings& s, bool live = true) {
+    void seat(int i, const std::string& requested, const Settings& s, bool live = true,
+              std::optional<bool> realGameEx = std::nullopt) {
+        const bool selectedEx = realGameEx.value_or(s.rules.cancel &&
+            (ai::explicitLv38Ex(requested) || (i ? s.aiEx : s.aiEx1)));
+        const std::string name = ai::levelOf(requested) == 38 ? (selectedEx ? "lv38ex" : "lv38") : requested;
         // One choice of the AI takes far longer than a frame (40 x 10, three queues: about 90 ms,
         // at most about 300 seen). So the AI chooses in the pause before
         // its pair appears (twelve frames, thinkAhead) and on a thread of its own: no frame waits
         // for it, and a pair whose choice is not made when it appears is left alone until it is
         // (ai/agent.h, Thinking::Free). In a self-test the frame waits for the choice instead,
         // which gives the buttons of the tools whatever the speed of the machine.
-        ai::Params params;
+        ai::Params params = ai::namedDefaults(name);
         params.beamWidth = 40, params.beamDepth = 10, params.beamQueues = 3;
         // (a match on the screen: the search of the settings. Automatic = the search the AI is measured
         // with (ai/params.h: 250 wide, 16 deep, eight queues), begun 40 wide and made as wide as the machine
@@ -234,7 +247,7 @@ struct Versus {
         // A level below the top plays with the search of its level, whatever the settings above say, and never a
         // wider one (ai/level.h; on a machine too slow for it the clock still makes it narrower). The threads below
         // follow its number of queues.
-        params = ai::agentParams(name, params);
+        params = ai::configuredParams(name, params);
         // (each queue of the beam search on a thread of its own: the same choice in about a third of
         // the time; on a machine with fewer threads than that, one of them is left to the game)
         const int cores = int(std::thread::hardware_concurrency());
@@ -250,26 +263,29 @@ struct Versus {
         // 180 ms after the choice was begun, 20 ms before the pair appears. (Not in a
         // self-test: there the buttons must not depend on the machine.)
         // (begun later than 200 ms before the pair, a choice has less: what is left 20 ms before the pair)
-        if (live) params.thinkBudget = s.aiLead > 0 ? std::min(s.aiBudget, s.aiLead * 1000 / 60 - 20) : s.aiBudget;
+        if (live) params.thinkBudget = liveThinkBudget(s.aiLead, s.aiBudget);
         if (adjust) adjust(i, params);
-        agent[i] = name.empty() ? nullptr : ai::makeAgent(name, params);
+        agent[i] = name.empty() ? nullptr : ai::makeConfiguredAgent(name, params);
         // (for the replay: what the AI needs to make its choices again, replay.h)
         seatLog[i] = AiLog{name, 0, params.beamWidth, params.beamDepth, params.beamQueues, params.thinkAhead, {}};
         if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(agent[i].get())) x3->noting = true;
         for (int64_t& held : logged[i]) held = 0;
+        const int namedLevel = ai::levelOf(name);
+        const int level = namedLevel ? namedLevel : ai::LEVELS;
+        const bool quiet = ai::quietOf(name);
+        const bool ex = !quiet && level >= LEVEL_EX_FROM && selectedEx;
         if (ai::PlacementAgent* placing = dynamic_cast<ai::PlacementAgent*>(agent[i].get())) {
             placing->thinking = live ? ai::Thinking::Free : ai::Thinking::Thread;
             if (placing->ahead < 1) placing->ahead = 12; // (an AI that does not choose the moment itself)
             // (the Ex of a level, play/level_ex.h: the way that is over soonest - with the cancel, from Lv 36 up, where
             //  the seat is marked so; seat 1 is the 2P side)
-            placing->fastestWays = !ai::quietOf(name) && levelEx(ai::levelOf(name) ? ai::levelOf(name) : ai::LEVELS, (i ? s.aiEx : s.aiEx1) != 0, s.rules.cancel);
+            placing->fastestWays = ex;
         }
         // (the AI of the game is called Juraic; in the tools, the replays and the sources it is x3, x3q for the one
         //  that hardly pokes, and lv1 to lv35 and lv1q to lv35q for their levels below the top. The two names on the
         //  screen are 催促（小） for x3 and 催促（極小） for x3q.)
-        const bool juraic = name == "x3" || name == "x3q" || ai::levelOf(name);
-        const int level = ai::levelOf(name) ? ai::levelOf(name) : ai::LEVELS;
-        agentName[i] = juraic ? std::wstring(ai::quietOf(name) ? L"Juraic 催促（極小） Lv " : L"Juraic 催促（小） Lv ") + levelNumber(level, !ai::quietOf(name) && levelEx(level, (i ? s.aiEx : s.aiEx1) != 0, s.rules.cancel))
+        const bool juraic = name == "x3" || name == "x3q" || namedLevel;
+        agentName[i] = juraic ? aiLevelName(level, quiet, ex)
                               : L"AI（" + std::wstring(name.begin(), name.end()) + L"）";
     }
     void startMatch(const Settings& s, uint64_t seed) {
@@ -399,15 +415,22 @@ inline std::string replayResult(const Replay& replay) {
 // Plays a replay without a window, the way the viewer does (loadReplay, then
 // Game::step with the recorded buttons), and writes how every round ended to
 // <file>.result. Returns 0; 7 when the file cannot be read; 8 when
-// <file>.expected exists and says something else (tools/ai_match writes it).
-inline int checkReplay(const std::filesystem::path& file) {
+// <file>.expected exists and says something else (tools/ai_match writes it);
+// 9 when requireExpected is set and <file>.expected is missing or cannot be read;
+// 10 when <file>.result cannot be written whole.
+inline int checkReplay(const std::filesystem::path& file, bool requireExpected = false) {
     Replay replay;
     if (!loadReplay(file, replay)) return 7;
     const std::string result = replayResult(replay);
     std::filesystem::path resultFile = file, expectedFile = file;
-    std::ofstream(resultFile += ".result", std::ios::binary) << result;
+    {
+        std::ofstream out(resultFile += ".result", std::ios::binary);
+        out << result;
+        out.close();
+        if (!out) return 10;
+    }
     std::ifstream expected(expectedFile += ".expected", std::ios::binary);
-    if (!expected) return 0;
+    if (!expected) return requireExpected ? 9 : 0;
     std::stringstream text;
     text << expected.rdbuf();
     return text.str() == result ? 0 : 8;

@@ -16,6 +16,7 @@
 #include "arena/tcp.h"
 #include "view_state.h"
 #include <deque>
+#include <string_view>
 
 namespace play {
 
@@ -71,7 +72,7 @@ struct ArenaPlay {
     }
 
     // One frame. buttons: those of the own seat. each(seat, events) after every frame a seat has played.
-    template <class Each> void tick(uint8_t buttons, Each&& each) {
+    template <class Each> void tick(uint8_t buttons, Each&& each, int64_t now = arena::nowMs()) {
         if (stage == Off || stage == Over) return;
         if (calling) {
             const int got = calling->take(line);
@@ -85,31 +86,25 @@ struct ArenaPlay {
         std::string text;
         while (stage != Over && line.nextLine(text)) {
             if (text.rfind("PING", 0) == 0) line.send("PONG" + text.substr(4));
-            else if (watcher) held.emplace_back(arena::nowMs(), text), heldBytes += text.size();
+            else if (watcher) held.emplace_back(now, text), heldBytes += text.size();
             else take(text);
         }
         if (heldBytes > arena::Line::MOST_IN) return end(L"サーバーから届く行が多すぎます");
-        while (stage != Over && !held.empty() && arena::nowMs() - held.front().first >= WATCH_LAG_MS) {
-            heldBytes -= held.front().second.size();
-            take(held.front().second), held.pop_front();
-        }
         if (stage == Over) return;
-        if (line.closed) return end(L"サーバーとの接続が切れました");
-        if (!match.roundOn) return;
         const auto seen = [&](int s, const juraic::PlayerEvents& e) {
             view[s].update(match.round.player(s), e);
             each(s, e);
         };
-        if (match.roundEnded) {
-            // (the frames that came before the end of the round are played still, at the speed of a watcher: the last
-            //  of the round is shown. The own seat has played its own.)
-            for (int s = 0; s < 2; ++s)
-                if (s != match.seat) match.playArrived(s, seen, watcher ? 2 : 1 << 30);
+        if (watcher) {
+            tickWatcher(now, seen);
             return;
         }
-        if (watcher) {
-            // (as fast as the game, a little faster when behind)
-            match.playArrived(0, seen, 2), match.playArrived(1, seen, 2);
+        if (line.closed) return end(L"サーバーとの接続が切れました");
+        if (!match.roundOn) return;
+        if (match.roundEnded) {
+            // The own seat has played its own portion. Catch up the other seat with the frames received before END.
+            for (int s = 0; s < 2; ++s)
+                if (s != match.seat) match.playArrived(s, seen);
             return;
         }
         if (ready > 0) {
@@ -129,6 +124,40 @@ struct ArenaPlay {
     }
 
 private:
+    bool watchFramesReady() const {
+        if (!match.roundOn) return false;
+        for (int s = 0; s < 2; ++s)
+            if (size_t(match.round.played(s)) < match.buttons[s].size() &&
+                match.round.played(s) < match.rules.roundFrameLimit && match.round.canPlay(s)) return true;
+        return false;
+    }
+    template <class Each> void tickWatcher(int64_t now, Each&& each) {
+        while (stage != Over && !held.empty() && now - held.front().first >= WATCH_LAG_MS) {
+            const std::string& next = held.front().second;
+            // A new round or match replaces both boards. An abandoned match can also stop playback.
+            // Keep these lines queued until no more of the old round can be played.
+            constexpr std::string_view spaces = " \t\r\n";
+            const size_t first = next.find_first_not_of(spaces);
+            if (first != std::string::npos) {
+                const std::string_view command = std::string_view(next).substr(first, next.find_first_of(spaces, first) - first);
+                if ((command == "MATCH" || command == "ROUND" || (command == "MATCHEND" && !match.roundEnded)) &&
+                    watchFramesReady()) break;
+            }
+            // A line that ends the watching clears held; take it out first.
+            const std::string text = std::move(held.front().second);
+            heldBytes -= text.size();
+            held.pop_front();
+            take(text);
+        }
+        if (stage == Over) return;
+        if (watchFramesReady()) {
+            match.playArrived(0, each, 2);
+            match.playArrived(1, each, 2);
+            return; // Leave the final board visible for this tick even after EOF.
+        }
+        if (line.closed && held.empty()) end(L"サーバーとの接続が切れました");
+    }
+
     // The server called (Connecting); `first` is sent once the call has come. Whatever was followed before is left.
     void call(const std::string& host, int port, const std::string& first) {
         startSockets();

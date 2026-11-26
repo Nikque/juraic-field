@@ -8,14 +8,14 @@ namespace juraic::ai::answer_window {
 // decided anew. No continuation depends on guessing the opponent's input.
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, const Plan& ordinary,
-           const Plan* immediate, const Duel& afterChain, unsigned legal, int arriving, const Params& p, uint64_t seed, const Stop& expired) {
+           const Plan* immediate, const Duel& afterChain, unsigned legal, int arriving, const Params& p, uint64_t seed, const Stop& expired, PictureRoutes* picture = nullptr) {
     const int me = o.me, him = 1 - me;
     const auto& self = o.self();
     const auto& rival = o.opponent();
     const auto& incoming = afterChain.player[me].incoming;
     const auto nextRival = afterChain.player[him].spawnFrame;
-    if (!p.readMidgame || !p.checkKnownExchange || p.handWait || o.rules.cancel ||
-        mine.midAir || self.phase != Phase::Next || self.wait <= 0 || o.busyLeft[me] || rival.phase != Phase::Wave ||
+    if (!p.readMidgame || !p.checkKnownExchange || p.handWait ||
+        mine.midAir || ownPairInAir(o) || self.phase != Phase::Next || self.wait <= 0 || o.busyLeft[me] || !chainShown(rival) ||
         rival.chain.chains > 4 || arriving < W || arriving >= 2 * W || self.incoming.confirmed ||
         self.incoming.pending != arriving || incoming.confirmed != arriving || incoming.pending ||
         rival.incoming.total() || self.scoring.allClear || rival.scoring.allClear ||
@@ -36,6 +36,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, con
         return known_poke::followed(own, self.moves, &line) && !own.scoring.allClear && !a.player[him].scoring.allClear;
     };
     KnownReplay bounded{expired};
+    bounded.picture = picture;
     const auto look = [&](const Plan& own, const Plan* other = nullptr, int64_t* start = nullptr,
                           const ReplayCheckpoint* previous = nullptr, ReplayCheckpoint* next = nullptr) {
         if (!start) return playOut(o, mine, &own, theirs, other, p, seed, true, nullptr, &bounded, previous, next);

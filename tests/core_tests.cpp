@@ -3,11 +3,15 @@
 // Two references are used: a tiny grid simulator written here (handles holes,
 // garbage and the 13th row), and the unchanged v0.3.0 engine.
 #include "../generator/generator.h"
+#include "../generator/thread_pool.h"
 #include "reference/v030_engine.h"
+#include <atomic>
 #include <iostream>
 #include <map>
 #include <random>
 #include <set>
+#include <system_error>
+#include <thread>
 
 using namespace juraic;
 
@@ -383,6 +387,36 @@ static void testGeneration() {
     check(found == 45, "every setting must produce a board");
 }
 
+static void testThreadStart() {
+    // The k-th thread cannot be started: the ones started are told to stop and joined, and the error is passed on
+    // (destroying a joinable std::thread would end the program instead).
+    for (int failAt : {0, 1, 3}) {
+        std::atomic_bool stop{false};
+        std::atomic_int ran{0}, ended{0};
+        const auto work = [&] {
+            ++ran;
+            while (!stop) std::this_thread::yield();
+            ++ended;
+        };
+        int made = 0;
+        bool aborted = false, passedOn = false;
+        try {
+            runOnThreads(4, work, [&] { aborted = true, stop = true; }, [&](const auto& w) {
+                if (made == failAt) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+                ++made;
+                return std::thread(w);
+            });
+        } catch (const std::system_error&) {
+            passedOn = true;
+        }
+        check(passedOn && aborted && made == failAt && ran == failAt && ended == failAt, "a thread that cannot be started");
+    }
+    std::atomic_int ran{0};
+    const auto work = [&] { ++ran; };
+    runOnThreads(4, work, [] {});
+    check(ran == 4, "every thread runs once");
+}
+
 int main() {
     try {
         for (int pass = 0; pass < 2; ++pass) {
@@ -402,6 +436,7 @@ int main() {
         testReach(rng);
         testRng();
         testGeneration();
+        testThreadStart();
         std::cout << "All core tests passed"
 #if JURAIC_SSE
                   << " (SSE field bits).\n";

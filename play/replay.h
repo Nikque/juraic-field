@@ -23,6 +23,7 @@
 // second, made when the third pair came into the window (Params::thinkAgain). <frames late> of the
 // second: the frames after the pair appeared at which that choice came (0 = before it appeared,
 // -1 = not while the pair was in the air), PlacementAgent::againLog.
+#include <charconv>
 #include "../game/link.h"
 #include "settings.h"
 #include <sstream>
@@ -185,25 +186,31 @@ inline bool loadReplay(const std::filesystem::path& path, Replay& r) {
             RoundLog round;
             size_t frames = 0;
             if (!(in >> round.seed >> frames) || frames > 60 * 60 * 60) return false;
-            std::string line;
+            std::string line, boardTag, cells, extra;
             std::getline(in, line);
-            const size_t board = line.find("BOARD ");
-            if (board != std::string::npos && line.size() >= board + 6 + 84) {
+            std::istringstream header(line);
+            if (header >> boardTag) {
+                constexpr size_t visible = juraic::W * juraic::H;
+                if (boardTag != "BOARD" || !(header >> cells) || cells.size() != visible + juraic::W ||
+                    cells.find_first_not_of("0123456") != std::string::npos || (header >> extra)) return false;
                 round.hasBoard = true;
-                const char* d = line.c_str() + board + 6;
+                size_t cell = 0;
                 for (int x = 0; x < juraic::W; ++x)
-                    for (int y = 0; y < juraic::H; ++y, ++d)
-                        if (*d > '0' && *d <= '6') round.board.f.set(x, y, juraic::Cell(*d - '0'));
-                for (int x = 0; x < juraic::W; ++x, ++d) round.board.row14[size_t(x)] = juraic::Cell(*d - '0');
+                    for (int y = 0; y < juraic::H; ++y)
+                        round.board.f.set(x, y, juraic::Cell(cells[cell++] - '0'));
+                for (int x = 0; x < juraic::W; ++x)
+                    round.board.row14[size_t(x)] = juraic::Cell(cells[cell++] - '0');
             }
             while (in >> word && word != "END") {
                 unsigned count = 0, b0 = 0, b1 = 0;
-#ifdef _MSC_VER
-                if (sscanf_s(word.c_str(), "%ux%u,%u", &count, &b0, &b1) != 3 ||
-#else
-                if (std::sscanf(word.c_str(), "%ux%u,%u", &count, &b0, &b1) != 3 ||
-#endif
-                    round.frames.size() + count > frames) return false;
+                const char* const end = word.data() + word.size();
+                const auto runs = std::from_chars(word.data(), end, count);
+                if (runs.ec != std::errc{} || runs.ptr == end || *runs.ptr != 'x' || count == 0 ||
+                    count > frames - round.frames.size()) return false;
+                const auto first = std::from_chars(runs.ptr + 1, end, b0);
+                if (first.ec != std::errc{} || first.ptr == end || *first.ptr != ',' || b0 > 255) return false;
+                const auto second = std::from_chars(first.ptr + 1, end, b1);
+                if (second.ec != std::errc{} || second.ptr != end || b1 > 255) return false;
                 round.frames.insert(round.frames.end(), count, uint16_t(b0 | b1 << 8));
             }
             if (word != "END" || round.frames.size() != frames) return false; // (a file cut off in the middle has no END)

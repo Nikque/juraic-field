@@ -53,7 +53,7 @@ int wmain(int argc, wchar_t** argv) {
             std::streambuf *a, *b;
             ~Restore() { std::cout.rdbuf(a); std::cerr.rdbuf(b); }
         } restore{old, err};
-        int cases = 0;
+        int cases = 0, partialRejected = 0;
         for (int chain : {1, 19})
             for (int colorCount : {3, 4, 5})
                 for (int extra : {0, 1, 2}) {
@@ -91,6 +91,15 @@ int wmain(int argc, wchar_t** argv) {
                         auto r = loadRecord(dir / L"盤面.jfchain");
                         require(r.seed == UINT64_MAX && r.solution.field == sol.field && r.solution.trigger == sol.trigger &&
                                 r.solution.firePairs == sol.firePairs && r.solution.targetChain == sol.targetChain, "archive roundtrip");
+                        if (sol.firePairs & (sol.firePairs - 1)) { // some of the last pairs only: each one is valid, the set is not
+                            Solution partial = sol;
+                            partial.firePairs = sol.firePairs & (0u - sol.firePairs);
+                            saveRecord(dir / L"一部.jfchain", partial, 1);
+                            bool partialAccepted = true;
+                            try { loadRecord(dir / L"一部.jfchain"); } catch (...) { partialAccepted = false; }
+                            require(!partialAccepted, "an archive with some of the last pairs only accepted");
+                            ++partialRejected;
+                        }
                         {
                             std::ifstream in(dir / L"盤面.jfchain", std::ios::binary);
                             const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -103,6 +112,7 @@ int wmain(int argc, wchar_t** argv) {
                     for (int format = 0; format < 3; ++format)
                         writeSimulatorUrls(dir / (std::string("urls-") + urlFormatIds[format] + ".txt"), records, UrlFormat(format));
                 }
+        require(partialRejected > 0, "no board with two or more last pairs to check a partial archive");
         // 10 x 18: settings, generation through the hooks, playback, archives of version 3, no URL.
         // The timelines (190 cells a frame, top row first) are replayed by tests/test_gui_artifacts.py.
         {
@@ -164,6 +174,14 @@ int wmain(int argc, wchar_t** argv) {
                         require(r.wide && r.seed == UINT64_MAX && r.wideSolution.field == sol.field && r.wideSolution.trigger == sol.trigger &&
                                     r.wideSolution.firePairs == sol.firePairs && r.wideSolution.targetChain == sol.targetChain,
                                 "10 x 18 archive roundtrip");
+                        if (sol.firePairs & (sol.firePairs - 1)) {
+                            WideSolution partial = sol;
+                            partial.firePairs = sol.firePairs & (0u - sol.firePairs);
+                            saveRecord(dir / L"一部.jfchain", partial, 1);
+                            bool partialAccepted = true;
+                            try { loadRecord(dir / L"一部.jfchain"); } catch (...) { partialAccepted = false; }
+                            require(!partialAccepted, "a 10 x 18 archive with some of the last pairs only accepted");
+                        }
                         require(timeline(r).size() == frames.size() && r.board() == frames[0].board, "a reopened 10 x 18 archive plays");
                     };
                     require(runGenerator(dir / L"config.ini", &hooks, dir) == 0 && count == 1, "generate and play 10 x 18 cases");

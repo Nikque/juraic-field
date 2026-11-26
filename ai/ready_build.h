@@ -9,7 +9,7 @@ template<class Stop>
 int preserveReadyBuild(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int chosen,
                        unsigned legal, const Params& p, uint64_t seed, Stop stop) {
     if (chosen < 0 || !p.readMidgame || !p.checkKnownExchange || p.handWait || mine.pairCount < 2 ||
-        o.self().incoming.total() || o.opponent().incoming.total() || o.opponent().chain.chains ||
+        o.self().incoming.total() || o.opponent().incoming.total() || chainRunning(o, 1 - o.me) ||
         o.self().scoring.allClear || o.opponent().scoring.allClear ||
         (o.self().phase != Phase::Control && (o.self().phase != Phase::Next || o.busyLeft[o.me])) || stop()) return chosen;
     const Plan* single = nullptr;

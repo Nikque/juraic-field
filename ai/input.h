@@ -1,4 +1,5 @@
 #pragma once
+#include "params.h"
 // From a placement to buttons: the button of every frame that brings the pair
 // from where it is now to the placement and locks it there as early as possible.
 //
@@ -160,12 +161,38 @@ public:
             downWhenPlaced = false;
             if (found && !lostBySkip(field, from, target, timing, speedPercent, later)) out = std::move(later), ++spareWays;
         }
+        if (fastest && tapHold == 2 && spareFrame && !unsure13 && !unsure14)
+            shortenPictureWay(field, from, target, timing, speedPercent, out);
         return true;
     }
 
-    bool canReverse(Pair pair) const {
+    void shortenPictureWay(const GameField& field, const PairControl& from, Placement target, const Timing& timing,
+                           int speedPercent, InputPath& out) {
+        const int now = FastestSearch::ends(field, from, out.buttons, timing, speedPercent);
+        if (now <= 1 || quickest.estimate(field, from, target, timing, speedPercent) >= now) return;
+        // At the beginning of a new plan a released button may only have been up for one frame.
+        constexpr uint8_t kind[] = {BTN_CW | BTN_CCW, BTN_LEFT | BTN_RIGHT};
+        uint8_t changed = 0;
+        for (int k = 0; k < 2; ++k)
+            if (!(from.held & kind[k]) || heldFor[k] == 1) changed |= kind[k];
+        const auto survivesSkip = [&](const std::vector<uint8_t>& buttons) {
+            return reachesAfterMissedInput(field, from, target, timing, speedPercent, buttons);
+        };
+        InputPath other;
+        int end = 0;
+        quickest.maxStates = fastestStates, quickest.low = low, quickest.stop = nullptr;
+        const bool found = quickest.search<true>(field, from, target, timing, speedPercent, now - 1,
+            other.buttons, other.softDropRows, end, changed, downWhenPlaced, survivesSkip);
+        out.states += quickest.states;
+        if (found && !lostBySkip(field, from, target, timing, speedPercent, other)) {
+            out.buttons = std::move(other.buttons), out.softDropRows = other.softDropRows;
+            ++fasterWays, framesSaved += now - end;
+        }
+    }
+
+    bool canReverse(Pair pair, bool allowHeld = false) const {
         return pair.axis >= 1 && pair.axis <= MAX_COLORS && pair.axis == pair.child &&
-               tapHold == 1 && !unsure13 && !unsure14;
+               (tapHold == 1 || (allowHeld && tapHold == 2 && spareFrame)) && !unsure13 && !unsure14;
     }
 
     // A same-colour pair can reach the same field with its pieces exchanged.
@@ -174,7 +201,9 @@ public:
                         const Timing& timing, const Rules& rules, InputPath& out) {
         const bool planned = (legal >> id & 1) && planSure(field, from, placement(id), timing, rules.speedPercent, out);
         const int reverse = reversePlacement(id);
-        if (!canReverse(pair) || !(legal >> reverse & 1)) return planned;
+        if (!canReverse(pair, true) || !(legal >> reverse & 1)) return planned;
+        if (tapHold == 2)
+            return planHeldEquivalent(field, from, id, pair, timing, rules, out, planned);
 
         const Placement target = placement(reverse);
         GameField placed = field;
@@ -199,6 +228,125 @@ public:
         other.softDropRows = alternative.soft;
         out = std::move(other);
         id = reverse;
+        return true;
+    }
+
+    // Ex: both orientations go by their fastest route and must settle the same quiet field.
+    bool planFastestEquivalent(const GameField& field, const PairControl& from, int& id, unsigned legal, Pair pair,
+                               const Timing& timing, const Rules& rules, InputPath& out) {
+        const bool planned = (legal >> id & 1) && planSure(field, from, placement(id), timing, rules.speedPercent, out);
+        if (!canReverse(pair, true)) return planned;
+        const int reverse = reversePlacement(id);
+        if (!(legal >> reverse & 1)) return planned;
+
+        if (tapHold == 2)
+            return planHeldEquivalent(field, from, id, pair, timing, rules, out, planned, true);
+
+        const Placement original = placement(id), alternative = placement(reverse);
+        GameField settled = field, otherBoard = field;
+        const PlaceResult originalDrop = place(settled, original, pair);
+        const PlaceResult otherDrop = place(otherBoard, alternative, pair);
+        Wave wave;
+        if (settled.dead() || !(settled == otherBoard) || findWaveFor(settled.f, wave, rules.clearCount, false))
+            return planned;
+
+        InputPath other;
+        if (!planSure(field, from, alternative, timing, rules.speedPercent, other)) return planned;
+        const PathTiming faster = pathTiming(field, from, alternative, otherDrop, timing, rules.speedPercent, other);
+        if (!faster.check) return planned;
+        if (planned) {
+            const PathTiming current = pathTiming(field, from, original, originalDrop, timing, rules.speedPercent, out);
+            countComponent(CountedComponent::ExFlip);
+            if (current.check && faster.check >= current.check) return true;
+        }
+        id = reverse;
+        out = std::move(other);
+        return true;
+    }
+
+    // Compare two picture-input paths on their actual frame and scoring rules.
+    bool planHeldEquivalent(const GameField& field, const PairControl& from, int& id, Pair pair, const Timing& timing,
+                            const Rules& rules, InputPath& ordinary, bool planned, bool countEx = false) {
+        if (!planned) return false;
+        const int reverse = reversePlacement(id);
+        const Placement first = placement(id), second = placement(reverse);
+        GameField current = field, alternate = field;
+        const PlaceResult originalDrop = place(current, first, pair);
+        const PlaceResult reversedDrop = place(alternate, second, pair);
+        Wave wave;
+        if (current.dead() || !(current == alternate) || findWaveFor(current.f, wave, rules.clearCount, false)) return true;
+        const PathTiming original = pathTiming(field, from, first, originalDrop, timing, rules.speedPercent, ordinary);
+        if (!original.check) return true;
+        InputPath other;
+        if (!planSure(field, from, second, timing, rules.speedPercent, other)) return true;
+        const PathTiming reversed = pathTiming(field, from, second, reversedDrop, timing, rules.speedPercent, other);
+        if (countEx) countComponent(CountedComponent::ExFlip);
+        if (!reversed.check || reversed.check >= original.check || (rules.softDropBonus && reversed.soft < original.soft) ||
+            (!countEx && other.frames() > ordinary.frames())) return true;
+        if (!reachesAfterMissedInput(field, from, first, timing, rules.speedPercent, ordinary.buttons) ||
+            !reachesAfterMissedInput(field, from, second, timing, rules.speedPercent, other.buttons) ||
+            lostBySkip(field, from, second, timing, rules.speedPercent, other)) return true;
+        id = reverse;
+        other.softDropRows = reversed.soft;
+        ordinary = std::move(other);
+        return true;
+    }
+
+    // For a committed quiet move in the standard game. Compare the first
+    // check frame, including split and landing, on the same settled board.
+    bool accelerateQuiet(const GameField& field, const PairControl& from, int& id, unsigned legal, Pair pair,
+                         const Timing& timing, const Rules& rules, InputPath& path, bool allowSoftLoss = false,
+                         int searchStates = 0, int* stateLimitHits = nullptr, int* boardRejections = nullptr) {
+        if (tapHold != 1 || downWhenPlaced || waitQuickLock || unsure13 || unsure14 ||
+            spareFrame || fastest || rules.cancel || timing != DEFAULT_TIMING)
+            return false;
+        const auto target = placement(id);
+        GameField settled = field;
+        const auto drop = place(settled, target, pair);
+        Wave wave;
+        if (settled.dead() || findWaveFor(settled.f, wave, rules.clearCount, false)) return false;
+        const auto ordinary = pathTiming(field, from, target, drop, timing, rules.speedPercent, path);
+        if (!ordinary.check) return false;
+        int best = ordinary.check, selected = id;
+        InputPath improved;
+        // Fixed foreground budget, spent only on the committed pair.
+        const int stateLimit = searchStates > 0 ? searchStates : 512;
+        for (int option : {id, reversePlacement(id)}) {
+            if (option != id && (!canReverse(pair) || !(legal >> option & 1))) continue;
+            const auto where = placement(option);
+            GameField board = field;
+            const auto placed = place(board, where, pair);
+            if (!(board == settled)) {
+                if (boardRejections) ++*boardRejections;
+                continue;
+            }
+            const int split = timing.splitFrames(placed.split, where.x, placed.lockY);
+            Timing objective = timing;
+            if (split) objective.landFrames = timing.lockWait;
+            const int fixedTime = split ? split + timing.landFrames - timing.lockWait : 0;
+            const int limit = best - fixedTime - 1;
+            quickest.low = keepLow;
+            if (limit <= 0 || quickest.estimate(field, from, where, objective, rules.speedPercent) > limit) continue;
+            quickest.maxStates = stateLimit;
+            quickest.stop = nullptr;
+            InputPath next;
+            int end = 0;
+            if (!quickest.find(field, from, where, objective, rules.speedPercent, limit,
+                               next.buttons, next.softDropRows, end)) {
+                if (stateLimitHits && quickest.gaveUp) ++*stateLimitHits;
+                continue;
+            }
+            const auto checked = pathTiming(field, from, where, placed, timing, rules.speedPercent, next);
+            if (!checked.check || checked.check >= best ||
+                (!allowSoftLoss && rules.softDropBonus && checked.soft < ordinary.soft)) continue;
+            best = checked.check;
+            selected = option;
+            next.softDropRows = checked.soft;
+            improved = std::move(next);
+        }
+        if (best == ordinary.check) return false;
+        path = std::move(improved);
+        id = selected;
         return true;
     }
 
@@ -336,7 +484,27 @@ public:
         return true;
     }
 
+    // The key of a state of the pair as the search of the ways keeps them apart (held, repeat and moveWait not in it).
+    static uint64_t stateKey(const PairControl& p) { return pack(p); }
+
 private:
+    static bool reachesAfterMissedInput(const GameField& field, const PairControl& from, Placement target,
+                                        const Timing& timing, int speedPercent, const std::vector<uint8_t>& buttons) {
+        PairControl current = from;
+        for (size_t i = 0; i < buttons.size(); ++i) {
+            if (buttons[i] != current.held) {
+                PairControl delayed = current;
+                stepPair(delayed, field, current.held, timing, speedPercent);
+                for (size_t j = i + 1; j < buttons.size() && !delayed.locked; ++j)
+                    stepPair(delayed, field, buttons[j], timing, speedPercent);
+                if (!delayed.locked) stepPair(delayed, field, 0, timing, speedPercent);
+                if (!delayed.locked || delayed.x != target.x || delayed.dir != target.dir) return false;
+            }
+            stepPair(current, field, buttons[i], timing, speedPercent);
+        }
+        return true;
+    }
+
     struct PathTiming {
         int check = 0; // Frames through the landing animation, before checking for a chain.
         int soft = 0;
@@ -520,7 +688,7 @@ private:
         k = k << 1 | uint64_t(p.grounded);
         k = k << 8 | uint64_t(uint8_t(p.gain));
         k = k << 4 | p.landings;
-        k = k << 6 | p.groundFrames;
+        k = k << 6 | (p.groundFrames & 63u);
         k = k << 5 | p.quickWindow;
         k = k << 4 | p.quickLock; // (up to 15: Timing::quickTurnLock is 7 for the real game, play/realgame_read.h)
         // (both 0 with the frame counts of this engine: Timing::liftWaits, quickRise)
@@ -531,6 +699,9 @@ private:
         // (both 0 with the frame counts of this engine: Timing::turnLockFrames, quickFallFrames)
         k |= uint64_t(p.turnWait & 15) << 51;
         k |= uint64_t(p.quickFast & 15) << 55;
+        // (groundFrames from 64 on: a pair slowed down - Rules::speedPercent below 100 - lies that long; the bits above the
+        //  six kept in their place, so that the key of every other state stays what it was)
+        k |= uint64_t(p.groundFrames >> 6) << 59;
         return k;
     }
 

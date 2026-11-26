@@ -13,7 +13,7 @@
                            o.mine().known(self.nextPair + 2);
         if (!p.readMidgame || p.handWait || mine.pairCount != 3 || mine.knownCount < mine.pairCount ||
             !ready ||
-            roomPairs(o.self().field) >= mine.pairCount || o.opponent().phase != Phase::Wave ||
+            roomPairs(o.self().field) >= mine.pairCount || !chainShown(o.opponent()) ||
             o.self().incoming.confirmed || o.opponent().incoming.total() || o.self().scoring.allClear ||
             o.opponent().scoring.allClear || afterChain.state != RoundState::Playing ||
             forecast.phase != DuelPhase::Control || arriving <= o.rules.maxGarbagePerDrop ||
@@ -149,7 +149,7 @@
             Params q = p;
             q.beamDepth = depth;
             if (ownWidth > 0) q.beamWidth = ownWidth;
-            q.beamThirdMax = thirdLimit(o.self().field);
+            q.beamThirdMax = thirdLimit(tail.field); // (of the field searched on)
             q.beamLastValues = 0;
             if (p.x3ExtendJoined) q.evKeyed = 0;
             // Leave the ordinary decision's width, clock accounting and RNG

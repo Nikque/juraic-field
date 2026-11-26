@@ -17,6 +17,8 @@
 #include "build.h"
 #include "detect.h"
 #include "params.h"
+#include <cmath>
+#include <vector>
 
 namespace juraic::ai {
 
@@ -75,6 +77,43 @@ inline int64_t chanceAtLeast(int wanted, int pieces, int colors) {
     }
     return fewer >= CHANCE_SURE ? 0 : CHANCE_SURE - fewer;
 }
+// The limit least[code] of the colour of the rules' palette at `index` (0: none, or a code outside 1..MAX_COLORS).
+inline int limitOf(const int* least, const Rules& rules, int index) {
+    const Cell code = rules.palette[size_t(index)];
+    return code >= 1 && code <= MAX_COLORS ? least[code] : 0;
+}
+// The chance that, of `pieces` unseen pieces of the colours in play of `rules`, no colour c has least[c] or more of
+// them (least is indexed by cell code; least[c] 0: any number of colour c).
+inline int64_t chanceNoneOf(const int* least, int pieces, const Rules& rules) {
+    if (pieces < 0) pieces = 0;
+    const int colors = rules.colorsInPlay();
+    int limited = 0;
+    for (int i = 0; i < colors; ++i) limited += limitOf(least, rules, i) > 0;
+    // fit[m]: the chance that m pieces spread over the colours taken so far keep under their limits
+    std::vector<double> fit(size_t(pieces) + 1, limited < colors ? 1.0 : 0.0), next(size_t(pieces) + 1);
+    fit[0] = 1.0;
+    int spread = colors - limited; // the colours taken so far: at first those without a limit
+    for (int i = colors - 1; i >= 0; --i) {
+        const int limit = limitOf(least, rules, i);
+        if (limit <= 0) continue;
+        ++spread;
+        for (int m = 0; m <= pieces; ++m) {
+            if (spread == 1) {
+                next[size_t(m)] = m < limit ? fit[0] : 0.0;
+                continue;
+            }
+            const double in = 1.0 / spread, out = 1.0 - in;
+            double term = std::pow(out, m), sum = 0; // the chance that k of the m pieces have this colour, from k = 0
+            for (int k = 0; k < limit && k <= m; ++k) {
+                sum += term * fit[size_t(m - k)];
+                term = term * (m - k) / (k + 1) * in / out;
+            }
+            next[size_t(m)] = sum;
+        }
+        fit.swap(next);
+    }
+    return std::llround(fit[size_t(pieces)] * double(CHANCE_SURE));
+}
 
 // The chance (parts of a million) that the player of the field `r` was made of has the pieces for an answer among the
 // `pairs` pairs he places before an attack lands: a chain of `need` points or more that leaves a main chain of `keep`
@@ -90,26 +129,24 @@ inline int64_t answerChance(const Replies& r, int need, int keep, int pairs, con
         if (known[i].child <= MAX_COLORS) ++have[known[i].child];
     }
     const int unseen = (pairs - seen) * 2;
-    unsigned single = 0; // the colours of which one unseen piece more is enough
-    int64_t best = 0;
+    int least[MAX_COLORS + 3]{}; // by colour: the fewest unseen pieces of it that make an answer (0: none does)
     for (int i = 0; i < r.count; ++i) {
         const Reply& q = r.item[i];
         if (q.points < need || q.mainAfter < keep || q.color > MAX_COLORS) continue;
         const int more = q.added - have[q.color];
         if (more <= 0) return CHANCE_SURE;
-        if (more == 1) single |= 1u << q.color;
-        else {
-            const int64_t c = chanceAtLeast(more, unseen, colors);
-            if (c > best) best = c;
-        }
+        if (!least[q.color] || more < least[q.color]) least[q.color] = more;
     }
-    if (single) {
-        int of = 0;
-        for (unsigned m = single; m; m &= m - 1) ++of;
-        const int64_t c = CHANCE_SURE - chanceNone(of, unseen, colors);
-        if (c > best) best = c;
+    int limited = 0, single = 0, wanted = 0; // (of the colours in play: no unseen piece has another colour)
+    for (int i = 0; i < colors; ++i) {
+        const int limit = limitOf(least, rules, i);
+        if (!limit) continue;
+        ++limited, single += limit == 1, wanted = limit;
     }
-    return best;
+    if (!limited) return 0;
+    if (single == limited) return CHANCE_SURE - chanceNone(single, unseen, colors);
+    if (limited == 1) return chanceAtLeast(wanted, unseen, colors);
+    return CHANCE_SURE - chanceNoneOf(least, unseen, rules);
 }
 
 // The largest chain among the answers of `r` that leaves a main chain of `keep` points or more: its points (0: none).

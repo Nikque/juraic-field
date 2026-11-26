@@ -85,11 +85,17 @@ public:
             return false;
         }
         if ((m != Menu::PlayersWaiting && m != Menu::Characters) || steady < STEADY) return false;
-        wait = GAP, ++presses;
+        wait = GAP, pending = true;
         return true;
     }
 
+    void noteDelivery(bool delivered) {
+        if (pending && delivered) ++presses, pending = false;
+    }
+    void cancel() { pending = false; }
+
 private:
+    bool pending = false;
     int wait = 0, steady = 0;
     Menu last = Menu::None;
 };

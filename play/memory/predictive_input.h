@@ -5,6 +5,21 @@
 #include <optional>
 
 namespace play::realgame {
+// The frames left of what the seats the model does not play on are doing, `frames` frames on: the other seat while no
+// pair is in its hands (a split, a landing, a chain, garbage falling, the wait for its pair), and both seats'
+// Observation::busyLeft. No fewer than one frame of either, so that what ends there ends in the first frame shown
+// (what follows it is not known before it is read).
+inline void ageUnplayed(juraic::ai::Observation& o, int frames) {
+    if (frames <= 0) return;
+    for (int i = 0; i < o.players && i < 2; ++i) {
+        int& busy = o.busyLeft[i];
+        if (busy > 1) busy = std::max(1, busy - frames);
+        juraic::Player& q = o.player[i];
+        if (i == o.me || q.phase == juraic::Phase::Control || q.phase == juraic::Phase::Decide || q.phase == juraic::Phase::Dead) continue;
+        if (q.wait > 1) q.wait = std::max(1, q.wait - frames);
+    }
+}
+
 // Experimental input path. Caller supplies a current, independently validated
 // Observation; this class does not read processes or authorize native samples.
 // Only already sent buttons are replayed. Future pairs and opponent inputs are
@@ -28,7 +43,11 @@ class PredictiveInput {
     }
 public:
     // Frames spent in the physical input queue; zero means a direct local game.
-    const int delay;
+    int delay() const { return delay_; }
+    void setDelay(int frames) {
+        delay_ = std::clamp(frames, 0, 30);
+        reset();
+    }
     long corrections=0,unknown=0;
     // The caller shows a side without a pair in its hands as waiting for its pair only (the landing, a chain and
     // falling garbage are not told apart): what was expected is then held against what is shown only while a pair
@@ -39,7 +58,7 @@ public:
     bool downInHand=false;
     juraic::ai::Observation predicted;
     bool predictionComplete=false;
-    explicit PredictiveInput(juraic::ai::Agent& agent,int inputDelay):agent_(agent),delay(std::clamp(inputDelay,0,30)){}
+    explicit PredictiveInput(juraic::ai::Agent& agent,int inputDelay):agent_(agent),delay_(std::clamp(inputDelay,0,30)){}
     uint8_t plannedAt(int64_t gameFrame)const{return at(gameFrame);}
     // The own side as the model has it after the frame the buttons last given are for (nothing: not known). For records.
     const std::optional<juraic::Player>& expected()const{return expected_;}
@@ -65,6 +84,7 @@ public:
         again_=true;
     }
 private:
+    int delay_;
     bool again_=false;
     uint8_t advance(const juraic::ai::Observation& current,bool keep){
         if(current.me<0 || current.me>=current.players || current.players>2 || current.frame<0 || current.state!=juraic::RoundState::Playing){reset();return 0;}
@@ -80,12 +100,13 @@ private:
         }
         auto& mine=predicted.player[current.me];
         predictionComplete=true;
-        for(int k=0;k<delay;++k){
+        for(int k=0;k<delay_;++k){
             if(mine.phase==juraic::Phase::Decide || (mine.phase==juraic::Phase::Next && !visible.known(mine.nextPair))){predictionComplete=false;++unknown;break;}
             juraic::Incoming nobody;
             juraic::advancePlayer(mine,nobody,at(current.frame+k),known,current.rules,current.timing,current.frame+k);
         }
-        predicted.frame=current.frame+delay;
+        predicted.frame=current.frame+delay_;
+        ageUnplayed(predicted,delay_); // (the other seat and the busy frames as of that frame too)
         if(!predictionComplete){if(!keep)held_=0;expected_.reset();}
         else {
             const bool off=expected_ && (current.frame!=last_+1 || (pairOnly?mine.phase==juraic::Phase::Control && !sameControl(*expected_,mine):!sameControl(*expected_,mine)));

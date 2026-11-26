@@ -196,6 +196,7 @@ struct NetPeer {
     uint32_t round = 0;            // counted on through the match and the matches after it
     std::vector<uint8_t> buttons[2];
     size_t acked = 0;              // the frames of the own seat the other end has
+    uint32_t hisRound = 0;         // the latest round the other end has said it is in
     bool hisAgain = false; // the other end wants another match (said at the end of one)
     bool again = false;    // so does this end
     uint32_t matches = 0;  // the matches begun: `again` and `hisAgain` are of this one
@@ -225,6 +226,11 @@ struct NetPeer {
         line.reset();
     }
 
+    // The round that ended after `frames` frames may be left: the other end has every frame of the own seat it needs
+    // to end it too - it has said so, or it is already in a later round (which it begins only once it has them).
+    // Before that, the buttons of the round are kept and sent on: startRound clears them, and the buttons of
+    // another round than its own are passed over by the other end.
+    bool roundHeard(int64_t frames) const { return acked >= size_t(frames < 0 ? 0 : frames) || hisRound > round; }
     // The next round begins (both ends count the rounds alike).
     void startRound() {
         ++round;
@@ -344,6 +350,7 @@ private:
             const uint32_t theirRound = r.u32(), has = r.u32(), from = r.u32(), count = r.u32();
             if (!r.ok || count > 600 || r.at + count > d.size()) return;
             heardAt = ticks, hisPlaying = true;
+            if (theirRound > hisRound) hisRound = theirRound; // (a datagram that came late says an older one)
             // (an end that has already begun the next match had this end's word for it and its own)
             if (hisMatch == matches) hisAgain = wants;
             else if (hisMatch > matches) hisAgain = true;

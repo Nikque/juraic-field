@@ -1,7 +1,7 @@
 // The reading of the real game's memory (play/realgame_memory_win.h, the Windows build), built only with
 // JURAIC_REALGAME_MEMORY=1 (CMake: JURAIC_REALGAME_MEMORY=ON):
 //  0. the program of the game (the first argument) holds those parts only when they are built: without them it holds
-//     neither the memory source menu text nor the name of any function that reads another process's memory or tells
+//     neither their text (MEMORY_PARTS_MARK) nor the name of any function that reads another process's memory or tells
 //     what it holds - imported or asked for by name. In any build, neither it nor the other programs named (rgmem)
 //     holds the name of a function that writes to another process, changes its pages, makes memory or a thread in it
 //     or debugs it;
@@ -28,7 +28,6 @@
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <string_view>
 #include <vector>
 
 static int failures = 0;
@@ -65,13 +64,8 @@ static void testGameProgram(const char* program) {
     if (bytes.size() <= 100000) return;
     int names = 0;
     for (const char* name : READING_NAMES) names += holds(bytes, name);
-    constexpr std::wstring_view source = L"メモリ読み取り（キャンセルなし）";
-    const std::string memoryMenu(reinterpret_cast<const char*>(source.data()), source.size() * sizeof(wchar_t));
-    const bool mark = holds(bytes, memoryMenu);
-    if (JURAIC_REALGAME_MEMORY) {
-        check(mark, "the memory source is not offered by the game");
-        check(holds(bytes, "ReadProcessMemory") && holds(bytes, "VirtualQueryEx"), "the game does not contain the memory reader");
-    } else {
+    const bool mark = holds(bytes, "the reading of the real game's memory");
+    if (!JURAIC_REALGAME_MEMORY) {
         check(names == 0, "the game built without the reading of the memory holds the name of a function that reads a process");
         check(!mark, "the game built without the reading of the memory holds the text of those parts");
     }

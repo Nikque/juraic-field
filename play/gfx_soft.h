@@ -2,6 +2,7 @@
 // The drawing of the canvas outside Windows: the marks of play/raster.h, and text with stb_truetype from the font
 // files of the folder "fonts" next to the program (play/gfx.h builds the pieces of them). Text is laid out as
 // DirectWrite lays it out on Windows closely enough: one line, in a box, from its top, left, centred or right.
+#include <set>
 #include "raster.h"
 #include "../third_party/stb/stb_truetype.h"
 #include <algorithm>
@@ -73,11 +74,13 @@ struct GfxBase {
     static constexpr float SIZES[4] = {18, 24, 36, 60}; // 0 small, 1 normal, 2 large, 3 huge
 
     // The fonts of the game: "regular" and "bold" in `folder` (a .ttf, .otf with TrueType outlines, or .ttc).
-    void loadFonts(const std::filesystem::path& folder) {
+    void loadFonts(const std::filesystem::path& folder, const std::set<std::filesystem::path>* allow = nullptr) {
         for (int k = 0; k < 2; ++k) {
             std::error_code ignored;
             for (std::filesystem::directory_iterator it(folder, ignored), end; !ignored && it != end && !face[k].ready; it.increment(ignored)) {
-                const std::string name = it->path().filename().string();
+                const auto filename = it->path().filename();
+                if (allow && !allow->contains(folder.filename() / filename)) continue;
+                const std::string name = filename.string();
                 std::string lower;
                 for (const char c : name) lower += char(std::tolower(static_cast<unsigned char>(c)));
                 const bool bold = lower.find("bold") != std::string::npos;

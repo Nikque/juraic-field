@@ -67,6 +67,8 @@ class Game:
         steps = next(it)
         self.rates = [next(it) for _ in range(steps)]
         self.requirement, self.all_clear_bonus, self.soft_bonus, self.max_drop = (next(it) for _ in range(4))
+        # garbage in the 13th row right above a cleared piece of the 12th row is cleared with it
+        self.top_garbage = next(it)
         self.players = [Player(), Player()]
         self.t = timing
 
@@ -101,6 +103,8 @@ class Game:
             for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                 if 0 <= nx < W and 0 <= ny < CLEAR_ROWS and grid[nx][ny] == GARBAGE:
                     garbage.add((nx, ny))
+            if self.top_garbage and y == CLEAR_ROWS - 1 and grid[x][CLEAR_ROWS] == GARBAGE:
+                garbage.add((x, CLEAR_ROWS))
         return cleared, garbage, len(colors), bonus
 
     def turn(self, f):
@@ -221,7 +225,31 @@ class Game:
             assert got[name] == value, f"{name}: simulator {got[name]}, log {value}"
 
 
+def check_top_garbage():
+    """The position of testTopGarbage in game_tests.cpp: rows 1-11 garbage; row 12 colour 1 in columns 1-4, colour 2
+    in column 5, colour 3 in column 6; row 13 colour 2 above column 1 and garbage above columns 2, 5 and 6."""
+    for on in (0, 1):
+        game = Game([4, 4, 70, 0, 1, 0, 1, 2100, 0, 30, on], None)
+        grid = game.players[0].grid
+        for x in range(W):
+            for y in range(11):
+                grid[x][y] = GARBAGE
+        for x in range(4):
+            grid[x][11] = 1
+        grid[4][11], grid[5][11] = 2, 3
+        grid[0][12], grid[1][12], grid[4][12], grid[5][12] = 2, GARBAGE, GARBAGE, GARBAGE
+        cleared, garbage, _, _ = game.find_wave(grid)
+        assert len(cleared) == 4, "13th row: the wave does not clear"
+        assert len(garbage) == (5 if on else 4), f"13th row (rule {on}): {len(garbage)} garbage cleared"
+        assert ((1, 12) in garbage) == bool(on), "13th row: the garbage right above a cleared piece"
+
+
 def main():
+    try:
+        check_top_garbage()
+    except AssertionError as error:
+        print(error)
+        return 1
     path = sys.argv[1]
     game, timing, games, turns = None, None, 0, 0
     with open(path, encoding="ascii") as log:

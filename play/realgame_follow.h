@@ -333,15 +333,19 @@ private:
             const bool currentOwn=s==o.me && p.moves==tracker.side[s].pairs-1 && (p.phase==juraic::Phase::Control || p.phase==juraic::Phase::Next);
 #endif
             p.field = withHidden(p.field, model[s].core.field); // (the 13th and 14th rows as the moves followed put them)
-            if (s != o.me && model[s].running) {
+            const bool running = s != o.me && model[s].running;
+            if (running) {
                 const juraic::Player run = runTo(model[s], at);
                 // (garbage falling: its columns are the screen's - those of a row not filled are a guess in the run)
                 if (run.phase != juraic::Phase::Garbage) p.field = run.field;
                 p.phase = run.phase, p.wait = run.wait, p.chain = run.chain, p.wave = run.wave, p.placed = run.placed;
+                // (the points as they stand in that frame of the run: those of the waves still to come, and an all-clear
+                //  bonus its end gives, are not in them yet - Duel plays those waves on)
+                if (model[s].known) p.scoring = run.scoring;
             }
             p.incoming = {};
             (tracker.still(1 - s) ? p.incoming.confirmed : p.incoming.pending) = notice[s];
-            if (model[s].known) p.scoring = model[s].core.scoring;
+            if (model[s].known && !running) p.scoring = model[s].core.scoring;
 #if JURAIC_REALGAME_MEMORY
             if(s==o.me && memoryCurrent_){
                 // The input engine may already have locked this pair (including an entirely hidden

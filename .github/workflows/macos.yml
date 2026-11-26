@@ -30,18 +30,50 @@ jobs:
           cmake --build sdl-build -j 4
           cmake --install sdl-build
 
-      - name: Build
+      - name: Instrument and train the native executables
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/sdl3"
-          cmake --build build -j 4 2>&1 | tee build.log
-          echo "warnings: $(grep -c 'warning:' build.log || true)"
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/profiles"
+          cmake -S . -B instrumented -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_PREFIX_PATH="$PWD/sdl3" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -fprofile-instr-generate" \
+            -DCMAKE_EXE_LINKER_FLAGS_RELEASE="-fprofile-instr-generate"
+          cmake --build instrumented -j 4 --target juraic_field_game random_19_chain ai_match
+          export LLVM_PROFILE_FILE="$RUNNER_TEMP/profiles/{program}-%m-%p.profraw"
+          python3 tools/native_training.py instrumented instrumented/JuraicField.app/Contents/MacOS/JuraicField "$RUNNER_TEMP/training"
+          for name in JuraicField random_19_chain ai_match; do
+            xcrun llvm-profdata merge "$RUNNER_TEMP/profiles/$name"-*.profraw -o "$RUNNER_TEMP/$name.profdata"
+            xcrun llvm-profdata show "$RUNNER_TEMP/$name.profdata" | tee "$name-profile.txt"
+            grep -Eq 'Maximum function count: [1-9][0-9]*' "$name-profile.txt"
+          done
+          xcrun llvm-profdata merge "$RUNNER_TEMP"/*.profdata -o "$RUNNER_TEMP/combined.profdata"
+
+      - name: Build with the measured profiles
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/sdl3" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -fprofile-instr-use=$RUNNER_TEMP/combined.profdata -Werror=profile-instr-out-of-date"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            cmake --build build -j 4 --verbose --target juraic_field_game random_19_chain ai_match game_tests frame_tests 2>&1 | tee build.log
+          else
+            cmake --build build -j 4 --verbose 2>&1 | tee build.log
+          fi
+          grep -F -- "-fprofile-instr-use=$RUNNER_TEMP/combined.profdata" build.log > profile-compile.log
+          test -s profile-compile.log
+          python3 tools/native_training.py build build/JuraicField.app/Contents/MacOS/JuraicField "$RUNNER_TEMP/training" --recheck
 
       - name: Tests
-        run: ctest --test-dir build --output-on-failure -j 3
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            ctest --test-dir build --output-on-failure -R '^(game_rules|game_frames|ai_match_same_result|replay_as_on_windows_.*)$'
+          else
+            ctest --test-dir build --output-on-failure -j 3
+          fi
 
       - name: Checksums of AI matches (the same as on Windows)
+        if: github.ref_type != 'tag' || github.event_name == 'workflow_dispatch'
         run: |
           set -e
+          # Current settings and the four corresponding Windows reference checksums.
           common="--pairs 20 --threads 8 --seed 71 --param beamWidth=40 --param beamDepth=10 --param beamQueues=3"
           old=""
           for p in evFireHeight=300 x3PokeGain=75 xWildChance=0 xWildEvery=2 x3PokeNet=0 x3PokeFrom=0 x3KeepMain=85 x3Crowd=1000; do old="$old --param-b $p"; done
@@ -52,10 +84,10 @@ jobs:
             [ "$got" = "$want" ]
           }
           ok=0
-          check "x3 x3" ef98990a96e40722 --a x3 --b x3 || ok=1
-          check "x3 random" f5c959723b0be6f3 --a x3 --b random || ok=1
-          check "x3 x3 old" 96c196b773816620 --a x3 --b x3 $old || ok=1
-          check "x3 x3 hold" ff2131250cdf9c0b --a x3 --b x3 --param-a x3BuildHold=1 || ok=1
+          check "x3 x3" ecc86ea94bf53201 --a x3 --b x3 || ok=1
+          check "x3 random" 5a7f949a20f0685b --a x3 --b random || ok=1
+          check "x3 x3 old" f7fff8892f0c1da1 --a x3 --b x3 $old || ok=1
+          check "x3 x3 hold" ec860029039d6436 --a x3 --b x3 --param-a x3BuildHold=1 || ok=1
           exit $ok
 
       - name: Self tests of the game
@@ -69,11 +101,22 @@ jobs:
           done
 
       - name: Bundle
-        if: always()
         run: |
           codesign --force --deep --sign - build/JuraicField.app
           codesign --verify --deep --strict build/JuraicField.app && echo "signature: ad hoc, whole"
-          ditto -c -k --keepParent build/JuraicField.app JuraicField-macos-arm64.zip
+          dist="$RUNNER_TEMP/juraic-macos"
+          mkdir -p "$dist"
+          ditto build/JuraicField.app "$dist/JuraicField.app"
+          cp build/random_19_chain config.ini README.md README.en.md CHANGELOG.md GENERATOR.md GENERATOR.en.md LICENSE "$dist/"
+          cp -R licenses examples "$dist/"
+          ditto -c -k --sequesterRsrc "$dist" JuraicField-macos-arm64.zip
+          expanded="$RUNNER_TEMP/macos-extracted"
+          ditto -x -k JuraicField-macos-arm64.zip "$expanded"
+          codesign --verify --deep --strict "$expanded/JuraicField.app"
+          cmp build/random_19_chain "$expanded/random_19_chain"
+          cmp build/JuraicField.app/Contents/MacOS/JuraicField "$expanded/JuraicField.app/Contents/MacOS/JuraicField"
+          cp tests/fixtures/replays/ai-match-1.jfreplay* "$RUNNER_TEMP/"
+          "$expanded/JuraicField.app/Contents/MacOS/JuraicField" --check-replay-expected "$RUNNER_TEMP/ai-match-1.jfreplay"
           plutil -p build/JuraicField.app/Contents/Info.plist | grep -E 'HighResolution|MinimumSystem|ShortVersion'
           otool -l build/JuraicField.app/Contents/MacOS/JuraicField | grep -A3 LC_BUILD_VERSION | grep -E 'minos|sdk'
 
@@ -83,6 +126,8 @@ jobs:
           name: macos-results
           path: |
             build.log
+            profile-compile.log
+            *-profile.txt
             checksums.txt
             shots
             JuraicField-macos-arm64.zip

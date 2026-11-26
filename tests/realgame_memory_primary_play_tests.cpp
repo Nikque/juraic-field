@@ -123,7 +123,12 @@ static Played playRound(const Setup& u) {
     Round round;
     round.start(Rules{}, u.seed, 2, u.timing);
     PrimaryPlayer14 player(*own, me, u.playerDelay >= 0 ? u.playerDelay : u.delay);
-    player.observer.rules = round.rules, player.observer.timing = u.reckoned ? *u.reckoned : round.timing;
+    // (the rules the AI is told, as the play on the real game tells them - primaryRules14, makePrimaryPlayer14: with
+    //  the cancel where the seat takes the ways over soonest -, through the player and shown the round itself alike;
+    //  the round itself is played as it is)
+    juraic::Rules told = round.rules;
+    told.cancel = u.fastest;
+    player.observer.rules = told, player.observer.timing = u.reckoned ? *u.reckoned : round.timing;
     player.seed = u.seed + uint64_t(me);
     if (u.opening) player.observer.firstTick = engineFirstTick(u.timing);
     std::deque<uint8_t> pad(size_t(u.delay), 0);
@@ -145,7 +150,8 @@ static Played playRound(const Setup& u) {
     for (; out.frames < u.limit && round.state == RoundState::Playing; ++out.frames) {
         uint8_t mine = 0;
         if (u.direct) {
-            const auto shown = ai::observe(round, me);
+            auto shown = ai::observe(round, me);
+            shown.rules.cancel = told.cancel;
             mine = own->frame(shown);
             aim(shown.self());
         } else {
@@ -371,6 +377,282 @@ static bool testMeasuredDelays() {
             right = right && b.measured == delay && b.measuredRun >= 3;
         }
     return right;
+}
+
+// The player of a seat as the play by the memory makes it (makePrimaryPlayer14, the one way PrimaryDrive14 makes it),
+// played on samples: with the ways over soonest the choice reads the own seat its way and the other seat the soonest
+// way too; without them, both seats as they are.
+static bool testExReadsRival() {
+    struct Probe : ai::PlacementAgent {
+        int own = -1, rival = -1;
+        int choose(const ai::Observation& o, Pair, unsigned legal) override {
+            own = o.fastestRead[o.me], rival = o.fastestRead[1 - o.me];
+            int id = 0;
+            while (id < PLACEMENTS - 1 && !(legal >> id & 1)) ++id;
+            return id;
+        }
+    };
+    const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(3), Cell(4)}, {Cell(2), Cell(3)}}};
+    const auto read = [&](bool cancel, int& own, int& rival) {
+        Probe probe;
+        const auto player = makePrimaryPlayer14(probe, 1, 0, cancel);
+        for (int tick = 100; tick < 104 && probe.own < 0; ++tick) {
+            PrimarySample14 sample;
+            sample.generation = 1;
+            sample.seat[0] = seatOf(0, uint32_t(tick), 0, true, pairs), sample.seat[1] = seatOf(1, uint32_t(tick), 0, true, pairs);
+            player->frame(sample, {0, 0});
+        }
+        own = probe.own, rival = probe.rival;
+        return player->observer.rules.cancel == cancel && probe.fastestWays == cancel;
+    };
+    int own = -1, rival = -1;
+    const bool ex = read(true, own, rival) && own == ai::Observation::FASTEST_OWN && rival == ai::Observation::FASTEST_BOUND;
+    const bool straight = read(false, own, rival) && own == 0 && rival == 0;
+    return ex && straight;
+}
+
+// The own seat not read in a run of samples (the other seat read): the buttons stay for up to FILL frames of the other
+// seat's counter (PrimaryPlayer14::FILL, 6), and nothing is pressed after that.
+static bool testUnreadSeatLetsGo() {
+    struct Buttons : ai::Agent {
+        uint8_t held = 0;
+        void startRound(int, uint64_t) override {}
+        uint8_t frame(const ai::Observation&) override { return held; }
+    } agent;
+    PrimaryPlayer14 player(agent, 1, 0);
+    player.observer.timing = primaryTiming14(false);
+    const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(3), Cell(4)}, {Cell(2), Cell(3)}}};
+    const auto feed = [&](int tick, bool own) {
+        PrimarySample14 sample;
+        sample.generation = 1;
+        sample.seat[0] = seatOf(0, uint32_t(tick), 0, true, pairs);
+        if (own) sample.seat[1] = seatOf(1, uint32_t(tick), 0, true, pairs);
+        return player.frame(sample, {0, 0});
+    };
+    agent.held = BTN_LEFT;
+    int tick = 100;
+    bool pressed = true;
+    for (int k = 0; k < 10; ++k) pressed = (feed(tick++, true) & BTN_LEFT) != 0 && pressed;
+    const int last = tick - 1; // (the own seat last read)
+    bool stayed = true, released = true;
+    for (int k = 1; k <= 10; ++k) {
+        const uint8_t b = feed(last + k, false);
+        if (k <= 6) stayed = stayed && (b & BTN_LEFT);
+        else released = released && b == 0;
+    }
+    return pressed && stayed && released;
+}
+
+// ... and with the other seat not read in the last sample the own seat was read in (both seats, then the own seat alone,
+// then the other alone): the buttons stay for up to FILL frames from there all the same, and nothing is pressed after.
+static bool testUnreadSeatLetsGoAfterOwnAlone() {
+    struct Buttons : ai::Agent {
+        uint8_t held = 0;
+        void startRound(int, uint64_t) override {}
+        uint8_t frame(const ai::Observation&) override { return held; }
+    } agent;
+    PrimaryPlayer14 player(agent, 1, 0);
+    player.observer.timing = primaryTiming14(false);
+    const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(3), Cell(4)}, {Cell(2), Cell(3)}}};
+    const auto feed = [&](int tick, bool own, bool other) {
+        PrimarySample14 sample;
+        sample.generation = 1;
+        if (other) sample.seat[0] = seatOf(0, uint32_t(tick), 0, true, pairs);
+        if (own) sample.seat[1] = seatOf(1, uint32_t(tick), 0, true, pairs);
+        return player.frame(sample, {0, 0});
+    };
+    agent.held = BTN_LEFT;
+    int tick = 100;
+    bool pressed = true;
+    for (int k = 0; k < 10; ++k) pressed = (feed(tick++, true, true) & BTN_LEFT) != 0 && pressed;
+    const int last = tick; // (the own seat read alone)
+    pressed = (feed(tick++, true, false) & BTN_LEFT) != 0 && pressed;
+    bool stayed = true, released = true;
+    for (int k = 1; k <= 10; ++k) {
+        const uint8_t b = feed(last + k, false, true);
+        if (k <= 6) stayed = stayed && (b & BTN_LEFT);
+        else released = released && b == 0;
+    }
+    return pressed && stayed && released;
+}
+
+// Buttons held back on their way to the pad (PressResult14::HeldBack): the pad is not taken to have them - the same
+// buttons are sent again with the next sample - and the player reckons the frame they were for went by with the buttons
+// before them.
+static bool testHeldBackSentAgain() {
+    struct Buttons : ai::Agent {
+        uint8_t held = 0;
+        void startRound(int, uint64_t) override {}
+        uint8_t frame(const ai::Observation&) override { return held; }
+    } agent;
+    PrimaryPlayer14 player(agent, 1, 0);
+    player.observer.timing = primaryTiming14(false);
+    const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(3), Cell(4)}, {Cell(2), Cell(3)}}};
+    PadButtons14 pad;
+    std::vector<uint8_t> reached; // the buttons the pad was given
+    const auto feed = [&](int tick, uint8_t asked, PressResult14 result) {
+        PrimarySample14 sample;
+        sample.generation = 1;
+        sample.seat[0] = seatOf(0, uint32_t(tick), 0, true, pairs), sample.seat[1] = seatOf(1, uint32_t(tick), 0, true, pairs);
+        agent.held = asked;
+        const uint8_t out = player.frame(sample, {0, 0});
+        if (!pad.due(out)) return;
+        if (result == PressResult14::Applied) reached.push_back(out);
+        if (!pad.took(out, result)) player.undelivered();
+    };
+    int tick = 100;
+    for (int k = 0; k < 5; ++k) feed(tick++, BTN_LEFT, PressResult14::Applied);
+    feed(tick++, BTN_DOWN, PressResult14::HeldBack);
+    const bool reckoned = player.plannedAt(player.shown().frame) == BTN_LEFT && !pad.known;
+    feed(tick++, BTN_DOWN, PressResult14::Applied);
+    return reckoned && reached.size() == 2 && reached[0] == BTN_LEFT && reached[1] == BTN_DOWN && pad.known && pad.onPad == BTN_DOWN &&
+           player.plannedAt(player.shown().frame) == BTN_DOWN;
+}
+
+// The pad lent to a press asked for by hand (the menus) and given back: the play asks for the same buttons as before the
+// press, and they go to the pad again (PadButtons14::lent, as PrimaryDrive14::resend has it); while the press holds the
+// pad they are held back (pressShared14).
+static bool testLentPadSentAgain() {
+    uint8_t real = 0; // the buttons on the pad
+    bool hand = false;
+    int sends = 0;
+    PadButtons14 pad;
+    const auto sample = [&](uint8_t asked, bool lentBefore) {
+        if (lentBefore) pad.lent();
+        if (pad.due(asked)) pad.took(asked, pressShared14(hand, [&] { return real = asked, ++sends, true; }));
+    };
+    sample(BTN_LEFT, false);
+    const bool first = real == BTN_LEFT && sends == 1;
+    hand = true, real = 0; // (the press: the pad is its own, and its buttons are let go after it)
+    sample(BTN_LEFT, true);
+    const bool heldBack = real == 0 && sends == 1 && !pad.known;
+    hand = false;
+    sample(BTN_LEFT, true);
+    sample(BTN_LEFT, false);
+    return first && heldBack && real == BTN_LEFT && sends == 2 && pad.known && pad.onPad == BTN_LEFT;
+}
+
+// The seats not read after buttons were held: a release is sent, and when it is not sent (or held back) it is sent again
+// the next time the seats are not read, until one reaches the pad (PadButtons14::releaseDue).
+static bool testReleaseSentAgain() {
+    PadButtons14 pad;
+    const bool none = !pad.releaseDue(); // (nothing sent yet)
+    pad.took(BTN_LEFT, PressResult14::Applied);
+    const bool held = pad.releaseDue();
+    pad.took(0, PressResult14::Failed);
+    const bool afterFailed = pad.releaseDue();
+    pad.took(0, PressResult14::HeldBack);
+    const bool afterHeldBack = pad.releaseDue();
+    pad.took(0, PressResult14::Applied);
+    const bool released = !pad.releaseDue();
+    // (buttons not sent may have reached the pad in part: a release is due for them too)
+    pad.took(BTN_DOWN, PressResult14::Failed);
+    const bool afterLost = pad.releaseDue();
+    return none && held && afterFailed && afterHeldBack && released && afterLost;
+}
+
+// The result of the play's buttons on a pad that buttons for the menus also set (pressShared14, the program
+// realgame_primary_play and the screen of the mode): held back while those are held - nothing sent -, otherwise as the
+// pad took them.
+static bool testPressShared() {
+    int sends = 0;
+    const auto took = [&](bool ok) { return [&sends, ok] { return ++sends, ok; }; };
+    const bool heldBack = pressShared14(true, took(true)) == PressResult14::HeldBack && sends == 0;
+    const bool applied = pressShared14(false, took(true)) == PressResult14::Applied && sends == 1;
+    const bool failed = pressShared14(false, took(false)) == PressResult14::Failed && sends == 2;
+    return heldBack && applied && failed;
+}
+
+// A reader bound to the seats that reads nothing of them: the seat is read only while a sample of it is fresh
+// (primarySeatFresh14), so that the driver of the pictures takes over as for a reader not bound.
+static bool testSeatFresh() {
+    const uint64_t at = 50000000;
+    return !primarySeatFresh14(0, at) && primarySeatFresh14(at, at) && primarySeatFresh14(at - PRIMARY_SEAT_FRESH_US14, at) &&
+           !primarySeatFresh14(at - PRIMARY_SEAT_FRESH_US14 - 1, at) && !primarySeatFresh14(at - 8000000, at) && primarySeatFresh14(at + 10, at);
+}
+
+// A frame no sample came for, played on as the engine has it (PrimaryPlayer14::between): the other seat a frame further
+// on as well - its wait for its pair a frame shorter.
+static bool testFilledFrameAgesOther() {
+    struct Seen : ai::Agent {
+        std::vector<std::pair<int64_t, int>> waits; // the frame shown, and the other seat's wait while it waits for its pair
+        void startRound(int, uint64_t) override {}
+        uint8_t frame(const ai::Observation& o) override {
+            waits.push_back({o.frame, o.opponent().phase == Phase::Next ? o.opponent().wait : -1});
+            return 0;
+        }
+    } agent;
+    PrimaryPlayer14 player(agent, 1, 0);
+    player.observer.timing = primaryTiming14(false);
+    const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(3), Cell(4)}, {Cell(2), Cell(3)}}}, none{};
+    const auto feed = [&](int tick) {
+        PrimarySample14 sample;
+        sample.generation = 1;
+        sample.seat[0] = seatOf(0, uint32_t(tick), 1, false, none); // (the other seat between two pairs, not busy)
+        sample.seat[1] = seatOf(1, uint32_t(tick), 0, true, pairs);
+        player.frame(sample, {0, 0});
+    };
+    for (int tick = 100; tick <= 110; ++tick) feed(tick);
+    feed(112); // (no sample of 111)
+    const size_t n = agent.waits.size();
+    if (n < 3) return false;
+    const auto &before = agent.waits[n - 3], &filled = agent.waits[n - 2], &after = agent.waits[n - 1];
+    return player.filled == 1 && filled.first == before.first + 1 && after.first == filled.first + 1 && before.second > 2 &&
+        filled.second == before.second - 1 && after.second == before.second;
+}
+
+static bool testPrimaryGenerationChange(int me) {
+    struct Probe : ai::Agent {
+        int begun = 0, calls = 0;
+        void startRound(int, uint64_t) override { ++begun; }
+        uint8_t frame(const ai::Observation&) override { ++calls; return BTN_DOWN; }
+    } agent;
+    PrimaryPlayer14 player(agent, me, 0);
+    const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(2), Cell(3)}, {Cell(3), Cell(4)}}};
+    PrimarySample14 sample;
+    sample.generation = 1;
+    sample.seat = {seatOf(0, 500, 3, true, pairs), seatOf(1, 500, 3, true, pairs)};
+    if (player.frame(sample, {}) != BTN_DOWN || agent.begun != 1) return false;
+    const int calls = agent.calls;
+    if (player.frame(sample, {}) != BTN_DOWN || agent.calls != calls) return false;
+
+    ++sample.generation;
+    const auto seats = sample.seat;
+    sample.seat[size_t(me)].reset();
+    if (player.frame(sample, {}) != 0 || agent.calls != calls) return false;
+    sample.seat = seats;
+    sample.seat[size_t(1 - me)].reset();
+    if (player.frame(sample, {}) != 0 || agent.calls != calls) return false;
+    sample.seat = seats;
+    if (player.frame(sample, {}) != BTN_DOWN || agent.begun != 2) return false;
+
+    ++sample.generation;
+    return player.frame(sample, {}) == BTN_DOWN && agent.begun == 3;
+}
+
+static bool testPrimaryDelayChange(int me) {
+    struct Probe : ai::Agent {
+        int begun = 0;
+        void startRound(int, uint64_t) override { ++begun; }
+        uint8_t frame(const ai::Observation&) override { return 0; }
+    } agent;
+    PrimaryPlayer14 player(agent, me, 0);
+    const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(2), Cell(3)}, {Cell(3), Cell(4)}}};
+    auto other = pairs;
+    PrimarySample14 sample;
+    sample.generation = 1;
+    sample.seat = {seatOf(0, 500, 3, true, pairs), seatOf(1, 500, 3, true, other)};
+    player.frame(sample, {});
+    const auto round = player.observer.round();
+    const auto seed = player.seed;
+    const auto frames = player.frames;
+    player.setDelay(2);
+    sample.seat = {seatOf(0, 501, me == 0 ? 3 : 7, me != 0, pairs),
+                   seatOf(1, 501, me == 1 ? 3 : 7, me != 1, other)};
+    player.frame(sample, {});
+    return agent.begun == 1 && player.rounds == 1 && player.observer.round() == round &&
+        player.seed == seed && player.frames == frames + 1 && player.delay() == 2 &&
+        player.foreseen().frame == player.shown().frame + 2;
 }
 
 int main(int argc, char** argv) {
@@ -1034,9 +1316,12 @@ int main(int argc, char** argv) {
         long long faster = 0;
         for (uint64_t seed = 91; seed <= 94; ++seed) {
             Setup u;
-            u.seed = seed, u.timing = primaryTiming14(true), u.fastest = true, u.limit = 2500;
+            // (the window shows the first pairs before the round, as on the real game: through the player the way of the
+            //  first pair is searched ahead too - known only as it appears, it is searched in that frame, shorter, and
+            //  its pair can come a few frames later than shown the round itself)
+            u.seed = seed, u.timing = primaryTiming14(true), u.fastest = true, u.limit = 2500, u.opening = true;
             Setup d = u;
-            d.direct = true;
+            d.direct = true, d.opening = false;
             const Played a = playRound(u), b = playRound(d);
             if (seed == 91) print("the real game's cancels", u, a);
             same = same && sameRound(a, b);
@@ -1093,6 +1378,96 @@ int main(int argc, char** argv) {
         check(ok && o.mine().count() == 9 && o.mine().pair(5).axis == Cell(2) && o.mine().pair(6).axis == Cell(4) && o.mine().pair(8).child == Cell(2),
               "... and all of them once the own window has come to those the other seat's showed");
     }
+    // ... and with the own seat pairs ahead: the other seat is shown the pairs of its own window, none in the place of
+    // those between the two windows.
+    {
+        const auto P = [](int a, int b) { return Pair{Cell(a), Cell(b)}; };
+        const std::array<Pair, 3> mine{P(2, 2), P(2, 3), P(3, 1)}, theirs{P(4, 4), P(5, 5), P(1, 2)};
+        const std::array<int, 2> notice{0, 0};
+        PrimaryObserver14 seen(Rules{}, primaryTiming14(false));
+        ai::Observation o;
+        PrimarySample14 s;
+        s.generation = 1, s.serial = 400;
+        s.seat[0] = seatOf(0, 400, 6, true, mine), s.seat[1] = seatOf(1, 400, 1, true, theirs);
+        const bool ok = seen.observe(s, 0, notice, o);
+        check(ok && o.mine().count() == 9 && o.mine().pair(6).axis == Cell(2) && o.mine().pair(8).axis == Cell(3) && o.player[1].nextPair == 1,
+              "joined with the own seat five pairs ahead: the pairs of the own window");
+        check(ok && o.pairsOf(1).count() == 4 && o.pairsOf(1).pair(3).axis == Cell(1) && !o.pairsOf(1).known(4),
+              "... and the other seat's, none beyond them in the place of those not seen");
+    }
+    // A pair put so that one of its pieces falls apart from it: its next pair comes the frames of that fall later, the
+    // landing after it counted from the pair's first frame lying (records of the real game: the fall's frames
+    // (Timing::split) and 27 from the last frame in the hands to the first of the next pair, 109 pairs of 112).
+    {
+        const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(3), Cell(4)}, {Cell(2), Cell(3)}}};
+        const std::array<int, 2> notice{0, 0};
+        const Timing timing = primaryTiming14(false);
+        bool right = true;
+        for (int fall = 1; fall <= 3; ++fall) {
+            PrimaryObserver14 seen(Rules{}, timing);
+            ai::Observation o;
+            GameField before, after;
+            for (int y = 0; y < fall; ++y) before.f.set(2, y, GARBAGE), after.f.set(2, y, GARBAGE);
+            after.f.set(2, fall, Cell(1)), after.f.set(3, 0, Cell(2));
+            PrimarySample14 s;
+            s.generation = 1, s.serial = 300;
+            s.seat[0] = seatOf(0, 300, 5, true, pairs), s.seat[1] = seatOf(1, 300, 5, true, pairs);
+            s.seat[0]->field = before, s.seat[0]->pose.x = 2, s.seat[0]->pose.y = fall, s.seat[0]->pose.dir = RIGHT, s.seat[0]->pose.upper = false;
+            bool ok = seen.observe(s, 1, notice, o);
+            s.serial = 301;
+            s.seat[0] = seatOf(0, 301, 6, false, pairs), s.seat[1] = seatOf(1, 301, 5, true, pairs);
+            s.seat[0]->field = after;
+            ok = seen.observe(s, 1, notice, o) && ok;
+            right = right && ok && o.player[0].phase == Phase::Land && o.player[0].wait == timing.split[fall] + timing.landFrames - 1;
+        }
+        check(right, "a pair whose piece falls apart: its next pair is reckoned to come without the frames of that fall");
+    }
+    // ... and one whose falling piece fires a chain: the chain's first wave begins after that fall and the landing, its
+    // end as many frames later (the board read has the end of the chain, the placement told by the chain that ends in it)
+    {
+        const std::array<Pair, 3> pairs{{{Cell(1), Cell(2)}, {Cell(3), Cell(4)}, {Cell(2), Cell(3)}}};
+        const std::array<int, 2> notice{0, 0};
+        const Timing timing = primaryTiming14(false);
+        bool right = true;
+        for (int fall = 1; fall <= 2; ++fall) {
+            PrimaryObserver14 seen(Rules{}, timing);
+            ai::Observation o;
+            GameField before;
+            for (int y = 0; y < 3 + fall; ++y) before.f.set(2, y, GARBAGE);
+            for (int y = 0; y < 3; ++y) before.f.set(3, y, Cell(2));
+            PlayerCore core;
+            core.field = before;
+            place(core.field, Placement{2, RIGHT}, pairs[0]);
+            Incoming nobody;
+            TurnResult chain;
+            resolveChain(core, nobody, Rules{}, timing, 0, chain);
+            PrimarySample14 s;
+            s.generation = 1, s.serial = 300;
+            s.seat[0] = seatOf(0, 300, 5, true, pairs), s.seat[1] = seatOf(1, 300, 5, true, pairs);
+            s.seat[0]->field = before, s.seat[0]->pose.x = 2, s.seat[0]->pose.y = 3 + fall, s.seat[0]->pose.dir = RIGHT, s.seat[0]->pose.upper = false;
+            bool ok = seen.observe(s, 1, notice, o);
+            s.serial = 301;
+            s.seat[0] = seatOf(0, 301, 6, false, pairs), s.seat[1] = seatOf(1, 301, 5, true, pairs);
+            s.seat[0]->field = core.field;
+            ok = seen.observe(s, 1, notice, o) && ok;
+            right = right && ok && chain.chains == 1 && o.player[0].phase == Phase::Land && o.player[0].chain.chains == 1 &&
+                    o.player[0].wait == 1 + timing.split[fall] + timing.landFrames - 1 + chain.frames;
+        }
+        check(right, "a pair whose piece falls apart and fires a chain: its first wave is reckoned to begin without the frames of that fall");
+    }
+    check(testExReadsRival(), "the ways over soonest on the real game: the other seat is not read the soonest way too");
+    check(testUnreadSeatLetsGo(), "the own seat not read for long: the buttons stay held");
+    check(testUnreadSeatLetsGoAfterOwnAlone(), "the own seat not read after a sample of it alone: the buttons stay held");
+    check(testHeldBackSentAgain(), "buttons held back on their way to the pad: taken as sent, or the frame reckoned with them");
+    for (int me : {0, 1}) {
+        check(testPrimaryGenerationChange(me), "a new binding drops the old seat's buttons and waits for a new observation");
+        check(testPrimaryDelayChange(me), "changing the input delay keeps the round and its preview history");
+    }
+    check(testLentPadSentAgain(), "the pad lent to a press by hand and given back: the same buttons as before are not sent again");
+    check(testReleaseSentAgain(), "a release not sent while the seats are not read: not sent again");
+    check(testPressShared(), "the play's buttons with buttons for the menus held: not told as held back, or not as the pad took them");
+    check(testSeatFresh(), "a reader bound that reads nothing of the seat: the seat taken as read");
+    check(testFilledFrameAgesOther(), "a frame no sample came for: the other seat is not shown a frame further on");
     // The colours in play are those the round shows: four of the game's five, another four in the next round. The AI
     // is told them (Rules::palette, its first four) - its searches make up pairs of those and try them on a field.
     {

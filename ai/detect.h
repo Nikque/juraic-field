@@ -154,7 +154,7 @@ inline int detectPlain(const GameField& g, const Rules& rules, const Timing& tim
 // wave, and the only thing in it.
 inline int detect(const GameField& g, const Rules& rules, const Timing& timing, int maxAdd, Trials& out, BitField* after = nullptr, bool timed = true,
                   FirstWaves* first = nullptr) {
-    if (!quickTrials || rules.clearCount != 4 || maxAdd >= 4) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
+    if (!quickTrials || rules.clearCount != 4 || maxAdd >= 4 || maxAdd < 1) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
     const Links k = g.f.links();
     const BitField::Seeds seed = BitField::seeds(k);
     const FieldBits occ = g.f.occupied(), floor = FieldBits::fill(1);
@@ -251,7 +251,7 @@ struct KeyPlan {
 // column it lies on top of the trigger. heights = of `field`.
 // False when it cannot be done (no room, a key piece that clears something).
 inline bool runWithKey(const BitField& field, const int heights[W], const Rules& rules, const Timing& timing, const KeyPlan& k, Trial& t,
-                       BitField& after, bool timed = true) {
+                       BitField& after, bool timed = true, int* trialsLeft = nullptr) {
     BitField f = field;
     int h[W];
     for (int i = 0; i < W; ++i) h[i] = heights[i];
@@ -270,6 +270,7 @@ inline bool runWithKey(const BitField& field, const int heights[W], const Rules&
         f.set(x, h[x]++, k.keyColor);
     }
     t = Trial{k.t.x, k.t.color, k.t.added, k.t.y};
+    if (trialsLeft) --*trialsLeft;
     runTrialChain(f, rules, timing, t, timed);
     after = f;
     return t.chains > 0;
@@ -348,7 +349,8 @@ inline int stallKeysQuiet(const BitField& stall, int8_t keyX[], Cell keyColor[],
 // to rest on top of its column of the field after that wave, and the chain is run from there.
 // (Only without the frames: the fall of the key piece may be the longest of that wave.)
 inline void addKey(const BitField& field, const int heights[W], const Rules& rules, const Timing& timing, const KeyPlan& cur, const BitField& stall,
-                   int& runs, KeyPlan& best, const Trials* known = nullptr, bool timed = true, const FirstWaves* first = nullptr, int index = -1) {
+                   int& runs, KeyPlan& best, const Trials* known = nullptr, bool timed = true, const FirstWaves* first = nullptr,
+                   int index = -1, bool countTrialsOnly = false) {
     const bool quick = known && known->quiet && rules.clearCount == 4 && quickTrials;
     int8_t keyX[3 * W];
     Cell keyColor[3 * W];
@@ -357,7 +359,7 @@ inline void addKey(const BitField& field, const int heights[W], const Rules& rul
     for (int i = 0; i < n && runs > 0; ++i) {
         KeyPlan next = cur;
         next.key = true, next.keyX = keyX[i], next.keyColor = keyColor[i];
-        --runs;
+        if (!countTrialsOnly) --runs;
         Trial t;
         BitField after;
         if (quick && heights[x] + cur.t.added <= 12) {
@@ -367,6 +369,7 @@ inline void addKey(const BitField& field, const int heights[W], const Rules& rul
             const int kx = keyX[i];
             const Cell color = keyColor[i];
             if (kx != x ? heights[kx] >= 12 || (known->alone[kx] >> color & 1) : heights[x] + cur.t.added >= 12 || color == cur.t.color) continue;
+            if (countTrialsOnly) --runs;
             t = Trial{cur.t.x, cur.t.color, cur.t.added, cur.t.y};
             if (first && !timed && kx != x && color != cur.t.color) {
                 after = first->field[index];
@@ -383,7 +386,7 @@ inline void addKey(const BitField& field, const int heights[W], const Rules& rul
                 after = f;
             }
             if (t.chains <= 0) continue;
-        } else if (!runWithKey(field, heights, rules, timing, next, t, after, timed)) {
+        } else if (!runWithKey(field, heights, rules, timing, next, t, after, timed, countTrialsOnly ? &runs : nullptr)) {
             continue;
         }
         if (t.chains <= cur.t.chains) continue;

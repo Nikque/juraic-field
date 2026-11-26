@@ -60,28 +60,31 @@ public:
     // Holds the buttons of the game (game/control.h Button bits: the directions on the cross, a turn to the right on A and
     // one to the left on B; when the real game turns the other way round the driver sends the other turn:
     // realgame::Driver::turnsSwapped).
-    void press(uint8_t buttons) {
+    bool press(uint8_t buttons) {
         unsigned b = 0;
         if (buttons & juraic::BTN_LEFT) b |= XUSB_GAMEPAD_DPAD_LEFT;
         if (buttons & juraic::BTN_RIGHT) b |= XUSB_GAMEPAD_DPAD_RIGHT;
         if (buttons & juraic::BTN_DOWN) b |= XUSB_GAMEPAD_DPAD_DOWN;
         if (buttons & juraic::BTN_CW) b |= XUSB_GAMEPAD_A;
         if (buttons & juraic::BTN_CCW) b |= XUSB_GAMEPAD_B;
-        hold(USHORT(b));
+        return hold(USHORT(b));
     }
     // Holds buttons of the pad as they are (XUSB_GAMEPAD_*): for pressing through the menus of the real game by hand.
-    void hold(USHORT buttons) {
+    // false: the pad is not plugged in, or the report was not sent.
+    bool hold(USHORT buttons) {
         // (the thread that plays by the pictures and the one that plays by the memory may both set the pad)
         const std::lock_guard<std::mutex> one(setting);
         const auto diagnosticBegin=juraic::inputdiag::clock();const auto previous=heldButtons();
         if (!added || buttons == last) {
-            juraic::inputdiag::trace.emit(juraic::inputdiag::PAD,{buttons,previous,heldButtons(),added?0:3,0,diagnosticBegin,juraic::inputdiag::clock()});return;}
+            juraic::inputdiag::trace.emit(juraic::inputdiag::PAD,{buttons,previous,heldButtons(),added?0:3,0,diagnosticBegin,juraic::inputdiag::clock()});return added;}
         XUSB_REPORT report{};
         report.wButtons = buttons;
         const auto diagnosticResult=vigem_target_x360_update(client,pad,report);
-        if (VIGEM_SUCCESS(diagnosticResult)) last = buttons;
+        // (a report not sent leaves what the pad holds unknown: the next one asked for is sent, whatever it is)
+        last = VIGEM_SUCCESS(diagnosticResult) ? buttons : USHORT(0xFFFF);
         juraic::inputdiag::trace.emit(juraic::inputdiag::PAD,{buttons,previous,heldButtons(),VIGEM_SUCCESS(diagnosticResult)?1:2,
             int64_t(diagnosticResult),diagnosticBegin,juraic::inputdiag::clock()});
+        return VIGEM_SUCCESS(diagnosticResult);
     }
 
 private:

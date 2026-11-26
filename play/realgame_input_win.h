@@ -56,7 +56,9 @@ public:
     // Holds the buttons of the game (game/control.h Button bits), as VirtualPad::press: by keys, the turn the pad sends
     // on its B is the real game's key for a turn to the right, the one on its A the key for a turn to the left (so the
     // real game has the two buttons of the pad).
-    void press(uint8_t buttons) {
+    // false: the virtual pad did not take them; by keys, they were not sent (the real game's window not in front) or the
+    // system did not take them all.
+    bool press(uint8_t buttons) {
         if (!byKeys()) return pad.press(buttons);
         const GameKeys& k = keys.keys;
         std::vector<int> held;
@@ -67,12 +69,15 @@ public:
         // (BTN_CW on the pad's A, BTN_CCW on its B, as VirtualPad::press)
         if (buttons & juraic::BTN_CW) held.push_back(k.turnLeft), b |= XUSB_GAMEPAD_A;
         if (buttons & juraic::BTN_CCW) held.push_back(k.turnRight), b |= XUSB_GAMEPAD_B;
-        keys.hold(held);
-        last_ = USHORT(b);
+        // (keys not sent - the real game's window not in front - or not all taken by the system: the buttons held are
+        //  those of the keys that are down, and the next buttons asked for are sent again)
+        const bool took = keys.hold(held);
+        last_ = took ? USHORT(b) : heldOf(false);
+        return took;
     }
     // Holds buttons of the pad as they are (XUSB_GAMEPAD_*), for the menus of the real game: by keys, A is the key
     // that says yes in the menus, B the one that goes back, Start the key of the pause.
-    void hold(USHORT buttons) {
+    bool hold(USHORT buttons) {
         if (!byKeys()) return pad.hold(buttons);
         const GameKeys& k = keys.keys;
         std::vector<int> held;
@@ -82,11 +87,26 @@ public:
         if (buttons & XUSB_GAMEPAD_A) held.push_back(GameKeys::MENU_OK);
         if (buttons & XUSB_GAMEPAD_B) held.push_back(GameKeys::MENU_BACK);
         if (buttons & XUSB_GAMEPAD_START) held.push_back(k.pause);
-        keys.hold(held);
-        last_ = buttons;
+        const bool took = keys.hold(held);
+        last_ = took ? buttons : heldOf(true);
+        return took;
     }
 
 private:
+    // The buttons of the pad whose keys are down now: those of the play, or those of the menus.
+    USHORT heldOf(bool menus) const {
+        const GameKeys& k = keys.keys;
+        const std::array<bool, 256> down = keys.held();
+        const auto is = [&down](int key) { return key > 0 && key < 256 && down[size_t(key)]; };
+        unsigned b = 0;
+        if (is(k.left)) b |= XUSB_GAMEPAD_DPAD_LEFT;
+        if (is(k.right)) b |= XUSB_GAMEPAD_DPAD_RIGHT;
+        if (is(k.down)) b |= XUSB_GAMEPAD_DPAD_DOWN;
+        if (is(menus ? GameKeys::MENU_OK : k.turnLeft)) b |= XUSB_GAMEPAD_A;
+        if (is(menus ? GameKeys::MENU_BACK : k.turnRight)) b |= XUSB_GAMEPAD_B;
+        if (menus && is(k.pause)) b |= XUSB_GAMEPAD_START;
+        return USHORT(b);
+    }
     int way_ = WAY_KEYS;
     HWND window_ = nullptr;
     std::wstring program_;

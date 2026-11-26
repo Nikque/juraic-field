@@ -40,6 +40,17 @@
 #include "partial_build.h"
 #include "answer_commitment.h"
 #include "side_response.h"
+#include "lv38_response.h"
+#include "lv38_lifeline.h"
+#include "lv38_threat.h"
+#include "lv38_foundation.h"
+#include "lv38_ready_cover.h"
+#include "lv38_two_wave.h"
+#include "lv38_tail_build.h"
+#include "lv38_tail_answer.h"
+#include "lv38_cut_build.h"
+#include "lv38_answer_build.h"
+#include "lv38_fire_or_lose.h"
 
 namespace juraic::ai {
 
@@ -48,6 +59,7 @@ namespace juraic::ai {
 class X3Agent : public X3Pace {
 public:
     explicit X3Agent(const Params& params = Params{}) : X3Pace(params) {}
+    bool namedLv38Ex = false;
     // (a thread of X3Pace may be inside decide(): it must have ended before the members below go)
     ~X3Agent() override {
         finish();
@@ -58,6 +70,13 @@ public:
         X3Pace::startRound(seat, seed);
         held.depth = 0;
         sideReady = {};
+        twoWaveTurn = -1;
+        twoWaveCarry = {};
+        twoWaveNext = {};
+        twoWaveNote = {};
+        twoWaveFrame = -1;
+        twoWaveRetained = false;
+        knownPokeCalls = 0;
     }
     uint8_t frame(const Observation& o) override {
         watchRival(o);
@@ -88,6 +107,51 @@ public:
         int64_t his = 0, hisFrames = 0, mineThen = 0, chance = 0;
         int ownMoves = 0, hisCells = 0, ownCells = 0;
     } exchangeNote;
+    lv38_tail_build::Note lv38BuildNote;
+    lv38_tail_answer::Note lv38TailAnswerNote;
+    lv38_answer_build::Note lv38AnswerBuildNote;
+    int lv38ResponseNewlyEligible = 0;
+    lv38_two_wave::Note twoWaveNote;
+    int64_t twoWaveFrame = -1;
+    bool twoWaveRetained = false;
+    // Optional recorder for the untimed, one-round measurement tool.
+    std::vector<lv38_fire_or_lose::Decision>* fireOrLoseLog = nullptr;
+    struct TakeSmallNote {
+        int64_t frame;
+        int move, phase, ordinary, selected, incoming, colours, turns, expected;
+    };
+    std::vector<TakeSmallNote>* takeSmallLog = nullptr;
+    struct CutRankRecord {
+        int64_t frame;
+        int move;
+        int ordinary, selected, depth, queues;
+        bool preserved;
+    };
+    struct CutAnswerRecord {
+        int64_t frame;
+        int move;
+        lv38_tail_answer::Note note;
+    };
+    struct CutDecisionRecord {
+        int64_t frame, nanoseconds;
+        int move;
+        int colours;
+        bool quiet;
+        GameField field;
+    };
+    std::vector<CutRankRecord>* cutRanks = nullptr;
+    std::vector<CutAnswerRecord>* cutAnswers = nullptr;
+    std::vector<CutDecisionRecord>* cutDecisions = nullptr;
+    struct PartNote {
+        int64_t frame;
+        int move, phase, incoming, arriving, colours;
+        const char* part;
+        int before, after, kind, waves;
+    };
+    std::vector<PartNote>* partLog = nullptr;
+    std::vector<PartNote>* lv37PartLog = nullptr;
+    std::vector<PartNote>* legacyPokeLog = nullptr;
+    int knownPokeCalls = 0;
     // Choices in which the exchange poke was looked for (asked) and why candidates were left: no candidate; the chain
     // does not land as it stands (or the reading ends before it is confirmed); a plan of his on the screen offsets it
     // small or sends garbage back; the chance of a small answer from his field; his main chain is not outdone (or the
@@ -98,6 +162,71 @@ public:
     } exchangeCounts;
 
 protected:
+    struct TailInput {
+        int hold = 1;
+        int held[2]{};
+        bool spare = false, waitQuick = false, downAtTarget = false, uncertain = false;
+
+        bool supported() const {
+            return !uncertain && ((hold == 1 && !spare) || (hold > 1 && spare));
+        }
+
+        bool canCompare() const { return !uncertain && (hold == 1 || (hold > 1 && spare)); }
+
+        void configure(std::optional<PictureRoutes>& routes) const {
+            if (hold > 1 && spare) routes.emplace(hold, held, spare, waitQuick, downAtTarget);
+        }
+
+        template<class Stop>
+        unsigned reachable(const Observation& o, unsigned choices, Stop stop) const {
+            if (!supported()) return 0;
+            if (!spare) return choices;
+            InputPlanner planner;
+            planner.tapHold = hold;
+            planner.heldFor[0] = held[0], planner.heldFor[1] = held[1];
+            planner.spareFrame = spare, planner.waitQuickLock = waitQuick, planner.downWhenPlaced = downAtTarget;
+            const PairControl* air = ownPairInAir(o);
+            const PairControl from = air ? *air : spawnPair(o.timing);
+            unsigned reached = 0;
+            for (unsigned ids = choices; ids; ids &= ids - 1) {
+                if (stop()) return 0;
+                const int id = std::countr_zero(ids);
+                const Placement target = placement(id);
+                InputPath path;
+                if (planner.planSure(o.self().field, from, target, o.timing, o.rules.speedPercent, path) &&
+                    !planner.lostBySkip(o.self().field, from, target, o.timing, o.rules.speedPercent, path))
+                    reached |= 1u << id;
+            }
+            return reached;
+        }
+    } tailInput;
+
+    void choiceBegins() override {
+        X3Pace::choiceBegins();
+        // Capture the driver's input state before the search starts on its own thread.
+        tailInput = {tapHold, {tapsHeldFor[0], tapsHeldFor[1]}, spareFrame, waitQuickLock, downWhenPlaced,
+                     keepLow || unsure13 || unsure14};
+    }
+
+    int choose(const Observation& o, Pair pair, unsigned legal) override {
+        if (!cutDecisions) return X3Pace::choose(o, pair, legal);
+        const auto started = Builder::Clock::now();
+        const int selected = X3Pace::choose(o, pair, legal);
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Builder::Clock::now() - started).count();
+        const bool quiet = lv38_cut_build::quiet(o, p);
+        int colours = o.self().field.f.normal().count();
+        for (Cell cell : o.self().field.row14) colours += cell >= 1 && cell <= MAX_COLORS;
+        cutDecisions->push_back({o.frame, ns, o.self().moves + 1, colours, quiet, o.self().field});
+        return selected;
+    }
+
+    struct TwoWaveCarry {
+        int moves = -1;
+        GameField field;
+        std::array<Pair, 2> pairs{};
+        Plan suffix;
+    } twoWaveCarry, twoWaveNext;
+    int twoWaveTurn = -1;
     Gaze gaze;
     PlanSet mine, theirs;
     side_response::Ready sideReady;
@@ -105,13 +234,14 @@ protected:
     // The beam search for the own field. depth 0 = the usual depth.
     // percent: of the time of the choice, when it is to end (Params::thinkBudget).
     // joined: fields are valued by the chains that stand, without key pieces (x3ExtendJoined).
-    BuildResult searchBuild(const Observation& o, int depth, int percent = 100, bool joined = false) {
+    BuildResult searchBuild(const Observation& o, int depth, int percent = 100, bool joined = false, bool cutBuild = false) {
         Params q = p;
         if (joined) q.evKeyed = 0;
         if (depth > 0 && depth < q.beamDepth) q.beamDepth = depth;
         // Keep the third column low, unless it is already higher (then no placement would be left).
         q.beamThirdMax = thirdLimit(o.self().field);
-        return search(builder, o.self().field, mine.pair, mine.knownCount, o, q, roundSeed * 1000 + uint64_t(o.self().moves), percent, p.thinkFit >= 1);
+        return search(builder, o.self().field, mine.pair, mine.knownCount, o, q, roundSeed * 1000 + uint64_t(o.self().moves),
+                      percent, p.thinkFit >= 1, cutBuild);
     }
     // The beam search of the own field `field` as the pair in hand leaves it: the pairs after it on the screen (at least
     // one), then the queues; `depth` placements deep, to end at three quarters of the time of the choice. (What can be
@@ -120,6 +250,7 @@ protected:
     BuildResult searchOn(const Observation& o, const GameField& field, int depth, uint64_t seed, int placed = 1) {
         Params q = p;
         q.beamDepth = depth;
+        q.beamThirdMax = thirdLimit(field); // (as searchBuild: the third column kept low, of the field searched on)
         return search(builder, field, mine.pair + placed, mine.knownCount - placed, o, q, seed, 75, p.thinkFit >= 1);
     }
     // The largest mean over the queues of the chains a search found below a first placement that lives: within `depth`
@@ -136,6 +267,25 @@ protected:
     int movesUpTo(int64_t frames, int cells, int extra, int most) const {
         const int moves = p.movesIn(frames, cells, extra);
         return moves < 1 ? 1 : moves < most ? moves : most;
+    }
+    // The placements a player has until a chain of the other side is confirmed `frames` frames from now: the moves
+    // that fit before it (Params::movesIn) and the pair then in hand, which fires; `most` at most.
+    int placementsUpTo(int64_t frames, int cells, int most) const {
+        const int moves = frames > 0 ? p.movesIn(frames, cells, 0) : 0;
+        return moves + 1 < most ? moves + 1 : most;
+    }
+    // The last frame a pair of the other side may appear in and still be held when the chain of `plan` is confirmed:
+    // nextFrames after that confirmation at the latest, since the landing before the pair is then over before the
+    // chain is and takes nothing of it. (A plan without the frame of its confirmation: the frame its next pair
+    // appears in - the same frame when nothing falls on the own field after the chain.)
+    int64_t heldUntil(const Observation& o, const Plan& plan) const {
+        return plan.confirmFrame > 0 ? plan.confirmFrame + o.timing.nextFrames : plan.endFrame - 1;
+    }
+    // The placements the opponent has until an own chain confirmed in frame `confirm` reaches him, counted as outlasts
+    // counts them (placementsUpTo, to nextFrames after the confirmation): `before` is the Duel of the observation played
+    // to the frame he next holds a pair (the observation itself when he holds one), `cells` the cells of his field then.
+    int repliesUntil(const Observation& o, const Duel& before, int64_t confirm, int cells) const {
+        return placementsUpTo(confirm + o.timing.nextFrames - before.frame, cells, INT32_MAX);
     }
     // His replies in the reading of a move: standing still (0, null), then each of his plans.
     int replies() const { return int(theirs.plans.size()) + 1; }
@@ -243,25 +393,61 @@ protected:
         unsigned checkedFire = 0, counteredFire = 0; // exact response to an immediate fire, once per first placement
         bool noPair = false; // he holds no pair again in this round
         int64_t from = 0;    // the frame from which he places
+        int64_t previousDrop = INT64_MAX; // earlier garbage already taken before that pair
         int need = 0;        // garbage pieces that close his field as it is then
         int deepest = 0;     // the most placements that are searched for him
         GameField field;     // his field then
         int cells = 0;       // the cells on it (a move takes him the frames of a field that full: Params::movesIn)
+        int pool = 0;        // the points he carries then, not yet turned into garbage
         BuildResult built;   // the search from it, `depth` placements deep
         int depth = 0;
+        bool unanswered = false; // the last outlasts: he holds no pair in time to answer the chain (no answer searched)
     };
     bool exchangeOutOfTime(int percent = 100) const {
         return p.thinkBudget > 0 && (stale.load() ||
             (budgetNow > 0 && Builder::Clock::now() >= began + std::chrono::microseconds(int64_t(budgetNow) * 10 * percent)));
     }
 
+    // MidgameBeam::extend made every layer of theirs.tactical in this decision (false: the clock cut it, the deeper
+    // replies are missing).
+    bool rivalBeamWhole = true;
+
+    // What the replies of theirs.tactical from `from` on show against the immediate fire `fire`: Found, one of them
+    // offsets it (offsetsImmediate); None, every one was read and none does; Unfinished, `stop` came before all were read.
+    enum class Refutation : uint8_t { None, Found, Unfinished };
+    // A reading of `r` over replies the midgame beam made in part (`beamWhole` false) is no complete reading.
+    static Refutation withBeam(Refutation r, bool beamWhole) {
+        return r == Refutation::None && !beamWhole ? Refutation::Unfinished : r;
+    }
+    template<class Stop>
+    Refutation refutation(const Observation& o, const Plan& fire, size_t from, uint64_t seed, Stop stop) const {
+        for (size_t i = from; i < theirs.tactical.size(); ++i) {
+            if (stop()) return Refutation::Unfinished;
+            const Plan& reply = theirs.tactical[i];
+            if (reply.chains <= 4 || reply.sent < fire.sent || !offsetsImmediate(o, fire, reply, seed)) continue;
+            return Refutation::Found;
+        }
+        return Refutation::None;
+    }
+    // A winning candidate stands after reading `r`: the first one unless a reply offsets it; one taken again after a
+    // refuted candidate (`retaken`) only when every reply was read and none offsets it.
+    static bool keepsWin(Refutation r, bool retaken) {
+        return r == Refutation::None || (r == Refutation::Unfinished && !retaken);
+    }
+
+    // The reply, played in full, leaves nothing of the immediate fire on him: both play on with none of it above his
+    // field (garbage of his may have reached the own field), or he wins.
     bool offsetsImmediate(const Observation& o, const Plan& fire, const Plan& response, uint64_t seed) const {
-        const Duel d = playOut(o, mine, &fire, theirs, &response, p, seed, true);
+        return offsetsIn(o, playOut(o, mine, &fire, theirs, &response, p, seed, true), response);
+    }
+    // The same judged on `d`, the Duel in which one own pair was put and then the reply was played out.
+    static bool offsetsIn(const Observation& o, const Duel& d, const Plan& response) {
         const DuelPlayer& a = d.player[o.me];
         const DuelPlayer& b = d.player[1 - o.me];
+        if (a.moves != o.self().moves + 1 || b.moves != o.opponent().moves + response.count || !b.chain.chains) return false;
+        if (d.state == (o.me ? RoundState::Won0 : RoundState::Won1)) return true;
         return d.state == RoundState::Playing && a.phase == DuelPhase::Control && b.phase == DuelPhase::Control &&
-               a.moves == o.self().moves + 1 && b.moves == o.opponent().moves + response.count &&
-               a.chain.chains && b.chain.chains && !a.fallen && !b.fallen && !b.incoming.total();
+               a.chain.chains && !b.fallen && !b.incoming.total();
     }
 
     // An immediate fire fixes the chain. One legal answer that cancels it in full
@@ -296,20 +482,24 @@ protected:
         rival.prepared = true;
         rival.field = o.opponent().field;
         rival.from = o.frame;
-        rival.deepest = p.beamDepth;
+        rival.deepest = p.depth();
+        rival.pool = o.opponent().scoring.pool;
         if (p.x3OutlastSettled) {
             const int him = 1 - o.me;
             Duel d(o, seed);
             rival.noPair = d.player[him].phase != DuelPhase::Control && !toPairOf(d, him, o.frame + 6000);
-            rival.field = d.player[him].field, rival.from = d.frame, rival.deepest = HORIZONS;
+            if (o.opponent().phase == Phase::Garbage) rival.previousDrop = o.frame - 1;
+            else if (d.player[him].fallen > 0) rival.previousDrop = d.player[him].settleFrame;
+            rival.field = d.player[him].field, rival.from = d.frame, rival.deepest = HORIZONS, rival.pool = d.player[him].scoring.pool;
         }
         int heights[W];
         rival.field.heights(heights);
         rival.need = W * (12 - heights[DEATH_X]);
         rival.cells = rival.field.f.count();
+        int64_t until = extraEnd - 1; // (extraEnd: a Plan::endFrame, the frame after the next pair appears)
         for (const Plan& plan : mine.plans)
-            if (plan.fireDepth) extraEnd = std::max(extraEnd, plan.endFrame);
-        rival.depth = movesUpTo(extraEnd - rival.from, rival.cells, 0, rival.deepest);
+            if (plan.fireDepth) until = std::max(until, heldUntil(o, plan));
+        rival.depth = placementsUpTo(until - rival.from, rival.cells, rival.deepest);
         if (p.thinkRivalFull && p.thinkBudget > 0) rival.depth = rival.deepest;
     }
 
@@ -322,7 +512,8 @@ protected:
         rival.prefetched = beginRival(rival.field, theirs.pair, theirs.knownCount, o.rules, o.timing, q, seed, true, deadline);
     }
 
-    bool outlasts(const Observation& o, int id, int rate, uint64_t seed, Rival& rival, const Plan* attack = nullptr) {
+    bool outlasts(const Observation& o, int id, int rate, uint64_t seed, Rival& rival, const Plan* attack = nullptr,
+                  int* replyGarbage = nullptr) {
         const Plan* big = attack;
         if (!big) {
             for (const Plan& s : mine.plans)
@@ -331,7 +522,7 @@ protected:
         if (!big) return true;
         const Player& opp = o.opponent();
         if (opp.phase == Phase::Dead || theirs.pairCount == 0) return true;
-        const auto movesUntil = [&](int64_t end) { return movesUpTo(end - rival.from, rival.cells, 0, rival.deepest); };
+        const auto movesUntil = [&](int64_t last) { return placementsUpTo(last - rival.from, rival.cells, rival.deepest); };
         Params q = p;
         if (!rival.searched) {
             if (!rival.prepared) prepareRival(o, seed, rival, attack ? attack->endFrame : 0);
@@ -346,7 +537,19 @@ protected:
                     const int percent = rival.splitTime ? std::max(p.thinkRival, 75) : p.thinkRival;
                     const bool made = takeRival(rival.field, theirs.pair, theirs.knownCount, q, seed,
                                                 began + std::chrono::microseconds(int64_t(budgetNow) * 10 * percent), got);
-                    if (!made) got = BuildResult{}, got.cut = true, got.layers = 0, ++cutSearches, ++rivalMissed, poor = true;
+                    if (!made) {
+                        got = BuildResult{};
+                        got.cut = true;
+                        got.layers = 0;
+                        ++cutSearches;
+                        ++rivalMissed;
+                        poor = true;
+                        againCut += choosingAgain;
+                        if (Note* n = note()) ++n->cut;
+                    }
+                    // (the width of the search begun ahead, where a choice played again from the notes makes this search
+                    //  itself with Params::thinkFit 2: it takes the widths of the notes in order)
+                    if (Note* n = note(); n && p.thinkFit >= 2) n->widths.push_back(q.beamWidth);
                     rival.built = got;
                     if (!rival.countedSearch) rival.countedSearch = true, ++rivalSearches;
                     held.depth = made ? rival.depth : 0, held.field = rival.field, held.pairs = theirs.knownCount, held.seed = seed;
@@ -369,11 +572,15 @@ protected:
             }
             return !(rival.counteredFire & bit);
         };
-        if (rival.noPair || rival.from > big->endFrame) return survivesKnownCounter(); // no pair of his before my chain ends
+        const int64_t until = heldUntil(o, *big);
+        const bool afterDrop = rival.previousDrop < until - o.timing.nextFrames;
+        rival.unanswered = rival.noPair || (rival.from > until && !afterDrop);
+        if (rival.unanswered) return survivesKnownCounter();
         // The search of as many moves as this chain leaves him: the one made, when it is that deep;
-        // its tables for fewer; and one of its own beyond the tables (a beamDepth above HORIZONS).
-        const int depth = movesUntil(big->endFrame);
-        const bool whole = depth >= rival.depth, tabled = !whole && depth <= HORIZONS;
+        // its tables for fewer; and one of its own beyond the tables (a beamDepth above HORIZONS) or
+        // deeper than the one made (an attack that ends later than those the search was made for).
+        const int depth = movesUntil(until);
+        const bool whole = depth == rival.depth, tabled = depth < rival.depth && depth <= HORIZONS;
         BuildResult alone;
         if (!whole && !tabled) {
             q.beamDepth = depth;
@@ -392,8 +599,11 @@ protected:
             const int points = p.x3OutlastMean ? ((b.alive >> i & 1) ? int(sum / queues) : 0) : tabled ? b.pointsBy[i][depth - 1] : b.points[i];
             if (points > most) most = points;
         }
+        const bool fires = most > 0; // (the search found him a chain: only a wave turns the points he carries into garbage)
         if (p.x3OutlastScale != 100) most = int(int64_t(most) * p.x3OutlastScale / 100); // (he may build more than this search of his field finds)
-        const int answer = (most + opp.scoring.pool) / rate;
+        const int rateThen = std::min(rate, o.rules.rateAt(big->endFrame)); // (his answer runs after this chain)
+        const int answer = fires ? (most + rival.pool) / rateThen : 0;
+        if (replyGarbage) *replyGarbage = answer;
         // When he answers with a chain, what is left of mine falls on the field that chain has
         // emptied, not on the one he has now: a third column eleven high needs six pieces to
         // close today and eleven rows after his chain. (Counted: main chains were fired as
@@ -426,7 +636,7 @@ protected:
         const uint64_t seed = roundSeed + uint64_t(o.self().moves) + (o.self().phase == Phase::Control ? 1 : 0);
         GameField field = opp.field;
         Params q = p;
-        q.beamWidth = widest(), q.beamDepth = p.beamDepth;
+        q.beamWidth = widest(), q.beamDepth = p.depth();
         if (p.x3OutlastSettled) {
             Duel d(o, seed);
             if (d.player[him].phase != DuelPhase::Control && !toPairOf(d, him, o.frame + 6000)) return;
@@ -510,6 +720,23 @@ protected:
         return open / 2;
     }
 
+    // exchangePoke (2): the frames from the one in which the own pair after chain `s` appears to the end of his main
+    // chain, both counted as Plan::endFrame. His plan on the screen by its own endFrame (hisEnd); a trial drop, whose
+    // chain runs `hisFrames` from its lock, taken to lock when `s` does (hisEnd -1).
+    static int64_t exchangeSpare(const Plan& s, int64_t hisFrames, int64_t hisEnd) {
+        return hisEnd >= 0 ? hisEnd - s.endFrame : hisFrames - (s.endFrame - s.lockFrame);
+    }
+    // ... his chain of `his` points ends before that pair appears, and a row or more of it is beyond what `s` offsets:
+    // that falls before anything is fired second.
+    static bool fallsFirst(const Plan& s, int64_t spare, int64_t his, int rate) {
+        return spare <= 0 && his - int64_t(s.sent) * rate >= int64_t(W) * rate;
+    }
+    // secondOffsets: a chain standing on his field, `frames` from its first wave to its end, locked when the last pair of
+    // `s` does: the frames from the one in which the own pair after `s` appears to the end of his chain (as Plan::endFrame).
+    static int64_t standingSpare(const Plan& s, int frames, const Timing& timing) {
+        return frames + timing.landFrames + timing.nextFrames + 1 - (s.endFrame - s.lockFrame);
+    }
+
     // x3Crush: plan `s` keeps a main chain of `keyed` points (x3CrushKeep percent of it), for either player.
     bool keepsMain(const Plan& s, int keyed) const { return atLeastPercent(s.mainAfter, p.x3CrushKeep, keyed); }
 
@@ -572,7 +799,7 @@ protected:
         std::erase_if(chains, [&](const Plan* s) { return !keepsMain(*s, mainKeyed); });
         if (chains.empty()) return ++crushCounts.spends, -1;
         buildValue(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
-        const int waiting = o.opponent().incoming.total();
+        const int waiting = aboveOther(o, me, p);
         struct Candidate {
             const Plan* plan;
             int64_t score;
@@ -651,7 +878,7 @@ protected:
             for (const Plan& x : *list)
                 if (x.fireDepth && !keepsMain(x, hisKeyed)) fires(x.points, x.endFrame - s.endFrame);
         for (const Standing& t : stands)
-            if (!t.keeps) fires(t.points, t.frames - (s.endFrame - s.lockFrame));
+            if (!t.keeps) fires(t.points, standingSpare(s, t.frames, o.timing));
         if (fired.empty()) return true;
         // (over before a pair can be placed: what is beyond the crush falls. Less than a row of it is not minded.)
         const int64_t row = int64_t(W) * rate;
@@ -660,7 +887,7 @@ protected:
         const Duel d = playOut(o, mine, &s, theirs, nullptr, p, seed);
         if (d.player[me].phase == DuelPhase::Dead) return false;
         const GameField& after = d.player[me].field;
-        const auto movesFor = [&](int64_t frames) { return movesUpTo(frames, after.f.count(), handWait, p.beamDepth); };
+        const auto movesFor = [&](int64_t frames) { return movesUpTo(frames, after.f.count(), handWait, p.depth()); };
         BuildResult b;
         const bool searched = mine.knownCount > s.count;
         if (searched) b = searchOn(o, after, movesFor(longest), seed, s.count);
@@ -694,10 +921,19 @@ protected:
                                int64_t firstCheck) const {
         // The first choice may start before the next pair appears. A later
         // revision cannot be assumed when choosing this attack.
-        const int64_t choice = quiet.player[o.me].spawnFrame - std::max(0, ahead - 1) - std::max(0, p.seeLate);
         const DuelPlayer& rival = exchange.player[1 - o.me];
         return reply.fireDepth && rival.chain.chains && rival.moves == o.opponent().moves + reply.count &&
-               firstCheck >= o.frame && firstCheck < choice;
+               firstCheck >= o.frame && seenBeforeChoice(firstCheck, quiet.player[o.me].spawnFrame, ahead, p.seeLate);
+    }
+
+    // pressureReplyRevealed at the frame read (`firstCheck`) and at the frame his last pair is checked in when he goes
+    // the straight way (rivalSeenCheck): the rival read with FASTEST_BOUND may show his chain no sooner than that.
+    bool pressureReplySeen(const Observation& o, const Plan& attack, const Duel& quiet, const Plan& reply, const Duel& exchange,
+                           int64_t firstCheck, uint64_t seed) const {
+        if (!pressureReplyRevealed(o, quiet, reply, exchange, firstCheck)) return false;
+        const int64_t seen = rivalSeenCheck(o, mine, &attack, theirs, &reply, p, seed, firstCheck,
+                                            [this] { return exchangeOutOfTime(75); });
+        return pressureReplyRevealed(o, quiet, reply, exchange, seen);
     }
 
     // Pending garbage can disappear on the very next move.
@@ -785,7 +1021,8 @@ protected:
     int midgamePressure(const Observation& o, unsigned legal, uint64_t seed) {
         const int him = 1 - o.me;
         // A minimum hit must take the opponent to the crowded part of the field.
-        if (p.handWait > 0 || !theirs.pairCount || o.opponent().incoming.total() ||
+        // (every response of his is read below: not when the midgame beam made his replies in part)
+        if (p.handWait > 0 || !theirs.pairCount || o.opponent().incoming.total() || !rivalBeamWhole ||
             o.opponent().field.f.count() + 2 * W < 50 || exchangeOutOfTime(75)) return -1;
         std::vector<const Plan*> attacks;
         for (const auto* list : {&mine.plans, &mine.tactical})
@@ -823,7 +1060,7 @@ protected:
                 const Duel d = playOut(o, mine, attack, theirs, response, p, seed, true, &replyCheck);
                 if (pressureAfterReply(o, *attack, *response, d, 2 * W, 2, seed)) continue;
                 const DuelPlayer& rival = d.player[him];
-                const bool revealed = pressureReplyRevealed(o, quiet, *response, d, replyCheck);
+                const bool revealed = pressureReplySeen(o, *attack, quiet, *response, d, replyCheck, seed);
                 // A large reply must actually use up the rival's chain. An extension
                 // can create a main chain larger than the one standing at the start.
                 const bool spentMain = revealed && !response->allClear && !rival.scoring.allClear && !rival.fallen &&
@@ -842,7 +1079,7 @@ protected:
             // The early end of the move estimate errs on the side of giving him another pair.
             // Beyond the enumerated horizon, use standing replies and a short rival beam as
             // warning signs. Neither is a verified placement sequence.
-            const int turns = 1 + p.movesIn(confirm - std::max(o.frame, before.player[him].spawnFrame), field.f.count(), 0);
+            const int turns = repliesUntil(o, before, confirm, field.f.count());
             if (turns > HORIZONS) continue;
             if (turns > theirs.pairCount) {
                 const int erase = quiet.player[him].incoming.total() - 2 * W + 1;
@@ -936,6 +1173,7 @@ protected:
             plan.points = quiet.player[o.me].scoring.score - o.self().scoring.score;
             plan.sent = quiet.player[1 - o.me].incoming.total();
             plan.endFrame = quiet.player[o.me].spawnFrame + 1;
+            plan.confirmFrame = quiet.player[o.me].settleFrame > 0 ? quiet.player[o.me].settleFrame : 0;
             if (plan.points >= ordinary + 2 * W * rate) exact.push_back(plan);
         }
         return exact;
@@ -945,7 +1183,7 @@ protected:
         const int him = 1 - o.me;
         Duel start(o, seed);
         if (!theirs.midAir && !toPairOf(start, him, o.frame + 6000)) return false;
-        const unsigned first = theirs.midAir ? theirs.firstReach : legalPlacements(start.player[him].field);
+        const unsigned first = theirs.firstInAir() ? theirs.firstReach : legalPlacements(start.player[him].field);
         bool checked = false;
         for (unsigned ids = first; ids; ids &= ids - 1) {
             if (exchangeOutOfTime(75)) return false;
@@ -981,7 +1219,180 @@ protected:
         return -1;
     }
 
+#ifdef JURAIC_LV38_REPLAY_AUDIT
+    enum AuditBranch { AuditWin = 1, AuditLegal = 2, AuditOffset = 4 };
+    unsigned auditBranches = 0;
+#endif
+
+    static int partChains(const Observation& o, int id, Pair pair) {
+        if (id < 0 || !pair.axis || !pair.child) return 0;
+        GameField field = o.self().field;
+        juraic::place(field, placement(id), pair);
+        Trial trial;
+        return runTrialChain(field.f, o.rules, o.timing, trial, false);
+    }
+
+    int lv38PartChains(const Observation& o, int id) const {
+        return partChains(o, id, mine.knownCount ? mine.pair[0] : Pair{});
+    }
+
+    static void recordPart(std::vector<PartNote>* log, const Observation& o, const char* part,
+                           int before, int after, int arriving, int nextKind, Pair pair) {
+        if (!log || before == after) return;
+        const Player& self = o.self();
+        int colours = self.field.f.normal().count();
+        for (Cell cell : self.field.row14) colours += cell >= 1 && cell <= MAX_COLORS;
+        log->push_back({o.frame, self.moves + 1, int(self.phase), self.incoming.total(), arriving, colours,
+                        part, before, after, nextKind, partChains(o, after, pair)});
+    }
+
+    void recordLv38Part(const Observation& o, const char* part, int before, int after, int arriving, int nextKind) const {
+        recordPart(partLog, o, part, before, after, arriving, nextKind, mine.knownCount ? mine.pair[0] : Pair{});
+    }
+
+    int recordLv37Part(const Observation& o, const char* part, int before, int after, int arriving, int nextKind) const {
+        recordPart(lv37PartLog, o, part, before, after, arriving, nextKind, mine.knownCount ? mine.pair[0] : Pair{});
+        return after;
+    }
+
+    void noteEquivalentSetup(const Observation& o, Pair pair, int before, int after) override {
+        recordPart(lv37PartLog, o, "equivalent_route", before, after, 0, Build, pair);
+    }
+
+    struct SmallTakeResult {
+        struct Quiet {
+            int id = -1, amount = 0, main = 0, height = 0, turns = 0;
+            int64_t frame = -1;
+        } best;
+        int fireWaves = 0, fireSent = -1, replyGarbage = -1;
+        bool eligible = false, attackKnown = false, holds = false, outgunned = false;
+    };
+
+    SmallTakeResult smallTake(const Observation& o, int ordinary, unsigned legal, bool measure) {
+        SmallTakeResult result;
+        const auto& self = o.self();
+        const int incoming = self.incoming.total();
+        if (incoming < 1 || incoming >= W || ordinary < 0 || !(legal >> ordinary & 1u) || !mine.knownCount) return result;
+        int colors = self.field.f.normal().count();
+        for (Cell cell : self.field.row14) colors += cell >= 1 && cell <= MAX_COLORS;
+        int heights[W];
+        self.field.heights(heights);
+        if (colors >= 64 || heights[DEATH_X] > 9 || self.field.row14[DEATH_X] != EMPTY) return result;
+
+        GameField ignited = self.field;
+        juraic::place(ignited, placement(ordinary), mine.pair[0]);
+        Trial ignition;
+        runTrialChain(ignited.f, o.rules, o.timing, ignition, false);
+        if (ignition.chains < 5) return result;
+        result.eligible = true;
+        result.fireWaves = ignition.chains;
+        const uint64_t seed = roundSeed + uint64_t(self.moves);
+        const auto stop = [&] { return exchangeOutOfTime(92); };
+        const Plan* attack = nullptr;
+        for (const auto* list : {&mine.plans, &mine.tactical, &mine.keeping}) for (const auto& plan : *list)
+            if (plan.id[0] == ordinary && plan.count == 1 && plan.fireDepth == 1 && plan.chains == ignition.chains &&
+                (!attack || plan.sent > attack->sent)) attack = &plan;
+        if (attack && !stop()) {
+            result.attackKnown = true;
+            result.fireSent = attack->sent;
+            Rival rival;
+            result.holds = outlasts(o, ordinary, o.rules.rateAt(o.frame), seed, rival, attack, &result.replyGarbage);
+            result.outgunned = !attack->allClear && result.replyGarbage >= 0 && result.replyGarbage > attack->sent;
+        }
+        if (!measure && (!result.outgunned || self.scoring.allClear)) return result;
+
+        Duel start(o, seed);
+        const int me = o.me;
+        const bool inHand = mine.midAir;
+        const int64_t limit = o.frame + 6000;
+        if (!inHand && !toPairOf(start, me, limit)) return result;
+        SpawnInputCache inputs;
+        inputs.configure(o.timing, o.rules.speedPercent);
+        const int depth = std::min(mine.pairCount, mine.knownCount);
+        const auto walk = [&](auto&& walk, const Duel& before, int turn, int first) -> void {
+            const auto& own = before.player[me];
+            const unsigned available = turn == 0 ? legal : legalPlacements(own.field);
+            for (unsigned ids = available; ids && !stop(); ids &= ids - 1) {
+                const int id = std::countr_zero(ids);
+                const auto where = placement(id);
+                GameField placed = own.field;
+                juraic::place(placed, where, mine.pair[turn]);
+                if (placed.dead() || anyClear(placed.f, o.rules)) continue;
+                const bool current = turn == 0 && (inHand || before.appearingInAir(me));
+                const auto input = current ? SpawnInput{int(mine.firstLock[id] - o.frame + 1), mine.firstSoft[id], mine.firstRest[id]}
+                                           : inputs.get(own.field, where);
+                if (input.frames <= 0 || (current && !(mine.firstReach >> id & 1u))) continue;
+                const int64_t lock = (current ? o.frame : own.spawnFrame) + input.frames - 1;
+                const int firstId = turn ? first : id;
+                Duel trial = before;
+                std::array<DuelDrop, 2> drops{};
+                trial.firstDrops = &drops;
+                trial.place(me, where, mine.pair[turn], lock, input.soft, input.rested);
+                const bool another = toPairOf(trial, me, limit);
+                trial.firstDrops = nullptr;
+                const DuelDrop& drop = drops[me];
+                if (!drop.amount) {
+                    if (another && turn + 1 < depth) walk(walk, trial, turn + 1, firstId);
+                    continue;
+                }
+                if (drop.field.dead() || (result.best.id >= 0 && drop.amount > result.best.amount)) continue;
+                if (!o.nextGarbageOrder[me] && drop.amount % W) {
+                    // (the columns of the pieces beyond whole rows are not known: the third column may take one of them)
+                    int placedHeights[W];
+                    placed.heights(placedHeights);
+                    if (placedHeights[DEATH_X] + drop.amount / W + 1 > DEATH_Y) continue;
+                }
+                int main = 0;
+                buildValue(drop.field, o.rules, o.timing, p, &main);
+                int afterHeights[W];
+                drop.field.heights(afterHeights);
+                const int height = afterHeights[DEATH_X];
+                const auto& best = result.best;
+                if (best.id < 0 || std::tuple(drop.amount, -main, height) < std::tuple(best.amount, -best.main, best.height))
+                    result.best = {firstId, drop.amount, main, height, turn + 1, drop.frame};
+            }
+        };
+        if (depth > 0) walk(walk, start, 0, -1);
+        return result;
+    }
+
     int decide(const Observation& o, unsigned legal) override {
+#ifdef JURAIC_LV38_REPLAY_AUDIT
+        auditBranches = 0;
+#endif
+        const int ordinary = decideOrdinary(o, legal);
+        if (p.lv38Midgame && p.lv38FireOrLose > 0) {
+            lv38_fire_or_lose::Decision fire{o.frame, o.self().moves + 1, ordinary};
+            if (kind != Win && !exchangeOutOfTime(96)) fire = lv38_fire_or_lose::evaluate(o, legal, ordinary, p);
+            if (fireOrLoseLog) fireOrLoseLog->push_back(fire);
+            if (fire.selected >= 0) {
+                twoWaveCarry = {};
+                twoWaveNext = {};
+                exchangeNote.chosen = false;
+                return kind = Fire, fire.selected;
+            }
+        }
+        if (!p.lv38Midgame || !p.lv38TakeSmall || ordinary < 0) return ordinary;
+        const auto read = smallTake(o, ordinary, legal, false);
+        if (!read.outgunned || read.best.id < 0 || read.best.main <= 0 || read.best.amount >= W || exchangeOutOfTime(95))
+            return ordinary;
+        if (takeSmallLog) {
+            int colours = o.self().field.f.normal().count();
+            for (Cell cell : o.self().field.row14) colours += cell >= 1 && cell <= MAX_COLORS;
+            takeSmallLog->push_back({o.frame, o.self().moves + 1, int(o.self().phase), ordinary, read.best.id,
+                                    o.self().incoming.total(), colours, read.best.turns, read.best.amount});
+        }
+        twoWaveCarry = {};
+        twoWaveNext = {};
+        recordLv38Part(o, "take_small", ordinary, read.best.id, read.best.amount, Answer);
+        return kind = Answer, read.best.id;
+    }
+
+    int decideOrdinary(const Observation& o, unsigned legal) {
+        lv38BuildNote = {};
+        lv38TailAnswerNote = {};
+        lv38AnswerBuildNote = {};
+        lv38ResponseNewlyEligible = 0;
         const int me = o.me;
         const uint64_t seed = roundSeed + uint64_t(o.self().moves);
         const int rate = o.rules.rateAt(o.frame);
@@ -1002,6 +1413,94 @@ protected:
         plansMade(pairs, secondChoice, mine.pairCount >= 3 && theirs.pairCount >= 3);
         kind = None, guardedNow = false;
         exchangeNote.chosen = false;
+        const bool twoWave = p.lv38Midgame && lv38PartEnabled(p.lv38TwoWave, Lv38Part::TwoWave) && !p.handWait;
+        const Plan* retained = nullptr;
+        if (twoWave) {
+            twoWaveNote = {};
+            twoWaveFrame = o.frame;
+            twoWaveRetained = false;
+            if (twoWaveTurn != o.self().moves) {
+                twoWaveTurn = o.self().moves;
+                twoWaveCarry = twoWaveNext;
+            }
+            twoWaveNext = {};
+            const auto& carry = twoWaveCarry;
+            bool matches = carry.moves == twoWaveTurn && carry.field == o.self().field &&
+                carry.suffix.count > 0 && carry.suffix.count <= mine.knownCount;
+            for (int k = 0; matches && k < carry.suffix.count; ++k)
+                matches = carry.pairs[k].axis == mine.pair[k].axis && carry.pairs[k].child == mine.pair[k].child;
+            if (matches) retained = &carry.suffix;
+            else twoWaveCarry = {};
+        }
+        const auto checkTwoWave = [&](int ordinary, int arriving) {
+            if (!twoWave || guardedNow) return ordinary;
+            traceLv38Part(Lv38Part::TwoWave);
+            countComponent(CountedComponent::TwoWave);
+            const auto stop = [&] { return exchangeOutOfTime(96); };
+            twoWaveRetained = retained != nullptr;
+            int selected = lv38_two_wave::prefer(o, mine, theirs, ordinary, legal, p, seed, stop,
+                                                twoWaveNote, retained);
+            int blockedMain = -1;
+            const auto keepOrdinary = [&] {
+                twoWaveNext = {};
+                recordLv38Part(o, "two_wave_main_kept", blockedMain, ordinary, arriving, kind);
+                return ordinary;
+            };
+            if (p.lv38TwoWaveNoMain > 0 && ordinary >= 0 && selected != ordinary &&
+                lv38PartChains(o, selected) >= 5 && lv38PartChains(o, ordinary) < 5) {
+                blockedMain = selected;
+                if (p.lv38TwoWaveReselect <= 0 || stop()) return keepOrdinary();
+
+                unsigned quietOrShort = legal;
+                for (unsigned bits = legal; bits; bits &= bits - 1) {
+                    const int id = std::countr_zero(bits);
+                    if (lv38PartChains(o, id) >= 5) quietOrShort &= ~(1u << id);
+                }
+                const Plan* carry = retained;
+                if (carry && !(quietOrShort >> carry->id[0] & 1u)) carry = nullptr;
+                twoWaveRetained = carry != nullptr;
+                twoWaveNext = {};
+                countComponent(CountedComponent::Reselect);
+                selected = lv38_two_wave::prefer(o, mine, theirs, ordinary, quietOrShort, p, seed, stop,
+                                                twoWaveNote, carry);
+                if (selected == ordinary || stop()) return keepOrdinary();
+            }
+            const char* part = blockedMain >= 0 ? "two_wave_reselect" : "two_wave";
+            const auto& route = twoWaveNote.route;
+            if (route.count < 2 || route.count > 3 || route.id[0] != selected) {
+                recordLv38Part(o, part, ordinary, selected, arriving, kind);
+                return selected;
+            }
+            Plan first;
+            first.count = 1;
+            first.id[0] = route.id[0];
+            KnownReplay replay{stop};
+            replay.acceptPlacement = [](const Duel&, int, Placement, Pair, int64_t, int64_t lock) {
+                return lock >= 0;
+            };
+            Duel start(o, seed);
+            ReplayCheckpoint spawn{start};
+            const auto d = playOut(o, mine, &first, theirs, nullptr, p, seed, true, nullptr, &replay, nullptr, &spawn);
+            if (stop()) {
+                twoWaveNote.status = 4;
+                twoWaveNote.selected = ordinary;
+                twoWaveNote.route = {};
+                return blockedMain >= 0 ? keepOrdinary() : ordinary;
+            }
+            const auto& self = spawn.duel.player[o.me];
+            if (d.state == RoundState::Playing && self.phase == DuelPhase::Control &&
+                self.moves == twoWaveTurn + 1) {
+                twoWaveNext.moves = self.moves;
+                twoWaveNext.field = self.field;
+                twoWaveNext.suffix.count = route.count - 1;
+                for (int k = 0; k < twoWaveNext.suffix.count; ++k) {
+                    twoWaveNext.suffix.id[k] = route.id[k + 1];
+                    twoWaveNext.pairs[k] = mine.pair[k + 1];
+                }
+            }
+            recordLv38Part(o, part, ordinary, selected, arriving, kind);
+            return selected;
+        };
         // (the plans are made of every legal placement; `legal` may hold fewer, those the pair has a path to)
         if (p.x3PathCheck) std::erase_if(mine.plans, [&](const Plan& s) { return !(legal >> s.id[0] & 1); });
         if (mine.plans.empty()) {
@@ -1013,7 +1512,10 @@ protected:
             return id >= 0 ? id : std::countr_zero(legal);
         }
         const auto outOfTime = [&] { return exchangeOutOfTime(55); };
-        const bool splitEarly = p.thinkBudget > 0 && p.readMidgame && p.x3Poke && o.self().field.f.count() >= 24 &&
+        rivalBeamWhole = true;
+        const bool splitEnabled = lv37PartEnabled(p.lv37SplitMain, Lv37Part::SplitMain);
+        const bool splitEarly = splitEnabled && p.thinkBudget > 0 && p.readMidgame && p.x3Poke &&
+                                o.self().field.f.count() >= 24 &&
                                 maySplitMain(o) && hasSplitOpening(o, legal, seed);
         Rival sharedRival;
         std::vector<Plan> splitReady;
@@ -1032,35 +1534,87 @@ protected:
         int id = win(o, legal, rate, seed, sharedRival.prepared ? &sharedRival : nullptr);
         bool readRival = false;
         if (id >= 0 && p.readMidgame && p.checkKnownExchange && p.handWait == 0 && !outOfTime()) {
-            const auto fire = std::find_if(mine.plans.begin(), mine.plans.end(), [&](const Plan& s) {
-                return s.id[0] == id && s.count == 1 && s.fireDepth == 1 && s.chains >= 5 && s.sent > 0 && !s.allClear;
-            });
-            if (fire != mine.plans.end()) {
+            unsigned remaining = legal;
+            const bool recheck = p.lv38Midgame && lv38PartEnabled(p.lv38WinRecheck, Lv38Part::WinRecheck);
+            bool retaken = false; // (id is a candidate taken again after a refuted one)
+            while (id >= 0) {
+                if (retaken) traceLv38Part(Lv38Part::WinRecheck);
+                if (exchangeOutOfTime(75)) {
+                    if (retaken) recordLv38Part(o, "win_recheck", id, -1, -1, kind);
+                    if (retaken) id = -1;
+                    break;
+                }
+                const auto fire = std::find_if(mine.plans.begin(), mine.plans.end(), [&](const Plan& s) {
+                    return s.id[0] == id && s.count == 1 && s.fireDepth == 1 && s.chains >= 5 && s.sent > 0 && !s.allClear;
+                });
+                if (fire == mine.plans.end()) break;
                 // The ordinary win test runs before the midgame beam. A visible
                 // fourth pair or an initial small clear can open a real counter.
-                const size_t firstNew = theirs.tactical.size();
-                MidgameBeam::extend(o, p, seed, theirs, outOfTime);
-                readRival = true;
-                for (size_t i = firstNew; i < theirs.tactical.size() && !exchangeOutOfTime(75); ++i) {
-                    const Plan& reply = theirs.tactical[i];
-                    if (reply.chains <= 4 || reply.sent < fire->sent || !offsetsImmediate(o, *fire, reply, seed)) continue;
-                    id = win(o, legal & ~(1u << id), rate, seed, sharedRival.prepared ? &sharedRival : nullptr);
+                const size_t firstNew = readRival ? 0 : theirs.tactical.size();
+                if (!readRival) {
+                    rivalBeamWhole = MidgameBeam::extend(o, p, seed, theirs, outOfTime);
+                    readRival = true;
+                }
+                const Refutation read = withBeam(refutation(o, *fire, firstNew, seed, [&] { return exchangeOutOfTime(75); }),
+                                                 rivalBeamWhole);
+                if (keepsWin(read, retaken)) break;
+                if (retaken) recordLv38Part(o, "win_recheck", id, -1, -1, kind);
+                if (read == Refutation::Unfinished) {
+                    id = -1;
                     break;
+                }
+#ifdef JURAIC_LV38_REPLAY_AUDIT
+                auditBranches |= AuditWin;
+#endif
+                remaining &= ~(1u << id);
+                id = remaining ? win(o, remaining, rate, seed, sharedRival.prepared ? &sharedRival : nullptr) : -1;
+                if (!recheck) break;
+                retaken = true;
+                if (exchangeOutOfTime(75)) {
+                    recordLv38Part(o, "win_recheck", id, -1, -1, kind);
+                    id = -1;
                 }
             }
         }
         if (id < 0 && p.x3ClearNow > 0) id = clearNow(legal);
-        if (id >= 0) return id;
+        const bool needsLifeline = p.lv38Midgame && o.self().incoming.total() > 0 &&
+            o.self().incoming.total() < W && o.self().field.f.occupied().get(DEATH_X, DEATH_Y - 1);
+        const bool checkLifeline = needsLifeline && lv38PartEnabled(p.lv38Lifeline, Lv38Part::Lifeline);
+        if (id >= 0 && (!checkLifeline || kind != Win)) {
+            if (twoWave) twoWaveCarry = {};
+            return id;
+        }
         // What is on its way: the opponent's chain that is running, to its end.
         Duel afterChain(o, seed);
         const bool chainRuns = afterChain.player[1 - me].phase == DuelPhase::Check || afterChain.player[1 - me].phase == DuelPhase::Settle;
         if (chainRuns) toPairOf(afterChain, 1 - me, o.frame + 6000);
         const int arriving = afterChain.player[me].incoming.total();
+        if (id >= 0) {
+            traceLv38Part(Lv38Part::Lifeline);
+            const int survive = lv38_lifeline::prefer(o, afterChain, mine, theirs, id, legal, arriving, p, seed,
+                                                       [&] { return exchangeOutOfTime(90); });
+            recordLv38Part(o, "lifeline_win", id, survive, arriving, Answer);
+            return survive == id ? id : (kind = Answer, survive);
+        }
         if (p.readMidgame && o.self().field.f.count() >= 24) {
             if (!splitEarly) MidgameBeam::extend(o, p, seed, mine, outOfTime);
-            if (!readRival) MidgameBeam::extend(o, p, seed, theirs, outOfTime);
+            if (!readRival) rivalBeamWhole = MidgameBeam::extend(o, p, seed, theirs, outOfTime);
         }
         if (arriving > 0) {
+            if (p.lv38Midgame && (p.lv38Plan5 > 0 || p.lv38Plan12 > 0 || p.lv38HeadCut > 0) &&
+                lv38PartEnabled(p.lv38TailAnswer, Lv38Part::TailAnswer)) {
+                traceLv38Part(Lv38Part::TailAnswer);
+                countComponent(CountedComponent::TailAnswer);
+                const int tail = lv38_tail_answer::prefer(o, mine, theirs, legal, arriving, p, seed,
+                    [&] { return exchangeOutOfTime(72); }, lv38TailAnswerNote);
+                if (tail >= 0) {
+                    if (twoWave) twoWaveCarry = {};
+                    kind = lv38TailAnswerNote.depth == 1 ? Answer : AnswerBuild;
+                    recordLv38Part(o, "tail_answer", -1, tail, arriving, kind);
+                    if (cutAnswers) cutAnswers->push_back({o.frame, o.self().moves + 1, lv38TailAnswerNote});
+                    return tail;
+                }
+            }
             if (p.x3AnswerFire > 0 && o.self().field.f.count() >= p.x3AnswerFire) id = fireAnswer(o, legal, rate, seed);
             if (id < 0) id = answer(o, legal, rate, seed, afterChain, chainRuns, arriving);
             if (p.readMidgame && id >= 0 && (kind == Answer || kind == AnswerBuild || kind == Fire) && arriving <= W) {
@@ -1076,30 +1630,78 @@ protected:
                         if (!fire || plan.points > fire->points) fire = &plan;
                     }
                 }
-                if (fire) {
+                if (fire && lv37PartEnabled(p.lv37SmallReceive, Lv37Part::SmallReceive)) {
                     const int receive = smallReceive(o, mine, theirs, *fire, legal, arriving, p, seed,
                                                      [&] { return exchangeOutOfTime(85); }, preferred);
-                    if (receive >= 0 && receive != id) id = receive, kind = Answer;
+                    if (receive >= 0 && receive != id) {
+                        id = recordLv37Part(o, "small_receive", id, receive, arriving, Answer);
+                        kind = Answer;
+                    }
                 }
             }
-            if (p.checkKnownExchange && p.readMidgame && !o.rules.cancel && id >= 0 && kind == Answer && arriving < W) {
-                const int immediate = receive_compare::prefer(o, mine, theirs, id, legal, arriving, p, seed,
-                                                              [&] { return exchangeOutOfTime(85); });
-                if (immediate >= 0) id = immediate;
-                id = preferCommittedAnswer(o, mine, theirs, id, legal, arriving, p, seed,
-                                           [&] { return exchangeOutOfTime(85); });
+            if (p.checkKnownExchange && p.readMidgame && id >= 0 && kind == Answer && arriving < W) {
+                if (lv37PartEnabled(p.lv37ReceiveCompare, Lv37Part::ReceiveCompare)) {
+                    const int immediate = receive_compare::prefer(o, mine, theirs, id, legal, arriving, p, seed,
+                                                                  [&] { return exchangeOutOfTime(85); });
+                    if (immediate >= 0) id = recordLv37Part(o, "receive_compare", id, immediate, arriving, kind);
+                }
+                if (lv37PartEnabled(p.lv37CommittedAnswer, Lv37Part::CommittedAnswer)) {
+                    const int committed = preferCommittedAnswer(o, mine, theirs, id, legal, arriving, p, seed,
+                                                                [&] { return exchangeOutOfTime(85); });
+                    id = recordLv37Part(o, "committed_answer", id, committed, arriving, kind);
+                }
             }
-            if (p.checkKnownExchange && p.readMidgame && id >= 0 && (kind == Answer || kind == AnswerBuild))
-                id = side_response::prefer(o, afterChain, mine, theirs, id, legal, arriving, p, seed, sideReady,
-                                           [&] { return exchangeOutOfTime(85); });
+            if (p.checkKnownExchange && p.readMidgame && id >= 0 && (kind == Answer || kind == AnswerBuild) &&
+                lv37PartEnabled(p.lv37SideResponse, Lv37Part::SideResponse)) {
+                const int side = side_response::prefer(o, afterChain, mine, theirs, id, legal, arriving, p, seed, sideReady,
+                                                       [&] { return exchangeOutOfTime(85); });
+                id = recordLv37Part(o, "side_response", id, side, arriving, kind);
+            }
+            if (p.lv38Midgame && chainRuns && arriving >= W && id >= 0 && (kind == Answer || kind == AnswerBuild) &&
+                lv38PartEnabled(p.lv38Response, Lv38Part::Response)) {
+                traceLv38Part(Lv38Part::Response);
+                const int side = lv38_response::prefer(o, afterChain, mine, theirs, id, legal, arriving, p, seed,
+                                                       [&] { return exchangeOutOfTime(85); },
+                                                       &lv38ResponseNewlyEligible);
+                if (side != id) {
+                    recordLv38Part(o, "response", id, side, arriving, Answer);
+                    if (!twoWave) return kind = Answer, side;
+                    id = side, kind = Answer;
+                }
+            }
+            if (checkLifeline && arriving < W && id >= 0 && (kind == Answer || kind == AnswerBuild)) {
+                traceLv38Part(Lv38Part::Lifeline);
+                const int survive = lv38_lifeline::prefer(o, afterChain, mine, theirs, id, legal, arriving, p, seed,
+                                                           [&] { return exchangeOutOfTime(90); });
+                recordLv38Part(o, "lifeline", id, survive, arriving, Answer);
+                if (survive != id) return kind = Answer, survive;
+            }
+            if (!needsLifeline && chainRuns && id >= 0 && (kind == Answer || kind == AnswerBuild) &&
+                lv38PartEnabled(p.lv38Unannounced, Lv38Part::Unannounced)) {
+                traceLv38Part(Lv38Part::Unannounced);
+                const int survive = lv38_lifeline::preferUnannouncedWave(
+                    o, afterChain, mine, theirs, id, legal, arriving, p, seed, [&] { return exchangeOutOfTime(90); });
+                recordLv38Part(o, "unannounced", id, survive, arriving, Answer);
+                if (survive != id) return kind = Answer, survive;
+            }
         } else {
             if (p.x3AllClear > 0) id = clearInReach(o, legal);
-            if (id < 0 && p.pokeExchange) id = exchangePoke(o, legal, rate, seed);
-            if (id < 0 && p.readMidgame && p.x3Poke) id = midgamePressure(o, legal, seed);
+            if (id < 0 && p.pokeExchange) {
+                id = exchangePoke(o, legal, rate, seed);
+                if (id >= 0) recordLv37Part(o, "exchange_poke", -1, id, 0, kind);
+            }
+            if (id < 0 && p.readMidgame && p.x3Poke) {
+                id = midgamePressure(o, legal, seed);
+                if (id >= 0) recordLv37Part(o, "midgame_pressure", -1, id, 0, kind);
+            }
             // Crush: the opponent cannot answer in time an attack that keeps the own main chain, and taking it saturates
             // his field (x3Crush; crush above).
             if (id < 0 && p.x3Crush > 0) id = crush(o, legal, rate, seed);
-            if (id < 0 && p.x3Poke && p.pokeExchange != 2) id = poke(o, legal, rate, seed);
+            if (id < 0 && p.x3Poke && p.pokeExchange != 2) {
+                id = poke(o, legal, rate, seed);
+                if (id >= 0 && kind == Poke)
+                    recordPart(legacyPokeLog, o, "legacy_poke", -1, id, 0, kind, mine.knownCount ? mine.pair[0] : Pair{});
+            }
             if (id < 0 && splitEarly && !stale.load()) {
                 // If ordinary wins needed the shared result early, the same
                 // search can still finish in the extra attack's own window.
@@ -1111,12 +1713,56 @@ protected:
                     const bool holds = outlasts(o, attack.id[0], rate, seed, sharedRival, &attack);
                     if (!holds || stale.load()) continue;
                     id = attack.id[0], kind = Win;
+                    recordLv37Part(o, "split_main", -1, id, 0, kind);
                     break;
                 }
             }
-            if (id < 0 && !splitEarly && p.readMidgame && p.x3Poke) id = splitMainAttack(o, legal, seed);
+            if (id < 0 && !splitEarly && splitEnabled && p.readMidgame && p.x3Poke) {
+                id = splitMainAttack(o, legal, seed);
+                if (id >= 0) recordLv37Part(o, "split_main", -1, id, 0, kind);
+            }
         }
-        return id >= 0 ? id : buildMove(o, legal, rate, seed, arriving, chainRuns);
+        if (id >= 0) {
+            if (kind == Answer || kind == AnswerBuild) {
+                const int ordinary = checkTwoWave(id, arriving);
+                if (p.lv38Midgame && (p.lv38Plan7 > 0 || p.lv38Plan7Guard > 0) && chainRuns && arriving < 30 &&
+                    ordinary >= 0 && ordinary == id && !guardedNow && (!twoWave || !twoWaveNote.route.count)) {
+                    const auto stop = [&] { return exchangeOutOfTime(); };
+                    if (p.thinkBudget > 0 && budgetNow > 0)
+                        builder.until(began + std::chrono::microseconds(int64_t(budgetNow) * 1000));
+                    else builder.untimed();
+                    searching.store(&builder);
+                    if (stop()) builder.until(Builder::Clock::now());
+                    const int selected = lv38_answer_build::prefer(o, afterChain, mine, theirs, legal, ordinary,
+                        arriving, rate, p, seed, roundSeed * 1000 + uint64_t(o.self().moves), builder, stop,
+                        lv38AnswerBuildNote);
+                    searching.store(nullptr);
+                    if (selected != ordinary) return kind = AnswerBuild, selected;
+                }
+                return ordinary;
+            }
+            if (twoWave) twoWaveCarry = {};
+            return id;
+        }
+        const auto& settledRival = afterChain.player[1 - me];
+        const auto rivalPhase = o.opponent().phase;
+        // The settle simulation also runs while a quiet pair is landing.
+        // A quiet landing still permits the tail and ready-main checks.
+        const bool quietRivalLanding = chainRuns && !arriving &&
+            (rivalPhase == Phase::Land || rivalPhase == Phase::Split) &&
+            !o.opponent().chain.chains && afterChain.state == RoundState::Playing &&
+            settledRival.phase == DuelPhase::Control && !settledRival.chain.chains && !settledRival.fallen;
+        unsigned readyChoices = 0;
+        id = buildMove(o, legal, rate, seed, arriving, chainRuns, &readyChoices, quietRivalLanding);
+        int covered = id;
+        if (kind == Build && readyChoices && lv38PartEnabled(p.lv38ReadyCover, Lv38Part::ReadyCover)) {
+            traceLv38Part(Lv38Part::ReadyCover);
+            covered = lv38_ready_cover::prefer(o, mine, theirs, id, readyChoices, p, seed,
+                                               [&] { return exchangeOutOfTime(96); });
+            recordLv38Part(o, "ready_cover", id, covered, arriving, kind);
+        }
+        if (covered != id || !(kind == Build || kind == AnswerBuild)) return covered;
+        return (arriving || retained) ? checkTwoWave(id, arriving) : id;
     }
 
     // Win: against every reply some plan below the same first placement wins (the opponent's side of every
@@ -1128,7 +1774,7 @@ protected:
             return o.pairsOf(who).count() - player.nextPair + (player.phase == Phase::Control);
         };
         if (!winning || !p.x3WinCheck || p.handWait || stop() ||
-            o.self().incoming.total() || o.opponent().incoming.total() || o.opponent().chain.chains ||
+            o.self().incoming.total() || o.opponent().incoming.total() || chainRunning(o, 1 - o.me) ||
             o.self().scoring.allClear || o.opponent().scoring.allClear ||
             mine.pairCount != shown(o.me) || theirs.pairCount != shown(1 - o.me) ||
             !((o.self().phase == Phase::Next && !o.busyLeft[o.me]) || o.self().phase == Phase::Control)) return baseline;
@@ -1182,7 +1828,7 @@ protected:
                 const bool building = p.x3WinBuild && !s.fireDepth && !quiet[id] && (r == 0 || wonIdle[id]);
                 if ((wins[id] || (r && !worst[id])) && !building) continue;
                 const Duel d = playOut(o, mine, &s, theirs, reply(r), p, seed);
-                if (positionValue(d.player[me], d.player[1 - me], o.rules, o.timing, p, rate, seed) >= -(VALUE_LOST / 2)) {
+                if (duelValue(d, me, o, p, rate, seed) >= -(VALUE_LOST / 2)) {
                     wins[id] = true;
                     if (!s.fireDepth) quiet[id] = true;
                 }
@@ -1197,7 +1843,7 @@ protected:
         if (p.x3WinBuild) {
             unsigned won = 0;
             for (int id = 0; id < PLACEMENTS; ++id)
-                if ((has >> id & 1) && (legal >> id & 1) && worst[id] && wonIdle[id] && (!p.x3WinCheck || outlasts(o, id, rate, seed, rival))) won |= 1u << id;
+                if ((has >> id & 1) && (legal >> id & 1) && worst[id] && wonIdle[id]) won |= 1u << id; // (no chain is fired: x3WinCheck has none to read)
             if (won) {
                 const int id = won & (won - 1) ? build(o, won, 0) : -1;
                 return kind = Win, id >= 0 ? id : std::countr_zero(won);
@@ -1211,7 +1857,9 @@ protected:
             unsigned winning = 0;
             for (int other = id + 1; other < PLACEMENTS; ++other)
                 if ((has >> other & 1) && (legal >> other & 1) && worst[other]) winning |= 1u << other;
-            return earlierWinFire(o, id, winning, rate, seed, rival);
+            if (!lv37PartEnabled(p.lv37EarlierWinFire, Lv37Part::EarlierWinFire)) return id;
+            const int earlier = earlierWinFire(o, id, winning, rate, seed, rival);
+            return recordLv37Part(o, "earlier_win_fire", id, earlier, o.self().incoming.total(), kind);
         }
         return -1;
     }
@@ -1250,10 +1898,13 @@ protected:
         // third column eleven high (tight) each of them closes the field once in six times, whatever
         // the one fall played out here did: that chance is counted as x3Close.
         bool tight = false, curve = false;
+        // What the surplus of an answer is counted from: what is above the opponent's field before it (aboveOther).
+        int aboveHim = 0;
     };
     AnswerBase answerBase(const Observation& o) const {
         AnswerBase a{p};
         a.strict.evKeyed = 0, a.strict.trialMaxAdd = 1;
+        a.aboveHim = aboveOther(o, o.me, p);
         if (p.evKeyed) buildValue(o.self().field, o.rules, o.timing, p, &a.mainKeyed);
         int own[W];
         o.self().field.heights(own);
@@ -1268,7 +1919,7 @@ protected:
         const DuelPlayer& mineAfter = d.player[me];
         if (mineAfter.phase == DuelPhase::Dead) return false;
         cost = mineAfter.fallen + mineAfter.incoming.total();
-        const int surplus = d.player[1 - me].incoming.total() - o.opponent().incoming.total();
+        const int surplus = d.player[1 - me].fallen + d.player[1 - me].incoming.total() - base.aboveHim;
         main = s.mainAfter;
         if (mineAfter.fallen > 0) // the garbage may have buried it
             buildValue(mineAfter.field, o.rules, o.timing, p.x3RowStrict && mineAfter.fallen >= W ? base.strict : p, &main);
@@ -1325,12 +1976,12 @@ protected:
     // queues that cancel it before preferring a surplus.
     unsigned fullOffsetChoices(const Observation& o, const Duel& afterChain, const BuildResult& b,
                                unsigned legal, unsigned ordinary, int arriving, int rate, int64_t surplusGoal,
-                               uint64_t seed) const {
+                                uint64_t seed) {
         const int me = o.me, him = 1 - me;
         const auto& after = afterChain.player[me];
         const auto& rival = afterChain.player[him];
         if (!p.readMidgame || p.x3Enough <= 100 || p.handWait || b.cut || b.told != p.queues() ||
-            o.opponent().phase != Phase::Wave || o.self().incoming.confirmed || o.opponent().incoming.total() ||
+            !chainShown(o.opponent()) || o.self().incoming.confirmed || o.opponent().incoming.total() ||
             o.self().scoring.allClear || o.opponent().scoring.allClear ||
             (o.self().phase != Phase::Control && (o.self().phase != Phase::Next || o.busyLeft[me])) ||
             afterChain.state != RoundState::Playing || after.fallen || after.incoming.confirmed != arriving ||
@@ -1367,11 +2018,20 @@ protected:
             const Duel d = playOut(o, mine, &first, theirs, nullptr, p, seed, true);
             const auto& own = d.player[me];
             const auto& foe = d.player[him];
+            const bool fromReady = p.lv38Midgame && lv38PartEnabled(p.lv38FullOffsetNext, Lv38Part::FullOffsetNext);
+            const auto readyAt = own.spawnFrame - (fromReady ? o.timing.nextFrames : 0);
             if (d.state != RoundState::Playing || own.moves != o.self().moves + 1 || own.phase != DuelPhase::Control ||
-                own.chain.chains || own.scoring.allClear || own.fallen || own.spawnFrame < 0 || own.spawnFrame >= confirm ||
+                own.chain.chains || own.scoring.allClear || own.fallen || own.spawnFrame < 0 ||
                 own.incoming.confirmed != arriving || own.incoming.pending ||
                 foe.chain.chains != rival.chain.chains || foe.spawnFrame != rival.spawnFrame) continue;
-            if (p.movesIn(confirm - own.spawnFrame, own.field.f.count(), handWait) < b.depth - 1) continue;
+            const auto readyBefore = [&](int64_t at) {
+                return at < confirm && p.movesIn(confirm - at, own.field.f.count(), handWait) >= b.depth - 1;
+            };
+#ifdef JURAIC_LV38_REPLAY_AUDIT
+            if (!readyBefore(own.spawnFrame) && readyBefore(own.spawnFrame - o.timing.nextFrames)) auditBranches |= AuditOffset;
+#endif
+            if (fromReady) traceLv38Part(Lv38Part::FullOffsetNext);
+            if (!readyBefore(readyAt)) continue;
             ready |= 1u << id;
         }
         return ready && !exchangeOutOfTime(75) ? enoughChoices(b, ready, surplusGoal) : ordinary;
@@ -1396,13 +2056,22 @@ protected:
         const Plan* clean = nullptr;
         int64_t cleanScore = 0;
         const auto checkHold = [&](int id) {
-            if (!clean) return id;
+            if (!clean || !lv37PartEnabled(p.lv37ProtectAnswer, Lv37Part::ProtectAnswer)) return id;
             const int safe = protectAnswer(o, id, legal, seed, *clean);
             if (safe != id) kind = Answer;
-            return safe;
+            return recordLv37Part(o, "protect_answer", id, safe, arriving, kind);
         };
         Rival answering; // (x3AnswerOutlast: the search of his field, made once)
         for (const auto* list : {&mine.plans, &mine.tactical}) for (const Plan& s : *list) {
+            if (list == &mine.tactical && !(legal >> s.id[0] & 1u)) {
+#ifdef JURAIC_LV38_REPLAY_AUDIT
+                auditBranches |= AuditLegal;
+#endif
+                if (p.lv38Midgame && lv38PartEnabled(p.lv38AnswerLegal, Lv38Part::AnswerLegal)) {
+                    traceLv38Part(Lv38Part::AnswerLegal);
+                    continue;
+                }
+            }
             const bool concrete = p.readMidgame && list == &mine.tactical && s.fireDepth > 1;
             const auto completed = [&](const Duel& replay) {
                 const auto& own = replay.player[me];
@@ -1439,16 +2108,19 @@ protected:
                 }
             }
             if (!lives) continue;
+            bool surplusTaken = false; // (the credit answerWorth gives the surplus is taken off once at most)
             if (p.readMidgame && cost == 0 && s.sent >= W && s.fireDepth == 1 && !s.allClear && knownCounter(o, s, seed)) {
                 // A surplus he demonstrably offsets cannot justify spending more of our field.
-                const int surplus = d.player[1 - me].incoming.total() - o.opponent().incoming.total();
+                const int surplus = d.player[1 - me].fallen + d.player[1 - me].incoming.total() - base.aboveHim;
                 score -= int64_t(p.x3Surplus) * std::max(0, surplus);
+                surplusTaken = true;
             }
-            if (p.x3AnswerOutlast && s.fireDepth && base.mainKeyed > 0 && !atLeastPercent(main, p.x3KeepMain, base.mainKeyed)) {
+            if (!surplusTaken && p.x3AnswerOutlast && s.fireDepth && base.mainKeyed > 0 && !atLeastPercent(main, p.x3KeepMain, base.mainKeyed)) {
                 // The main chain is spent on this answer. What it leaves above him is a gain only when he
                 // cannot answer it: else he fires second, with the chain he builds on while this one runs.
-                const int surplus = d.player[1 - me].incoming.total() - o.opponent().incoming.total();
-                if (surplus > 0 && !outlasts(o, s.id[0], rate, seed, answering)) score -= int64_t(p.x3Surplus) * surplus;
+                // (outlasts of this plan itself, not of the largest one with the same first placement)
+                const int surplus = d.player[1 - me].fallen + d.player[1 - me].incoming.total() - base.aboveHim;
+                if (surplus > 0 && !outlasts(o, s.id[0], rate, seed, answering, &s)) score -= int64_t(p.x3Surplus) * surplus;
             }
             if (p.checkKnownExchange && arriving >= W && s.fireDepth == 1 && s.count == 1 && !s.allClear &&
                 (legal >> s.id[0] & 1) && cost == 0 && (!clean || score > cleanScore)) clean = &s, cleanScore = score;
@@ -1499,10 +2171,14 @@ protected:
                 const int queues = p.queues();
                 const bool inTime = !p.x3ExtendCheck || (id >= 0 && b.sum[id] / queues >= int64_t(arriving) * rate);
                 if (id >= 0 && inTime) {
-                    if (p.checkKnownExchange && !clean && bestCost > 0 && !best->allClear && !fullOffsetRankChanged) {
+                    if (p.checkKnownExchange && !clean && bestCost > 0 && !best->allClear && !fullOffsetRankChanged &&
+                        lv37PartEnabled(p.lv37KnownPrefix, Lv37Part::KnownPrefix)) {
                         const auto expired = [&] { return exchangeOutOfTime(75); };
                         const int corrected = correctKnownPrefix(o, afterChain, b, legal, id, arriving, rate, seed, expired);
-                        if (corrected >= 0) return kind = AnswerBuild, checkHold(corrected);
+                        if (corrected >= 0) {
+                            recordLv37Part(o, "known_prefix", id, corrected, arriving, AnswerBuild);
+                            return kind = AnswerBuild, checkHold(corrected);
+                        }
                     }
                     return kind = AnswerBuild, checkHold(id);
                 }
@@ -1522,10 +2198,13 @@ protected:
         if (best) {
             const int held = best->allClear ? best->id[0] : checkHold(best->id[0]);
             // An Answer uses the requested orientation, even if the first pair is monochrome.
-            if (held == best->id[0] && bestCost == 0 && chainRuns && tapHold == 1 && !keepLow && !unsure13 && !unsure14) {
+            if (held == best->id[0] && bestCost == 0 && chainRuns && tailInput.canCompare() &&
+                lv37PartEnabled(p.lv37AnswerWindow, Lv37Part::AnswerWindow)) {
+                std::optional<PictureRoutes> routes;
+                tailInput.configure(routes);
                 const int alternative = answer_window::prefer(o, mine, theirs, *best, clean, afterChain, legal, arriving, p, seed,
-                    [&] { return exchangeOutOfTime(85); });
-                if (alternative >= 0) return kind = Answer, alternative;
+                    [&] { return exchangeOutOfTime(85); }, routes ? &*routes : nullptr);
+                if (alternative >= 0) return kind = Answer, recordLv37Part(o, "answer_window", held, alternative, arriving, kind);
             }
             return kind = Answer, held;
         }
@@ -1554,7 +2233,7 @@ protected:
                 if (!(places >> id & 1)) continue;
                 GameField next = after.field;
                 juraic::place(next, placement(id), mine.pair[1]);
-                if (next.f.hasClear()) return hold;
+                if (anyClear(next.f, o.rules)) return hold;
             }
         }
         const Duel firing = playOut(o, mine, &fire, theirs, nullptr, p, seed, true);
@@ -1611,7 +2290,7 @@ protected:
             detect(o.opponent().field, o.rules, o.timing, p.trialMaxAdd, trials);
             for (int i = 0; i < trials.count; ++i)
                 if (trials.item[i].chains >= o.rules.chainRequirement && trials.item[i].points > hisDirect)
-                    hisDirect = trials.item[i].points, hisFrames = trials.item[i].frames;
+                    hisDirect = trials.item[i].points, hisFrames = trials.item[i].frames + o.timing.landFrames + o.timing.nextFrames + 1; // (as a plan's endFrame - lockFrame: from the lock)
         }
         // Near a full field one mostly pokes; with anything that does not
         // break much of the main chain; and normally not when the opponent holds an answer of
@@ -1636,7 +2315,7 @@ protected:
             if (d.player[me].phase == DuelPhase::Dead) return false;
             const GameField& after = d.player[me].field;
             int64_t mineThen = s.mainAfter;
-            if (mine.knownCount > 1) mineThen = std::max(mineThen, meanBest(searchOn(o, after, movesUpTo(hisFrames, after.f.count(), handWait, p.beamDepth), seed)));
+            if (mine.knownCount > 1) mineThen = std::max(mineThen, meanBest(searchOn(o, after, movesUpTo(hisFrames, after.f.count(), handWait, p.depth()), seed)));
             return mineThen + int64_t(s.sent) * rate >= hisDirect;
         };
         // x3PokeNet: V after reply r of his without the poke. 1: X3 places nothing (as it places nothing
@@ -1648,11 +2327,11 @@ protected:
             if (v != INT32_MIN) return v;
             if (p.x3PokeNet == 1) {
                 const Duel d = playOut(o, mine, nullptr, theirs, reply(r), p, seed);
-                return v = positionValue(d.player[me], d.player[1 - me], o.rules, o.timing, p, rate, seed);
+                return v = duelValue(d, me, o, p, rate, seed);
             }
             for (const Plan& a : mine.plans) {
                 const Duel d = playOut(o, mine, &a, theirs, reply(r), p, seed);
-                const int w = positionValue(d.player[me], d.player[1 - me], o.rules, o.timing, p, rate, seed);
+                const int w = duelValue(d, me, o, p, rate, seed);
                 if (w > v) v = w;
             }
             return v;
@@ -1697,7 +2376,7 @@ protected:
             // reply does not count against the poke.
             const auto against = [&](const Params& q, int r, int& g) {
                 const Duel d = playOut(o, mine, &s, theirs, reply(r), q, seed);
-                const int v = positionValue(d.player[me], d.player[1 - me], o.rules, o.timing, p, rate, seed);
+                const int v = duelValue(d, me, o, p, rate, seed);
                 if (p.x3PokeNet == 3) {
                     // He gives up his main chain to fire at the poke, or the reading (in which X3 places
                     // nothing after the poke) ends lost: when X3, building on while his chain runs and
@@ -1729,6 +2408,7 @@ protected:
                 best = &s, bestGain = gain, bestDiscounted = covered > 0;
         }
         if (best && (legal >> best->id[0] & 1)) {
+            if (lv37PartLog) ++knownPokeCalls;
             const int hold = known_poke::prefer(o, legal, rate, seed, p, mine, theirs, *best, roomPairs(o.self().field),
                                               bestDiscounted, hisKeyed, [&] { return exchangeOutOfTime(75); });
             if (hold >= 0) return kind = Build, hold;
@@ -1749,8 +2429,8 @@ protected:
     // A chain of a later pair on the screen (pokeExchangeDepth) is built towards by the first placement of its plan.
     int exchangePoke(const Observation& o, unsigned legal, int rate, uint64_t seed) {
         const int me = o.me, him = 1 - me;
-        if (!p.pokeExchange || p.handWait != 0 || !theirs.pairCount || o.self().incoming.total() || o.opponent().incoming.total() ||
-            o.opponent().chain.chains || o.self().scoring.allClear || o.opponent().scoring.allClear || exchangeOutOfTime(75)) return -1;
+        if (!p.pokeExchange || !rivalBeamWhole || p.handWait != 0 || !theirs.pairCount || o.self().incoming.total() || o.opponent().incoming.total() ||
+            chainRunning(o, him) || o.self().scoring.allClear || o.opponent().scoring.allClear || exchangeOutOfTime(75)) return -1;
         ++exchangeCounts.asked;
         int mainKeyed = 0;
         buildValue(o.self().field, o.rules, o.timing, p, &mainKeyed);
@@ -1787,24 +2467,33 @@ protected:
         int hisKeyed = 0;
         buildValue(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
         // His main chain as he can fire it (points) and how long it runs: a trial drop, or a plan of his on the screen.
-        int64_t his = 0, hisFrames = 0;
+        int64_t his = 0, hisFrames = 0, hisEnd = -1; // (hisEnd: Plan::endFrame of his plan on the screen; -1: a trial drop)
         Trials trials;
         detect(o.opponent().field, o.rules, o.timing, p.trialMaxAdd, trials);
         for (int i = 0; i < trials.count; ++i)
             if (trials.item[i].chains >= o.rules.chainRequirement && trials.item[i].points > his)
-                his = trials.item[i].points, hisFrames = trials.item[i].frames;
+                his = trials.item[i].points, hisFrames = trials.item[i].frames + o.timing.landFrames + o.timing.nextFrames + 1, hisEnd = -1; // (as a plan's endFrame - lockFrame: from the lock)
         std::vector<const Plan*> keepers; // his plans that fire and keep his main chain
+        std::vector<const Plan*> partials;
         for (const auto* list : {&theirs.plans, &theirs.tactical})
             for (const Plan& x : *list) {
                 if (!x.fireDepth) continue;
-                if (int64_t(x.sent) * rate > his) his = int64_t(x.sent) * rate, hisFrames = x.endFrame - x.lockFrame;
+                if (int64_t(x.sent) * rate > his) his = int64_t(x.sent) * rate, hisFrames = x.endFrame - x.lockFrame, hisEnd = x.endFrame;
                 if (atLeastPercent(x.mainAfter, p.x3PokeKeep, hisKeyed)) keepers.push_back(&x);
+                else if (p.lv38Midgame && lv38PartEnabled(p.lv38PartialVeto, Lv38Part::PartialVeto) &&
+                         x.count == x.fireDepth && x.chains >= 1 && x.chains <= 4 && x.sent > 0)
+                    partials.push_back(&x);
             }
         const int waiting = o.opponent().incoming.total();
         const auto reaches = [&](const DuelPlayer& q) { return q.fallen + q.incoming.total() - waiting; };
+        KnownReplay replay;
+        replay.stop = [&] { return exchangeOutOfTime(75); };
+        const auto run = [&](const Plan* attack, const Plan* response) {
+            return playOut(o, mine, attack, theirs, response, p, seed, true);
+        };
         for (const Plan* s : chains) {
             if (exchangeOutOfTime(75)) return ++exchangeCounts.late, -1;
-            const Duel quiet = playOut(o, mine, s, theirs, nullptr, p, seed, true);
+            const Duel quiet = run(s, nullptr);
             const int lands = reaches(quiet.player[him]);
             const int64_t confirm = quiet.player[me].spawnFrame - o.timing.nextFrames;
             if (!pressureOwnIntact(o, *s, quiet) || lands < p.pokeExchangeMin || confirm < o.frame) {
@@ -1815,19 +2504,35 @@ protected:
             bool offset = false;
             for (const Plan* x : keepers) {
                 if (exchangeOutOfTime(75)) return ++exchangeCounts.late, -1;
-                const Duel d = playOut(o, mine, s, theirs, x, p, seed, true);
+                const Duel d = run(s, x);
                 const DuelPlayer& own = d.player[me];
                 if (reaches(d.player[him]) < p.pokeExchangeMin || own.fallen || own.incoming.total() || own.phase == DuelPhase::Dead) {
                     offset = true;
                     break;
                 }
             }
+            // The legacy exchange already accounts for the rival's main
+            // chain. A partial reply is an additional veto only when its
+            // actual result forces a loss, not because some garbage remains.
+            for (const Plan* x : partials) {
+                if (offset) break;
+                traceLv38Part(Lv38Part::PartialVeto);
+                if (exchangeOutOfTime(75)) return ++exchangeCounts.late, -1;
+                const Duel d = playOut(o, mine, s, theirs, x, p, seed, true, nullptr, &replay);
+                const DuelPlayer& own = d.player[me];
+                if (d.player[him].moves != o.opponent().moves + x->count || !d.player[him].chain.chains) continue;
+                if (own.phase != DuelPhase::Dead || !own.dropped || own.fallen != own.dropped ||
+                    (own.dropped % W && !o.nextGarbageOrder[me])) continue;
+                recordLv38Part(o, "partial_veto", s->id[0], -1, 0, Poke);
+                offset = true;
+                break;
+            }
             if (offset) {
                 ++exchangeCounts.smallReply;
                 continue;
             }
             // ... or one that stands on his field, fired by the pairs he places before the own chain is confirmed.
-            const int turns = 1 + p.movesIn(confirm - std::max(o.frame, before.player[him].spawnFrame), field.f.count(), 0);
+            const int turns = repliesUntil(o, before, confirm, field.f.count());
             const int erase = lands - p.pokeExchangeMin + 1;
             const int need = std::max(1, erase * o.rules.rateAt(confirm) - before.player[him].scoring.pool);
             const int keep = int(int64_t(standing.main) * p.x3PokeKeep / 100);
@@ -1838,21 +2543,25 @@ protected:
             }
             // (2) His main chain: the own main chain built on while it runs, fired second, with the garbage of this one.
             const GameField& after = quiet.player[me].field;
-            const int64_t spare = hisFrames - (s->endFrame - s->lockFrame);
-            const int moves = spare > 0 ? movesUpTo(spare, after.f.count(), handWait, p.beamDepth) : 0;
+            const int64_t spare = exchangeSpare(*s, hisFrames, hisEnd);
+            const int moves = spare > 0 ? movesUpTo(spare, after.f.count(), handWait, p.depth()) : 0;
             int64_t mineThen = s->mainAfter;
             if (his > 0) {
+                if (fallsFirst(*s, spare, his, rate)) {
+                    ++exchangeCounts.outdone;
+                    continue;
+                }
                 if (spare > 0 && mine.knownCount > s->count) {
                     if (moves > HORIZONS) {
                         ++exchangeCounts.outdone;
                         continue;
                     }
-                    const BuildResult b = searchOn(o, after, moves, seed, s->count);
-                    if (b.cut) {
+                    const BuildResult response = searchOn(o, after, moves, seed, s->count);
+                    if (response.cut) {
                         ++exchangeCounts.outdone;
                         continue;
                     }
-                    mineThen = std::max(mineThen, meanBest(b, moves));
+                    mineThen = std::max(mineThen, meanBest(response, moves));
                 }
                 const int64_t total = mineThen + int64_t(s->sent) * rate;
                 if (total * 100 < his * p.pokeExchangeMargin || (total - his) / rate < p.pokeExchangeLeft) {
@@ -1874,9 +2583,17 @@ protected:
         return -1;
     }
 
+    unsigned restrictBuildToShelter(int setup, unsigned choices, const MidgameShelter& shelter) const {
+        if (!(shelter.safe >> setup & 1u) ||
+            !lv38PartEnabled(p.lv38ShelterNarrow, Lv38Part::ShelterNarrow)) return choices;
+        if (choices & ~shelter.safe) traceLv38Part(Lv38Part::ShelterNarrow);
+        return choices & shelter.safe;
+    }
+
     // Build: the placement of the beam search, among those the rules below leave it - and, by rules that are switched
     // off, fire. `arriving`: the garbage pieces on their way (an answer was looked for and none lives).
-    int buildMove(const Observation& o, unsigned legal, int rate, uint64_t seed, int arriving, bool chainRuns) {
+    int buildMove(const Observation& o, unsigned legal, int rate, uint64_t seed, int arriving, bool chainRuns,
+                  unsigned* readyChoices = nullptr, bool quietRivalLanding = false) {
         // Near a full field the pairs to come cannot be waited for. The beam search counts on
         // them: its fixed queues bring every colour within two pairs, and a queue in which the
         // field closes costs nothing. (Seen: at 64 cells a chain of twelve could be fired with the
@@ -1966,9 +2683,16 @@ protected:
                     if ((answered >> id & 1) && worth[id] >= most - p.x3GuardSlack) guarded |= 1u << id;
             }
         }
-        const MidgameShelter shelter = p.readMidgame && arriving == 0
-            ? findMidgameShelter(o, mine, theirs, open, p, seed, [&] { return exchangeOutOfTime(70); }) : MidgameShelter{};
-        const BuildResult b = searchBuild(o, 0);
+        const MidgameShelter shelter = p.readMidgame && arriving == 0 && lv37PartEnabled(p.lv37Shelter, Lv37Part::Shelter)
+            ? findMidgameShelter(o, mine, theirs, open, p, seed, [&] { return exchangeOutOfTime(70); }, ahead) : MidgameShelter{};
+        const bool tailBuild = p.lv38Midgame && (p.lv38Plan5 > 0 || p.lv38HeadCut > 0) && !arriving && (!chainRuns || quietRivalLanding) &&
+            tailInput.supported();
+        int buildPercent = 100;
+        if (tailBuild && !p.handWait && !o.self().incoming.total() && !o.opponent().incoming.total() &&
+            lv38_tail::inWindow(o.self().field.f.normal().count() + 2, p.lv38CutFrom)) buildPercent = 95;
+        const bool cutQueues = tailBuild && p.lv38CutQueues > 0 && lv38_cut_build::quiet(o, p) &&
+            lv38_tail::inWindow(o.self().field.f.normal().count(), p.lv38CutFrom);
+        const BuildResult b = searchBuild(o, 0, buildPercent, false, cutQueues);
         if (p.x3FullPercent > 0 && arriving == 0) {
             // Fire: the field is full when the beam search finds little more than what can be fired now.
             const Plan* big = nullptr;
@@ -2003,19 +2727,22 @@ protected:
             const int safe = pickBuild(o, b, choices & shelter.safe, true);
             if (safe < 0) return id;
             guardedNow = true;
-            return safe;
+            return recordLv37Part(o, "shelter", id, safe, arriving, kind);
         };
         const auto pickSetup = [&](int id, unsigned choices) {
             const int sheltered = withShelter(id, choices);
             if (p.readMidgame && p.checkKnownExchange && id >= 0 && sheltered == id && !arriving && !b.cut && !guardedNow) {
                 const unsigned allowed = (shelter.safe >> id & 1) ? choices & shelter.safe : choices;
-                const int retained = preserveReadyBuild(o, mine, theirs, id, b.alive & allowed & ~shelter.buried, p, seed,
-                                                       [&] { return exchangeOutOfTime(75); });
-                if (retained != id) return retained;
-                if (!chainRuns && roomPairs(o.self().field) < mine.pairCount) {
+                if (lv37PartEnabled(p.lv37ReadyBuild, Lv37Part::ReadyBuild)) {
+                    const int retained = preserveReadyBuild(o, mine, theirs, id, b.alive & allowed & ~shelter.buried, p, seed,
+                                                           [&] { return exchangeOutOfTime(75); });
+                    if (retained != id) return recordLv37Part(o, "preserve_ready_build", id, retained, arriving, kind);
+                }
+                if (!chainRuns && roomPairs(o.self().field) < mine.pairCount &&
+                    lv37PartEnabled(p.lv37PartialBuild, Lv37Part::PartialBuild)) {
                     const int partial = preferKnownPartialBuild(o, mine, theirs, b, id, b.alive & allowed & ~shelter.buried,
                                                                 p, seed, rate, [&] { return exchangeOutOfTime(); });
-                    if (partial != id) return partial;
+                    if (partial != id) return recordLv37Part(o, "partial_build", id, partial, arriving, kind);
                 }
             }
             if (sheltered != id || id < 0 || !p.readMidgame || (p.setupSideNear <= 0 && p.setupSpeedNear <= 0) ||
@@ -2027,21 +2754,97 @@ protected:
             unsigned setup = quietSetupChoices(o, mine, b.alive & choices & ~shelter.buried);
             if (!(setup >> id & 1)) return id;
             const auto openSetup = [&](unsigned allowed) {
-                if (guardedNow || tapHold != 1 || keepLow || unsure13 || unsure14) return id;
-                return preferOpenSetup(o, mine, b, id, allowed, roomPairs(o.self().field), p, stop);
+                if (guardedNow || !tailInput.canCompare()) return id;
+                if (!lv37PartEnabled(p.lv37SetupSpeed, Lv37Part::SetupSpeed)) return id;
+                std::optional<PictureRoutes> routes;
+                tailInput.configure(routes);
+                const int selected = preferOpenSetup(o, mine, b, id, allowed, roomPairs(o.self().field), p, stop, routes ? &*routes : nullptr);
+                return recordLv37Part(o, "setup_speed", id, selected, arriving, kind);
             };
             if (o.opponent().incoming.total()) return openSetup(setup);
-            if (p.setupSideNear > 0 && o.self().field.f.count() >= 24) {
-                setup = preparationChoices(o, mine, theirs, b, id, setup, p, seed, stop);
+            if (p.setupSideNear > 0 && o.self().field.f.count() >= 24 &&
+                lv37PartEnabled(p.lv37Preparation, Lv37Part::Preparation)) {
+                setup = preparationChoices(o, mine, theirs, b, id, setup, p, seed, stop, ahead);
                 if (!setup || stop()) return id;
             }
             if (!(setup >> id & 1)) {
                 const int prepared = pickBuild(o, b, setup, true);
-                return prepared < 0 || stop() ? id : prepared;
+                return prepared < 0 || stop() ? id : recordLv37Part(o, "preparation", id, prepared, arriving, kind);
             }
-            const int chosen = pickFasterSetup(o, mine, b, id, setup, p, stop);
+            if (!lv37PartEnabled(p.lv37SetupSpeed, Lv37Part::SetupSpeed)) return id;
+            const int chosen = pickFasterSetup(o, mine, b, id, setup, p, stop, namedLv38Ex);
             if (chosen == id) return openSetup(setup);
-            return stop() ? id : keepSetupAnswer(o, mine, theirs, id, chosen, p, seed, stop);
+            const int kept = stop() ? id : keepSetupAnswer(o, mine, theirs, id, chosen, p, seed, stop);
+            return recordLv37Part(o, "setup_speed", id, kept, arriving, kind);
+        };
+        const auto rankTail = [&](int id, unsigned choices) {
+            if (!tailBuild || !lv38PartEnabled(p.lv38TailRank, Lv38Part::TailRank)) return id;
+            traceLv38Part(Lv38Part::TailRank);
+            if (tailInput.spare) {
+                const int cells = o.self().field.f.normal().count();
+                if (!lv38_tail::inWindow(cells, p.lv38CutFrom) && !lv38_tail::inWindow(cells + 2, p.lv38CutFrom)) return id;
+                choices = tailInput.reachable(o, choices & b.alive, [&] { return exchangeOutOfTime(); });
+                if (!(choices & (1u << id))) return id;
+            }
+            const bool timedSum = p.x3Soon > 0 && b.pointsBy[id][0] < p.beamEndPoints;
+            if (p.lv38CutAhead > 0 || p.lv38CutQueues > 0) {
+                lv38_cut_build::Note note;
+                const int picked = lv38_cut_build::prefer(o, mine, b, id, choices, p, timedSum,
+                                                          [&] { return exchangeOutOfTime(); }, note);
+                if (picked != id) {
+                    recordLv38Part(o, note.queues ? "cut_build_queues" : "cut_build_ahead", id, picked, arriving, Build);
+                    if (note.preserved) recordLv38Part(o, "cut_kept", id, picked, arriving, Build);
+                    if (cutRanks) cutRanks->push_back({o.frame, o.self().moves + 1, id, picked, note.depth,
+                                                      note.queues, note.preserved});
+                    return picked;
+                }
+            }
+            if (p.lv38Plan5 <= 0) return id;
+            countComponent(CountedComponent::TailRank);
+            const int ranked = lv38_tail_build::prefer(o, mine, b, id, choices, p, timedSum,
+                [&] { return exchangeOutOfTime(); }, lv38BuildNote);
+            recordLv38Part(o, "tail_rank", id, ranked, arriving, Build);
+            return ranked;
+        };
+        const auto finishBuild = [&](int id, unsigned choices) {
+            const int setup = pickSetup(id, choices);
+            if (!p.lv38Midgame || setup < 0 || arriving || guardedNow) return setup;
+            const unsigned beforeShelter = choices;
+            choices = restrictBuildToShelter(setup, choices, shelter);
+            const bool narrowed = choices != beforeShelter;
+            const auto finished = [&](int selected) {
+                if (narrowed) recordLv38Part(o, "shelter_narrow", setup, selected, arriving, Build);
+                return selected;
+            };
+            const unsigned safe = choices & ~shelter.buried;
+            if (chainRuns) {
+                if (quietRivalLanding && setup == id && !keepLow && !unsure13 && !unsure14) {
+                    const int ranked = rankTail(setup, safe);
+                    if (ranked != setup) return finished(ranked);
+                    if (readyChoices && !b.cut) *readyChoices = safe & b.alive;
+                }
+                return setup;
+            }
+            int threatened = setup;
+            if (lv38PartEnabled(p.lv38Threat, Lv38Part::Threat)) {
+                traceLv38Part(Lv38Part::Threat);
+                threatened = lv38_threat::prefer(o, mine, theirs, b, setup, safe, p, seed,
+                                                [&] { return exchangeOutOfTime(97); }, ahead);
+                recordLv38Part(o, "threat", setup, threatened, arriving, Build);
+            }
+            if (threatened != setup || setup != id || keepLow || unsure13 || unsure14) return finished(threatened);
+            int foundation = setup;
+            if (lv38PartEnabled(p.lv38Foundation, Lv38Part::Foundation)) {
+                traceLv38Part(Lv38Part::Foundation);
+                foundation = lv38_foundation::prefer(o, mine, theirs, b, setup, safe, p, seed,
+                                                     [&] { return exchangeOutOfTime(); });
+                recordLv38Part(o, "foundation", setup, foundation, arriving, Build);
+            }
+            if (foundation != setup) return finished(foundation);
+            const int ranked = rankTail(foundation, safe);
+            if (ranked != foundation) return finished(ranked);
+            if (readyChoices && !b.cut) *readyChoices = safe & b.alive;
+            return foundation;
         };
         if (p.x3BuildHold && arriving == 0) {
             // The beam search takes the placement below which it found the largest chain, and on a field that is
@@ -2058,12 +2861,12 @@ protected:
                     if (s.fireDepth == 1 && atLeastPercent(s.points, p.x3ChokeKeep, most)) fires |= 1u << s.id[0];
             if ((open & fires) && (open & ~fires)) {
                 const int unfired = pickBuild(o, b, open & ~fires, true);
-                if (unfired >= 0) return kind = Build, pickSetup(unfired, open & ~fires);
+                if (unfired >= 0) return kind = Build, finishBuild(unfired, open & ~fires);
             }
         }
         int id = pickBuild(o, b, open, true);
         if (id < 0 && open != legal) id = pickBuild(o, b, legal, true);
-        if (id >= 0) return kind = Build, pickSetup(id, open);
+        if (id >= 0) return kind = Build, finishBuild(id, open);
         return (legal >> mine.plans[0].id[0] & 1) || !legal ? mine.plans[0].id[0] : std::countr_zero(legal);
     }
 };

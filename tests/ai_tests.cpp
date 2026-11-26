@@ -11,6 +11,7 @@
 // "ai_tests bench" measures instead of testing; a number is the number of
 // high fields of test 3.
 #include "../ai/agents.h"
+#include "../play/realgame_read.h"
 #include "../ai/answer.h"
 #include "../ai/duel.h"
 #include "../ai/build.h"
@@ -36,6 +37,32 @@ using ai::Observation;
 
 static void check(bool ok, const std::string& message) {
     if (!ok) throw std::runtime_error(message);
+}
+
+#include "lv38_tail_tests.h"
+
+static void testLv38AnswerWindowBoundary() {
+    GameField field;
+    for (int y = 0; y < 3; ++y) field.f.set(0, y, 2);
+    const Rules rules;
+    const Timing timing = DEFAULT_TIMING;
+    const Pair pairs[] = {{4, 4}, {2, 4}};
+    ai::Params params;
+    params.beamWidth = 40;
+    params.beamDepth = 2;
+    params.beamQueues = 1;
+    constexpr int first = 5;
+    ai::BuildAnswerWindow window;
+    window.confirm = 100;
+    window.offsetPoints = 40;
+    window.returnPoints = 41;
+    window.nextSpawn[first] = window.confirm + timing.nextFrames - 1;
+    ai::Builder builder;
+    const auto before = builder.search(field, pairs, 2, rules, timing, params, 1, 1, &window);
+    ++window.nextSpawn[first];
+    const auto same = builder.search(field, pairs, 2, rules, timing, params, 1, 1, &window);
+    check(before.shortOffset[first] == 1 && !before.shortReturn[first] && !same.shortOffset[first],
+          "Lv38 counts the next fire after confirmation only when the quiet placement settled earlier");
 }
 
 // ---- 1. the observation ---------------------------------------------------------------
@@ -571,6 +598,349 @@ static void testDuelTall() {
     check(cases > 2000 && tableEarly > 200, "the test of tall fields is not exercising what the tables miss");
     std::cout << "duel on tall fields: " << cases << " moves lock in the frame of their buttons (" << searched << " ways searched); the tables alone are too early for "
               << tableEarly << " of them (by " << most << " frames at most), too late for " << tableLate << '\n';
+}
+
+// (f) With Rules::cancel (the rules of the records: game/timing.h recordedRules). Fields of garbage up to thirteen high,
+//     a random placement, player 0 alone moving.
+//     (A) The straight way of InputPlanner, the Duel with tallPaths: the lock and the next pair in the frames of the
+//         Round - the landing waited for after the lock shorter by restedFrames, as game/player.h has it.
+//     (B) The way over soonest (InputPlanner::fastest), the Duel told so as of the other seat (Observation::fastestRead
+//         FASTEST_BOUND) and putting the pair by the tables: its next pair never later than the Round's; without
+//         fastestRead, never sooner.
+//     (C) The same way, the Duel told so as of the own seat (FASTEST_OWN) and putting the pair by the buttons
+//         (tallPaths): its next pair never sooner than the Round's - the own seat is never read faster than it plays.
+static void testDuelCancel() {
+    Rng rng(20261124, 7);
+    Rules rules;
+    rules.cancel = true;
+    ai::InputPlanner straight, soonest;
+    soonest.fastest = true;
+    ai::InputPath path;
+    int cases = 0, faster = 0, plainLate = 0, earlyMost = 0, early = 0, tablesOff = 0, ownSame = 0, ownLate = 0, ownCases = 0;
+    for (int i = 0; i < 3000; ++i) {
+        for (int kind = 0; kind < 3; ++kind) {
+            Round r;
+            r.start(rules, uint64_t(i) * 3 + uint64_t(kind) + 1);
+            const Timing& t = r.timing;
+            Player& p = r.player[0];
+            for (int x = 0; x < W; ++x) addGarbage(p.field, x, x == DEATH_X ? int(rng.below(10)) : 1 + int(rng.below(11)));
+            PlayerEvents e[2];
+            const uint8_t none[2] = {0, 0};
+            while (!aboutToSpawn(p)) r.step(none, e);
+            const unsigned legal = legalPlacements(p.field);
+            int ids[PLACEMENTS], n = 0;
+            for (int id = 0; id < PLACEMENTS; ++id)
+                if (legal >> id & 1) ids[n++] = id;
+            if (!n) continue;
+            const Placement target = placement(ids[rng.below(uint64_t(n))]);
+            ai::InputPlanner& planner = kind ? soonest : straight;
+            if (!(kind ? planner.planSure(p.field, spawnPair(t), target, t, rules.speedPercent, path)
+                       : planner.plan(p.field, spawnPair(t), target, t, rules.speedPercent, path))) continue;
+            GameField closed = p.field;
+            place(closed, target, r.tsumo.pair(0));
+            if (closed.dead()) continue; // (no next pair; a piece left to fall is counted as the Round counts it)
+            const std::string at = " (case " + std::to_string(i) + (kind == 2 ? ", soonest way, own seat" : kind ? ", soonest way" : ", straight way") + ", " + describe(p.field, placementId(target)) + ")";
+            Observation o = ai::observe(r, 0);
+            const GameField start = p.field;
+            check(o.rules.cancel && o.timing == t, "the observation does not carry the rules of the records" + at);
+            Observation told = o;
+            told.fastestRead[0] = kind == 1 ? Observation::FASTEST_BOUND : kind == 2 ? Observation::FASTEST_OWN : 0;
+            ai::Duel d(told), plain(o);
+            d.tallPaths = kind == 1 ? 0 : 1;
+            for (int k = 0; k < 2; ++k) d.garbageRng[k] = plain.garbageRng[k] = r.garbageRng[k];
+            int frames = 0;
+            int64_t lockedAt = -1, roundNext = -1, duelNext = -1, plainNext = -1;
+            while (roundNext < 0 && frames < 5000) {
+                const uint8_t buttons[2] = {frames < path.frames() ? path.buttons[size_t(frames)] : uint8_t(0), 0};
+                r.step(buttons, e);
+                const int appeared = duelNext < 0 ? d.run(r.frame) : 0;
+                const int appearedPlain = plainNext < 0 ? plain.run(r.frame) : 0;
+                if (frames == 0) {
+                    check(e[0].spawned && (appeared & 1) && (appearedPlain & 1), "the pair did not appear" + at);
+                    d.placeFast(0, target, p.colors);
+                    plain.placeFast(0, target, p.colors);
+                } else {
+                    if (e[0].spawned) roundNext = r.frame - 1;
+                    if (appeared & 1) duelNext = r.frame - 1;
+                    if (appearedPlain & 1) plainNext = r.frame - 1;
+                }
+                if (e[0].locked) lockedAt = r.frame - 1;
+                ++frames;
+            }
+            check(roundNext >= 0 && lockedAt >= 0, "the move did not end" + at);
+            if (duelNext < 0) d.run(roundNext + 400), duelNext = d.player[0].spawnFrame;
+            if (plainNext < 0) plain.run(roundNext + 400), plainNext = plain.player[0].spawnFrame;
+            if (kind == 0) {
+                check(d.player[0].lockFrame == lockedAt, "lock in frame " + std::to_string(lockedAt) + ", duel " + std::to_string(d.player[0].lockFrame) + at);
+                check(duelNext == roundNext, "next pair in frame " + std::to_string(roundNext) + ", duel " + std::to_string(duelNext) + at);
+                tablesOff += plainNext != roundNext;
+            } else if (kind == 2) {
+                check(duelNext >= roundNext, "the duel told of the own seat has the next pair sooner than it is played: frame " +
+                                                 std::to_string(roundNext) + ", duel " + std::to_string(duelNext) + at);
+                ownSame += duelNext == roundNext, ownLate += duelNext > roundNext, ++ownCases;
+            } else {
+                if (duelNext > roundNext) {
+                    ai::FastestSearch bound;
+                    const int estimate = bound.estimate(start, spawnPair(t), target, t, rules.speedPercent);
+                    const int ends = ai::FastestSearch::ends(start, spawnPair(t), path.buttons, t, rules.speedPercent);
+                    std::cout << "  (lock " << lockedAt << ", buttons " << path.frames() << ", ends " << ends << ", estimate " << estimate
+                              << ", duel lock " << d.player[0].lockFrame << ", plain next " << plainNext << ")" << std::endl;
+                    PairControl q = spawnPair(t);
+                    for (int f = 0; f < path.frames(); ++f) {
+                        const int left = ai::FastestSearch::ends(start, q, std::vector<uint8_t>(path.buttons.begin() + f, path.buttons.end()), t, rules.speedPercent);
+                        std::cout << "   f" << f << " btn " << int(path.buttons[size_t(f)]) << " x" << int(q.x) << " y" << int(q.y) << " dir" << int(q.dir)
+                                  << " up" << int(q.upper) << " gnd" << int(q.grounded) << " gf" << int(q.groundFrames) << " own" << int(q.owned)
+                                  << " of" << int(q.ownFrames) << " qf" << int(q.quickFast) << " tw" << int(q.turnWait) << " gain" << int(q.gain)
+                                  << " | left " << left << " est " << bound.estimate(start, q, target, t, rules.speedPercent) << std::endl;
+                        stepPair(q, start, path.buttons[size_t(f)], t, rules.speedPercent);
+                    }
+                    std::cout << "   h: " << describe(start, placementId(target)) << std::endl;
+                }
+                check(duelNext <= roundNext, "the duel told of the soonest way has the next pair later: frame " + std::to_string(roundNext) +
+                                                 ", duel " + std::to_string(duelNext) + at);
+                check(plainNext >= duelNext, "the duel not told is sooner than the one told" + at);
+                faster += path.states > 0 && duelNext < plainNext;
+                plainLate += plainNext > roundNext;
+                const int gap = int(roundNext - duelNext);
+                early += gap > 0, earlyMost = std::max(earlyMost, gap);
+            }
+            ++cases;
+        }
+    }
+    check(cases > 4500 && ownCases > 1500, "the test with the cancel has too few cases");
+    std::cout << "duel with the cancel: " << cases << " moves; the straight way in the frames of the round (the tables alone off for "
+              << tablesOff << "); the soonest way: the duel not told is late for " << plainLate << ", told sooner than it for "
+              << faster << ", told sooner than the round for " << early << " (by " << earlyMost << " frames at most); the own seat: in the frame of the round "
+              << ownSame << " of " << ownCases << ", later " << ownLate << '\n';
+}
+
+// (f2) The rival read with FASTEST_BOUND (Rules::cancel). Player 0, the rival, on garbage up to eleven high, puts his
+//      first pair upright on three pieces of its axis's colour (it fires) or on garbage (it does not). The truth is the
+//      Round, his pair moved with the buttons of the straight way: the frame of its first wave up to his next pair, or none.
+//      - ai::rivalSeenCheck gives that frame when the straight way fires, never sooner than the bound, and -1 when it fires
+//        nothing;
+//      - lv38_threat::reactsInTime and X3Agent::pressureReplySeen count on seeing the chain only from that frame on, with
+//        the lead of the choice (ai::seenBeforeChoice: PlacementAgent::ahead, Params::seeLate).
+static void testRivalSeenCheck() {
+    using ai::lv38_threat::reactsInTime;
+    check(!reactsInTime(102, 100, 105) && reactsInTime(106, 100, 105) && reactsInTime(102, 100, 100) &&
+          reactsInTime(102, -1, -1) && !reactsInTime(102, 100, -1) && !reactsInTime(100, 100, 100) &&
+          !reactsInTime(102, 100, 100, 3, 0) && !reactsInTime(102, 100, 100, 1, 2) && reactsInTime(103, 100, 100, 3, 0),
+          "a second pair reacts to the rival's chain only after the straight way has shown it to its choice");
+    check(ai::seenBeforeChoice(100, 101, 1, 0) && !ai::seenBeforeChoice(100, 100, 1, 0) && !ai::seenBeforeChoice(100, 101, 2, 0) &&
+              !ai::seenBeforeChoice(100, 101, 1, 1) && ai::seenBeforeChoice(100, 104, 3, 1),
+          "a choice begun before its pair appears, or seeing late, sees only what showed before it");
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        using X3Agent::pressureReplyRevealed;
+        using X3Agent::pressureReplySeen;
+        void hold(const ai::PlanSet& own, const ai::PlanSet& rival) { mine = own, theirs = rival; }
+        int64_t lead() const { return std::max(0, ahead - 1) + std::max(0, p.seeLate); }
+    };
+    Rng rng(20261124, 11);
+    Rules rules;
+    rules.cancel = true;
+    const ai::Params p;
+    int firing = 0, quiet = 0, later = 0;
+    for (int i = 0; i < 3000; ++i) {
+        const bool fires = i % 2 == 0;
+        Round r;
+        r.start(rules, uint64_t(i) + 1);
+        Player& rival = r.player[0];
+        const Pair pair = r.tsumo.pair(0);
+        const int column = int(rng.below(W));
+        for (int x = 0; x < W; ++x)
+            addGarbage(rival.field, x, x == column ? int(rng.below(7)) : x == DEATH_X ? int(rng.below(10)) : 1 + int(rng.below(11)));
+        int h[W];
+        rival.field.heights(h);
+        if (fires)
+            for (int k = 0; k < 3; ++k) rival.field.f.set(column, h[column] + k, Cell(pair.axis));
+        PlayerEvents e[2];
+        const uint8_t none[2] = {0, 0};
+        while (!aboutToSpawn(rival)) r.step(none, e);
+        const int target = placementId(Placement{uint8_t(column), UP});
+        if (!(legalPlacements(rival.field) >> target & 1)) continue;
+        const ai::Observation o = ai::observe(r, 1);
+        ai::Observation bound = o;
+        bound.fastestRead[0] = ai::Observation::FASTEST_BOUND;
+        ai::PlanSet own, theirs;
+        own.who = 1;
+        theirs.who = 0;
+        theirs.pair[0] = pair;
+        theirs.pairCount = theirs.knownCount = 1;
+        ai::Plan move;
+        move.id[move.count++] = int8_t(target);
+        int64_t soonest = -1, plain = -1;
+        const ai::Duel exchange = ai::playOut(bound, own, nullptr, theirs, &move, p, 7, true, &soonest);
+        ai::playOut(o, own, nullptr, theirs, &move, p, 7, true, &plain);
+        if (soonest < 0 || plain < 0) continue;
+        // The truth: the Round, the rival's pair moved with the straight way's buttons, up to his next pair.
+        ai::InputPlanner planner;
+        ai::InputPath path;
+        if (!planner.plan(rival.field, spawnPair(r.timing), placement(target), r.timing, rules.speedPercent, path)) continue;
+        const std::string at = " (case " + std::to_string(i) + ", " + describe(rival.field, target) + ")";
+        int64_t wave = -1;
+        for (int frame = 0; frame < path.frames() + 200 && wave < 0; ++frame) {
+            const uint8_t buttons[2] = {frame < path.frames() ? path.buttons[size_t(frame)] : uint8_t(0), 0};
+            r.step(buttons, e);
+            if (e[0].waveStarted) wave = r.frame - 1;
+            if (frame > 0 && e[0].spawned) break;
+        }
+        check((wave >= 0) == fires, "the round fires as the field was built" + at);
+        const int64_t seen = ai::rivalSeenCheck(bound, own, nullptr, theirs, &move, p, 7, soonest);
+        check(ai::rivalSeenCheck(o, own, nullptr, theirs, &move, p, 7, plain) == plain,
+              "without FASTEST_BOUND the frame read is the frame seen" + at);
+        if (!fires) {
+            ++quiet;
+            check(seen == -1, "a placement the straight way fires nothing with is never seen: " + std::to_string(seen) + at);
+            continue;
+        }
+        ++firing;
+        check(plain == wave, "the straight reading checks in the frame of the round's first wave: " + std::to_string(plain) +
+                                 " / " + std::to_string(wave) + at);
+        check(soonest <= wave && seen == wave, "the bound is no later and the frame seen is the first wave: " + std::to_string(soonest) +
+                                                   " " + std::to_string(seen) + " / " + std::to_string(wave) + at);
+        if (wave <= soonest) continue;
+        ++later;
+        // The same placement as a reply that fires: the own next choice right after the bound's check, then after the wave.
+        Probe probe(p);
+        probe.hold(own, theirs);
+        ai::Plan reply = move, stay;
+        reply.fireDepth = 1;
+        check(exchange.player[0].chain.chains > 0, "the reading with the bound fires as well" + at);
+        ai::Duel next = exchange;
+        next.player[1].spawnFrame = soonest + 1 + probe.lead();
+        check(probe.pressureReplyRevealed(bound, next, reply, exchange, soonest) &&
+                  !probe.pressureReplySeen(bound, stay, next, reply, exchange, soonest, 7),
+              "a reply seen at the bound only is not taken as seen before the next choice" + at);
+        next.player[1].spawnFrame = wave + 1 + probe.lead();
+        check(probe.pressureReplySeen(bound, stay, next, reply, exchange, soonest, 7),
+              "a reply whose first wave comes before the next choice is seen" + at);
+    }
+    check(firing > 0 && quiet > 0 && later > 0, "too few cases: " + std::to_string(firing) + " firing, " + std::to_string(quiet) +
+                                                    " not, " + std::to_string(later) + " with the bound sooner");
+}
+
+// (g) The own seat read as it plays the way over soonest (Observation::FASTEST_OWN), with Rules::cancel, player 0 alone
+//     moving the buttons InputPlanner::planSure gives with fastest:
+//     - the frames FastestSearch::find says a way ends in are those FastestSearch::ends counts for its buttons;
+//     - the Duel's next pair never before the Round's, for placements that fire a chain (three pieces of the axis's
+//       colour under it), for the pair seen in mid-air (the Duel made from an observation some frames after it appeared,
+//       its rest of the way searched from there), and on fields with columns up to thirteen high;
+//     - with the states of the seat's own search within a frame given (Observation::fastestReadStates), never more found.
+static void testDuelOwnSeat() {
+    Rng rng(20261124, 9);
+    Rules rules;
+    rules.cancel = true;
+    ai::InputPlanner soonest;
+    soonest.fastest = true;
+    ai::InputPath path;
+    int cases = 0, fired = 0, inAir = 0, tall = 0, same = 0, later = 0, found = 0, few = 0, fewer = 0;
+    for (int i = 0; i < 4000; ++i) {
+        const int kind = i % 4; // 0: at the spawn, 1: a chain fired, 2: seen in mid-air, 3: the seat's own states few
+        Round r;
+        r.start(rules, uint64_t(i) + 1);
+        const Timing& t = r.timing;
+        Player& p = r.player[0];
+        const bool high = i % 8 >= 4;
+        for (int x = 0; x < W; ++x)
+            addGarbage(p.field, x, x == DEATH_X ? int(rng.below(9)) : int(rng.below(high ? 13 : 9)));
+        PlayerEvents e[2];
+        const uint8_t none[2] = {0, 0};
+        while (!aboutToSpawn(p)) r.step(none, e);
+        const unsigned legal = legalPlacements(p.field);
+        int ids[PLACEMENTS], n = 0;
+        for (int id = 0; id < PLACEMENTS; ++id)
+            if (legal >> id & 1) ids[n++] = id;
+        if (!n) continue;
+        const Placement target = placement(ids[rng.below(uint64_t(n))]);
+        const Pair colors = r.tsumo.pair(0);
+        if (kind == 1) {
+            // (three pieces of the axis's colour on the axis's column: the pair clears them with its axis)
+            int h[W];
+            p.field.heights(h);
+            if (h[target.x] + 3 > 10 || colors.axis == colors.child) continue;
+            for (int k = 0; k < 3; ++k) p.field.f.set(target.x, h[target.x] + k, colors.axis);
+            if (!(legalPlacements(p.field) >> placementId(target) & 1)) continue;
+        }
+        if (!soonest.planSure(p.field, spawnPair(t), target, t, rules.speedPercent, path)) continue;
+        GameField closed = p.field;
+        place(closed, target, colors);
+        if (closed.dead()) continue; // (a piece left to fall included)
+        const std::string at = " (case " + std::to_string(i) + ", kind " + std::to_string(kind) + ", " + describe(p.field, placementId(target)) + ")";
+        {
+            // (the frames a way found ends in, as FastestSearch counts them for its buttons)
+            ai::FastestSearch search;
+            std::vector<uint8_t> buttons;
+            int soft = 0, end = 0;
+            if (search.find(p.field, spawnPair(t), target, t, rules.speedPercent, 1000, buttons, soft, end)) {
+                check(end == ai::FastestSearch::ends(p.field, spawnPair(t), buttons, t, rules.speedPercent),
+                      "a way found ends in other frames than its buttons" + at);
+                ++found;
+            }
+        }
+        // Seen in mid-air: some frames of the way played first.
+        const int ahead = kind == 2 ? 1 + int(rng.below(uint64_t(std::max(1, std::min(6, path.frames() - 1))))) : 0;
+        int frames = 0;
+        if (ahead) {
+            for (; frames < ahead; ++frames) {
+                const uint8_t buttons[2] = {path.buttons[size_t(frames)], 0};
+                r.step(buttons, e);
+                if (e[0].locked) break;
+            }
+            if (p.phase != Phase::Control || p.pair.locked) continue;
+        }
+        Observation o = ai::observe(r, 0);
+        o.fastestRead[0] = Observation::FASTEST_OWN;
+        if (kind == 3) o.fastestReadStates[0] = 20;
+        if (ahead) {
+            // (the pair goes on with its buttons, as PlacementAgent::noteWay tells the reading)
+            const std::vector<uint8_t> rest(path.buttons.begin() + frames, path.buttons.end());
+            const int end = ai::FastestSearch::ends(p.field, p.pair, rest, t, rules.speedPercent);
+            if (end > 0) {
+                o.ownWayTarget = placementId(target), o.ownWayCheck = o.frame + end - 1, o.ownWayLock = o.frame + int64_t(rest.size()) - 1;
+                PairControl c = p.pair;
+                for (const uint8_t b : rest) o.ownWaySoft += stepPair(c, p.field, b, t, rules.speedPercent).dropBonus;
+            }
+        }
+        ai::Duel d(o);
+        d.tallPaths = 1;
+        for (int k = 0; k < 2; ++k) d.garbageRng[k] = r.garbageRng[k];
+        if (ahead) {
+            // (the rest of the straight way from where the pair is: the lock the Duel is given, as Gaze has it)
+            ai::InputPlanner straight;
+            ai::InputPath rest;
+            if (!straight.plan(p.field, p.pair, target, t, rules.speedPercent, rest)) continue;
+            PairControl q = p.pair;
+            for (const uint8_t b : rest.buttons) stepPair(q, p.field, b, t, rules.speedPercent);
+            d.place(0, target, colors, o.frame + rest.frames() - 1, rest.softDropRows, restedFrames(q, t));
+        }
+        int64_t roundNext = -1, duelNext = -1;
+        for (int step = 0; roundNext < 0 && step < 5000; ++step, ++frames) {
+            const uint8_t buttons[2] = {frames < path.frames() ? path.buttons[size_t(frames)] : uint8_t(0), 0};
+            r.step(buttons, e);
+            const int appeared = duelNext < 0 ? d.run(r.frame) : 0;
+            if (!ahead && step == 0) {
+                check(e[0].spawned && (appeared & 1), "the pair did not appear" + at);
+                d.placeFast(0, target, colors);
+            } else {
+                if (e[0].spawned) roundNext = r.frame - 1;
+                if (appeared & 1) duelNext = r.frame - 1;
+            }
+        }
+        check(roundNext >= 0, "the move did not end" + at);
+        if (duelNext < 0) d.run(roundNext + 400), duelNext = d.player[0].spawnFrame;
+        check(duelNext >= roundNext, "the own seat is read sooner than it plays: frame " + std::to_string(roundNext) + ", duel " +
+                                         std::to_string(duelNext) + at);
+        same += duelNext == roundNext, later += duelNext > roundNext;
+        if (kind == 3) ++few, fewer += duelNext > roundNext; // (with the seat's few states: later more often)
+        fired += kind == 1 && r.player[0].chain.chains > 0, inAir += kind == 2, tall += high;
+        ++cases;
+    }
+    check(cases > 2000 && inAir > 300 && found > 1000, "the test of the own seat has too few cases");
+    std::cout << "duel of the own seat with the cancel: " << cases << " moves (" << inAir << " seen in mid-air, " << tall
+              << " on tall fields, chains begun " << fired << "); in the frame of the round " << same << ", later " << later
+              << "; with few states later " << fewer << " of " << few << "; " << found << " ways found end as their buttons do\n";
 }
 
 // ---- 3. from a placement to buttons -----------------------------------------------------
@@ -1234,8 +1604,8 @@ static void testQuietPoke() {
     check(made.evFireHeight == 300 && made.x3PokeGain == 75 && made.xWildChance == 0 && made.xWildEvery == 2 && made.x3PokeNet == 0 && made.x3PokeFrom == 0 &&
               made.x3KeepMain == 85 && made.x3Crowd == 1000 && made.beamWidth == small.beamWidth,
           "quietPoke does not set its eight settings and leave the rest");
-    check(standard.x3PokeNet != made.x3PokeNet && standard.x3PokeFrom != made.x3PokeFrom && standard.x3KeepMain != made.x3KeepMain,
-          "the default judges a poke as the AI that hardly pokes does: x3q would be X3");
+    check(standard.x3PokeNet == 0 && made.x3PokeNet == 0 && standard.x3PokeFrom != made.x3PokeFrom && standard.x3KeepMain != made.x3KeepMain,
+          "the regular and quiet levels share the zero net setting and retain their distinct poke thresholds");
     const Rules rules;
     std::vector<uint8_t> buttons[2];
     for (int k = 0; k < 2; ++k) {
@@ -1339,7 +1709,43 @@ static void testLevelTable() {
           "only the selected level 37 uses the longer known prefix");
     check(ai::LEVELS == 36 && ai::levelOf("lv1") == 1 && ai::levelOf("lv9") == 9 && ai::levelOf("lv36") == 36 && ai::levelOf("lv1q") == 1 && ai::levelOf("lv12q") == 12 && ai::levelOf("lv36q") == 36,
           "the names of the levels are not read");
-    for (const char* name : {"lv", "lv0", "lv01", "lv38", "lv100", "lv1a", "x3", "x3q", "random", "", "LV1", "q", "lvq", "lv0q", "lv37q", "lv38q", "lv100q", "lv1qq"})
+    check(ai::levelOf("lv38") == 38 && ai::makeAgent("lv38") && ai::agentParams("lv38", standard).lv38Midgame == 1 &&
+          !ai::agentParams("lv37", standard).lv38Midgame && !ai::agentParams("lv36", standard).lv38Midgame &&
+          !standard.lv38Midgame && ai::LAST_LEVEL == 38, "Lv 38 の明示指定と画面の上限");
+    {
+        ai::Params off = standard;
+        off.lv38AnswerLegal = off.lv38WinRecheck = off.lv38FullOffsetNext = 0;
+        const auto lv38 = ai::agentParams("lv38", standard), lv38ex = ai::agentParams("lv38ex", standard), given = ai::agentParams("lv38", off);
+        check(lv38.lv38AnswerLegal == 1 && lv38.lv38WinRecheck == 1 && lv38ex.lv38AnswerLegal == 1 && lv38ex.lv38WinRecheck == 1 &&
+              lv38.lv38FullOffsetNext == 1 && lv38ex.lv38FullOffsetNext == 1 && given.lv38FullOffsetNext == 0 &&
+              given.lv38AnswerLegal == 0 && given.lv38WinRecheck == 0 && !ai::agentParams("lv37", standard).lv38Midgame,
+              "Lv 38 (lv38, lv38ex) checks every win it picks again and keeps the tactical answers to the placements the input reaches; a given 0 turns them off");
+    }
+    const auto development = ai::agentParams("lv38", standard);
+    check(standard.lv38Plan5 == -1 && development.lv38Plan5 == 1 && development.lv38FastInput &&
+          development.lv38TwoWave && development.lv38TwoWaveMainCover,
+          "Lv38 keeps its input and two-wave defence and resolves the tail setting");
+    ai::Params givenDefense = standard;
+    givenDefense.lv38TwoWaveNoMain = 0;
+    givenDefense.lv38ReadyCover = 1;
+    for (const char* name : {"lv38", "lv38ex"}) {
+        const auto defaults = ai::agentParams(name, standard);
+        const auto given = ai::agentParams(name, givenDefense);
+        check(defaults.lv38TwoWaveNoMain == 1 && defaults.lv38ReadyCover == 0 &&
+              given.lv38TwoWaveNoMain == 0 && given.lv38ReadyCover == 1,
+              "Named Lv38 defaults suppress main-chain substitutions and leave explicit defence settings intact");
+    }
+    auto explicitTail = standard;
+    explicitTail.lv38Plan5 = 1;
+    check(ai::agentParams("lv38", explicitTail).lv38Plan5 == 1 && !ai::agentParams("lv37", explicitTail).lv38Midgame,
+          "only explicit Lv38 uses the enabled tail setting");
+    explicitTail.lv38Plan5 = 0;
+    check(ai::agentParams("lv38", explicitTail).lv38Plan5 == 0,
+          "an explicit tail setting overrides the Lv38 default");
+    auto inherited = ai::agentParams("lv38", standard);
+    for (const char* name : {"lv36", "lv37", "x3", "x3q", "lv36q"})
+        check(!ai::agentParams(name, inherited).lv38Midgame, "Lv 38 から切り替えた後に中盤判断を引き継いでいます");
+    for (const char* name : {"lv", "lv0", "lv01", "lv39", "lv100", "lv1a", "x3", "x3q", "random", "", "LV1", "q", "lvq", "lv0q", "lv37q", "lv38q", "lv100q", "lv1qq"})
         check(!ai::levelOf(name), std::string("a level is read from the name ") + name);
     check(!ai::quietOf("x3") && ai::quietOf("x3q") && !ai::quietOf("lv12") && ai::quietOf("lv12q") && ai::quietOf("lv36q") && !ai::quietOf("random") && !ai::quietOf("q"), "which names are the AI that hardly pokes");
     const auto text = [](const ai::Params& p) {
@@ -1351,7 +1757,7 @@ static void testLevelTable() {
           "the top level is not X3 as it is");
     // (the two switches of the top level, which the levels below it play without: level.h)
     check(standard.x3Enough == 110 && standard.x3Guard == 10 && standard.x3GuardNear == 20 && standard.x3GuardMost == 50, "the top level does not play with x3Enough 110 and the guard 10, 20, 50");
-    check(text(ai::levelParams(standard, 0)) == text(standard) && text(ai::levelParams(standard, 38)) == text(standard), "a number that is no level changes the settings");
+    check(text(ai::levelParams(standard, 0)) == text(standard) && text(ai::levelParams(standard, 39)) == text(standard), "a number that is no level changes the settings");
     check(text(ai::agentParams("x3q", standard)) == text(ai::quietPoke(standard)) && text(ai::agentParams("lv36q", standard)) == text(ai::quietPoke(standard)),
           "agentParams does not give x3q the settings of quietPoke");
     // (either AI at every level: the level of the AI that hardly pokes is its eight settings and the fourteen of the level)
@@ -1870,7 +2276,7 @@ static void testQuickTrials() {
         ++fields;
         int h[W];
         g.heights(h);
-        for (int maxAdd = 1; maxAdd <= 4; ++maxAdd) {
+        for (int maxAdd = 0; maxAdd <= 4; ++maxAdd) {
             ai::Trials quick, plain, untimed;
             BitField afterQuick[W * MAX_COLORS], afterPlain[W * MAX_COLORS];
             ai::FirstWaves first;
@@ -2127,13 +2533,182 @@ static void testKnownExchange() {
     saving.read(sideways, 2);
     check(saving.protect(sideways, hold, saving.immediate(0)) == hold,
           "the next blue can still join a tall column from the side after a complete row");
+    // Other clear counts: whether the next pair can still fire after the row is judged by the clear count of the rules.
+    const auto protectWith = [&](int clearCount, const GameField& field) {
+        Rules other = rules;
+        other.clearCount = clearCount;
+        Round round = situation(other, field, GameField{}, Pair{1, 2});
+        round.player[0].incoming.confirmed = W;
+        const auto at = ai::observe(round, 0);
+        Probe probe(ai::levelParams(baseline, 37));
+        probe.read(at, 2);
+        const ai::Plan fire = probe.immediate(0);
+        return std::pair{probe.protect(at, hold, fire), int(fire.id[0])};
+    };
+    // Three: two reds on the floor fire with a third; over them two blues in the first column. After the row the
+    // next blue makes three with them from the side (a clear of three), never four.
+    GameField threes;
+    for (int x = 0; x < 2; ++x) threes.f.set(x, 0, 1);
+    for (int y = 1; y <= 2; ++y) threes.f.set(0, y, 2);
+    const auto [threeHeld, threeFire] = protectWith(3, threes);
+    check(threeFire != hold && threeHeld == hold, "a clear of three: the next blue can still fire three after a complete row");
+    // Five: four reds on the floor fire with a fifth; over them three blues in the first column. After the row the
+    // next blue makes four with them, which do not clear.
+    GameField fives;
+    for (int x = 0; x < 4; ++x) fives.f.set(x, 0, 1);
+    for (int y = 1; y <= 3; ++y) fives.f.set(0, y, 2);
+    const auto [fiveHeld, fiveFire] = protectWith(5, fives);
+    check(fiveFire != hold && fiveHeld == fiveFire, "a clear of five: four blues are no answer, the known offset is fired before the row");
+}
+
+// ai::duelValue: a round the Duel has ended counts as it ended, whatever the fields hold - a winner whose pair still
+// fills the third column of the twelfth row, waiting for its clear, has won.
+static void testDuelValue() {
+    const ai::Observation o;
+    const ai::Params p;
+    const int rate = o.rules.rateAt(0);
+    ai::Duel d(o, 0);
+    d.player[0].field.f.set(DEATH_X, DEATH_Y, Cell(1));
+    d.player[1].field.f.set(DEATH_X, DEATH_Y, Cell(2));
+    d.state = RoundState::Won0;
+    check(ai::positionValue(d.player[0], d.player[1], o.rules, o.timing, p, rate, 7) == 0 &&
+              ai::duelValue(d, 0, o, p, rate, 7) == -ai::VALUE_LOST && ai::duelValue(d, 1, o, p, rate, 7) == ai::VALUE_LOST,
+          "the seat whose opponent died first has won, although its own pair still fills the death cell");
+    d.state = RoundState::Won1;
+    check(ai::duelValue(d, 0, o, p, rate, 7) == ai::VALUE_LOST && ai::duelValue(d, 1, o, p, rate, 7) == -ai::VALUE_LOST,
+          "the seat that died first has lost");
+    d.state = RoundState::Draw;
+    check(ai::duelValue(d, 0, o, p, rate, 7) == 0 && ai::duelValue(d, 1, o, p, rate, 7) == 0, "both dead in one frame: a draw");
+    d.state = RoundState::Playing;
+    d.player[1].field = GameField{};
+    check(ai::duelValue(d, 0, o, p, rate, 7) == ai::positionValue(d.player[0], d.player[1], o.rules, o.timing, p, rate, 7),
+          "a round still played is valued as before");
+}
+
+// X3Agent::offsetsIn: the reply disproves an immediate fire when it leaves none of it above him - both playing on,
+// garbage of his on the own field or not - or when he wins; not when he is left with some of it, nor in a draw, nor
+// when his reply was not played.
+static void testOffsetsIn() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::offsetsIn;
+    };
+    for (int me = 0; me < 2; ++me) {
+        ai::Observation o;
+        o.me = me;
+        o.player[me].moves = 10;
+        o.player[1 - me].moves = 20;
+        ai::Plan reply;
+        reply.id[reply.count++] = 0;
+        reply.fireDepth = 1;
+        reply.chains = 6;
+        ai::Duel d(o, 0);
+        ai::DuelPlayer& a = d.player[me];
+        ai::DuelPlayer& b = d.player[1 - me];
+        a.moves = 11, a.phase = ai::DuelPhase::Control, a.chain.chains = 5;
+        b.moves = 21, b.phase = ai::DuelPhase::Control, b.chain.chains = 6;
+        const std::string at = " (seat " + std::to_string(me) + ")";
+        check(Probe::offsetsIn(o, d, reply), "a full offset with both playing on" + at);
+        a.fallen = 6;
+        check(Probe::offsetsIn(o, d, reply), "a full offset that sends garbage onto the own field" + at);
+        ai::Duel won = d;
+        won.state = me ? RoundState::Won0 : RoundState::Won1;
+        won.player[me].phase = ai::DuelPhase::Dead;
+        check(Probe::offsetsIn(o, won, reply), "his reply wins" + at);
+        ai::Duel drawn = won;
+        drawn.state = RoundState::Draw;
+        drawn.player[1 - me].phase = ai::DuelPhase::Dead;
+        check(!Probe::offsetsIn(o, drawn, reply), "a draw is no offset" + at);
+        ai::Duel left = d;
+        left.player[1 - me].incoming.confirmed = 3;
+        check(!Probe::offsetsIn(o, left, reply), "some of the fire left above him" + at);
+        ai::Duel unplayed = won;
+        unplayed.player[1 - me].moves = 20;
+        check(!Probe::offsetsIn(o, unplayed, reply), "his reply was not played" + at);
+    }
+}
+
+// X3Agent::refutation and keepsWin, the recheck of a win against the replies the midgame beam adds: the clock stopping
+// before the last reply leaves the reading Unfinished, not None; a candidate taken again after a refuted one stands only
+// on a complete reading, the first one as before unless a reply offsets it.
+static void testWinRecheckUnfinished() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        using X3Agent::Refutation;
+        using X3Agent::refutation;
+        using X3Agent::keepsWin;
+        using X3Agent::withBeam;
+        void replies(int n) { theirs.tactical.assign(size_t(n), ai::Plan{}); }
+    };
+    using Refutation = Probe::Refutation;
+    Probe probe{ai::Params{}};
+    probe.replies(3); // (none of them a chain of five or more: none offsets the fire)
+    const ai::Observation o;
+    ai::Plan fire;
+    fire.id[fire.count++] = 0;
+    fire.fireDepth = 1, fire.chains = 6, fire.sent = 30;
+    int asked = 0;
+    const auto stopAtThird = [&] { return ++asked >= 3; };
+    check(probe.refutation(o, fire, 0, 7, [] { return false; }) == Refutation::None, "every reply read, none offsets the fire");
+    check(probe.refutation(o, fire, 0, 7, stopAtThird) == Refutation::Unfinished && asked == 3,
+          "the clock stopping before the last reply leaves the reading unfinished");
+    check(probe.refutation(o, fire, 3, 7, [] { return true; }) == Refutation::None, "no reply left to read");
+    check(Probe::keepsWin(Refutation::None, false) && Probe::keepsWin(Refutation::None, true) &&
+              !Probe::keepsWin(Refutation::Found, false) && !Probe::keepsWin(Refutation::Found, true) &&
+              Probe::keepsWin(Refutation::Unfinished, false) && !Probe::keepsWin(Refutation::Unfinished, true),
+          "a candidate taken again stands only when every reply was read");
+    check(Probe::withBeam(Refutation::None, false) == Refutation::Unfinished && Probe::withBeam(Refutation::None, true) == Refutation::None &&
+              Probe::withBeam(Refutation::Found, false) == Refutation::Found &&
+              !Probe::keepsWin(Probe::withBeam(Refutation::None, false), true),
+          "no reply refuting it among replies the midgame beam made in part is no complete reading");
+}
+
+// MidgameBeam::extend tells whether it made every layer: false when the clock stops it, true when there is nothing to
+// make or it went to its end.
+static void testBeamCut() {
+    const ai::Observation o;
+    const ai::Params p;
+    ai::PlanSet set;
+    set.knownCount = 3;
+    check(ai::MidgameBeam::extend(o, p, 7, set, [] { return true; }), "no exhaustive plans: nothing to make, complete");
+    set.pairCount = 1;
+    check(!ai::MidgameBeam::extend(o, p, 7, set, [] { return true; }), "the clock stopping the beam: not complete");
+}
+
+// ai::chainRunning on the observation of a Round: a single clear by player 0 runs while its wave is played; from the end
+// of the chain to the next lock Player::chain keeps its wave, and the chain counts as over.
+static void testChainRunning() {
+    Rules rules;
+    Round r;
+    r.start(rules, 5);
+    Player& p = r.player[0];
+    const Pair pair = r.tsumo.pair(0);
+    for (int x = 0; x < 3; ++x) p.field.f.set(x, 0, Cell(pair.axis));
+    PlayerEvents e[2];
+    const uint8_t none[2] = {0, 0};
+    while (!aboutToSpawn(p)) r.step(none, e);
+    const Placement target{3, UP};
+    ai::InputPlanner planner;
+    ai::InputPath path;
+    check(planner.plan(p.field, spawnPair(r.timing), target, r.timing, rules.speedPercent, path), "no way to the fourth column");
+    bool wave = false, overInHand = false;
+    for (int frame = 0; frame < 2000 && !overInHand && r.state == RoundState::Playing; ++frame) {
+        const uint8_t buttons[2] = {frame < path.frames() ? path.buttons[size_t(frame)] : uint8_t(0), 0};
+        r.step(buttons, e);
+        const auto o = ai::observe(r, 1);
+        check(ai::chainRunning(o, 0) == (p.phase == Phase::Wave),
+              "the chain runs exactly while its wave is played (frame " + std::to_string(frame) + ")");
+        wave |= p.phase == Phase::Wave;
+        overInHand = wave && p.phase == Phase::Control && p.chain.chains > 0;
+    }
+    check(wave && overInHand, "the next pair is in hand with the wave of the chain that is over");
 }
 
 static void testExchangePoke() {
     struct Probe : ai::X3Agent {
         using X3Agent::X3Agent;
 
-        int exchange(const ai::Observation& o, unsigned legal, uint64_t seed, bool expired = false) {
+        int exchange(const ai::Observation& o, unsigned legal, uint64_t seed, bool expired = false, bool whole = true) {
+            rivalBeamWhole = whole;
             gaze.plans(o, o.me, true, p.x2Depth, p, seed, mine);
             gaze.plans(o, 1 - o.me, false, p.x2Depth, p, seed, theirs);
             ai::MidgameBeam::extend(o, p, seed, mine, [] { return false; });
@@ -2191,9 +2766,25 @@ static void testExchangePoke() {
 
     constexpr uint64_t seed = 8551104070121336641ull + 25;
     constexpr unsigned route = 1u << 3;
+    Probe unfinished(p);
+    check(unfinished.exchange(o, route, seed, false, false) < 0 && !unfinished.exchangeNote.chosen,
+          "do not take an exchange poke from an unfinished rival search");
     Probe safe(p);
     check(safe.exchange(o, route, seed) == 3 && safe.exchangeNote.chosen && safe.exchangeNote.depth == 1,
           "the side chain is fired when the exchange leaves enough for the main chain");
+    // The rival in hand with the waves of a chain that is over (Player::chain until his next lock): the same choice.
+    auto stale = o;
+    stale.player[0].chain.chains = 1;
+    Probe after(p);
+    check(!ai::chainRunning(stale, 0) && after.exchange(stale, route, seed) == 3 && after.exchangeNote.chosen &&
+              after.exchangeNote.depth == 1,
+          "the waves of a chain that is over neither stop nor change the exchange poke");
+    auto running = o;
+    running.player[0].phase = Phase::Wave;
+    running.player[0].wait = 10;
+    running.player[0].chain.chains = 1;
+    Probe waits(p);
+    check(ai::chainRunning(running, 0) && waits.exchange(running, route, seed) < 0, "a chain still running stops the exchange poke");
 
     auto mirror = o;
     mirror.player[0] = mirror.player[1];
@@ -2449,6 +3040,44 @@ static void testOutlast() {
             last = holds;
         }
     }
+    // The points he carries when he next holds a pair: the four of colour 3 that are clearing make 40 points, no
+    // garbage at a rate of 70, and those 40 points count in his answer with what he carried before. x3OutlastScale 0
+    // leaves the carried points alone in the answer, which is divided here by a rate of the test's choosing. (He has
+    // the one pair he holds when the own chain is confirmed; two more of colour 4 stand on his first column, so that
+    // pair clears four: carried points count in an answer only when a chain is fired.)
+    {
+        struct CarryProbe : OutlastProbe {
+            using OutlastProbe::OutlastProbe;
+            int reply(const ai::Observation& o, int id, int rate) {
+                gaze.plans(o, o.me, true, p.x2Depth, p, 7, mine);
+                gaze.plans(o, 1 - o.me, false, p.x2Depth, p, 7, theirs);
+                Rival rival;
+                int garbage = -1;
+                outlasts(o, id, rate, 7, rival, nullptr, &garbage);
+                return garbage;
+            }
+        };
+        Rules slow = rules;
+        slow.targetPoints = 70;
+        for (int i = 0; i < slow.marginSteps; ++i) slow.marginRates[size_t(i)] = 70;
+        ai::Params carried = settled;
+        carried.x3OutlastScale = 0;
+        GameField answering = his;
+        answering.f.set(0, 0, 4), answering.f.set(0, 1, 4);
+        const auto replyAt = [&](int before, int rate) {
+            Round t = situation(slow, mine, answering, pair);
+            t.player[1].phase = Phase::Land, t.player[1].wait = 3;
+            t.player[1].scoring.pool = before;
+            const ai::Observation at = ai::observe(t, 0);
+            CarryProbe e(carried);
+            e.startRound(0, 7);
+            return e.reply(at, fire, rate);
+        };
+        check(replyAt(0, 40) == 1, "40 points of his running chain, carried: one garbage piece of answer at a rate of 40");
+        check(replyAt(0, 41) == 0, "40 points of his running chain, carried: none at a rate of 41");
+        check(replyAt(29, 69) == 1, "29 points carried before and 40 of his running chain: one garbage piece at a rate of 69");
+        check(replyAt(29, 70) == 0, "29 points carried before and 40 of his running chain: none at a rate of 70");
+    }
     std::cout << "the opponent's answer: his field is taken as it stands when he next holds a pair\n";
 }
 
@@ -2516,6 +3145,44 @@ struct ThinkProbe : ai::PlacementAgent {
         return id;
     }
 };
+// A choice on a thread of its own reads the ways of the own seat from what was taken of them on the thread of frame()
+// as it began (PlacementAgent::wayRead), never from the members: here the members say the straight ways and what is
+// taken says the ways over soonest, and the choice reads the latter whatever the order of the two threads.
+struct WayProbe : ThinkProbe {
+    std::atomic<int> read{-1};                    // Observation::fastestRead of the own seat in the first choice
+    mutable std::atomic<int> taken{0};            // the times the ways were taken
+    mutable std::atomic<bool> takenElsewhere{false}; // ... on another thread than the one the probe was made on
+    const std::thread::id home = std::this_thread::get_id();
+    WayRead wayRead() const override {
+        WayRead way = ai::PlacementAgent::wayRead();
+        way.fastest = true, way.states = 600;
+        ++taken;
+        if (std::this_thread::get_id() != home) takenElsewhere = true;
+        return way;
+    }
+    int choose(const Observation& o, Pair pair, unsigned legal) override {
+        int none = -1;
+        read.compare_exchange_strong(none, int(o.fastestRead[o.me]));
+        return ThinkProbe::choose(o, pair, legal);
+    }
+};
+static void testThinkingWayRead() {
+    const Rules rules;
+    WayProbe a;
+    a.ahead = 12, a.thinking = ai::Thinking::Free, a.fastestWays = false;
+    Round r;
+    r.start(rules, 3);
+    a.startRound(0, 5);
+    PlayerEvents e[2];
+    for (int f = 0; f < 200 && a.taken == 0; ++f) {
+        const uint8_t b[2] = {a.frame(ai::observe(r, 0)), 0};
+        r.step(b, e);
+    }
+    a.wait();
+    check(a.taken > 0 && !a.takenElsewhere && a.read == int(Observation::FASTEST_OWN),
+          "a choice on its own thread read the ways from the members, not from what was taken of them as it began (read " +
+              std::to_string(a.read) + ", taken " + std::to_string(a.taken) + (a.takenElsewhere ? ", on another thread" : "") + ")");
+}
 static void testThinking() {
     const Rules rules;
     // The second player does nothing. Twelve frames ahead is the whole pause before a pair.
@@ -4188,7 +4855,85 @@ static void testAnswer() {
     check(ai::answerChance(r, 41, 0, 3, &withRed, 1, rules) == 0, "an attack larger than any chain of the field: no answer");
     check(ai::answerChance(r, 40, 1, 3, &withRed, 1, rules) == 0, "a main chain to be kept that the answer does not leave: no answer");
     check(ai::answerChance(r, 40, 0, 0, &withRed, 1, rules) == 0, "no pair placed in time: no answer");
+    // Two colours each of which makes an answer: the chance that either has enough, not the larger of the two.
+    ai::Replies two;
+    two.count = 2;
+    two.item[0] = {40, 0, 3, 0, 1, 0};
+    two.item[1] = {40, 0, 3, 1, 2, 0};
+    check(ai::answerChance(two, 40, 0, 3, nullptr, 0, rules) == 333984, "three red or three blue among six unseen pieces: 1,368 times of 4,096, "
+          + std::to_string(ai::answerChance(two, 40, 0, 3, nullptr, 0, rules)));
+    two.item[0].added = 1;
+    two.item[1].added = 2;
+    check(ai::answerChance(two, 40, 0, 2, nullptr, 0, rules) == 812500, "one red or two blue among four unseen pieces: 208 times of 256, "
+          + std::to_string(ai::answerChance(two, 40, 0, 2, nullptr, 0, rules)));
+    two.count = 3;
+    two.item[0].added = 2;
+    two.item[2] = {40, 0, 2, 2, 3, 0};
+    check(ai::answerChance(two, 40, 0, 2, nullptr, 0, rules) == 714844, "two red, two blue or two green among four unseen pieces: 183 times of 256, "
+          + std::to_string(ai::answerChance(two, 40, 0, 2, nullptr, 0, rules)));
+    // The colours in play are those of the palette, whatever their codes: four of them with codes 1, 2, 3 and 5
+    // (as the real game's rounds have them) give the chance of four with codes 1 to 4.
+    Rules gapped;
+    gapped.palette = {1, 2, 3, 5, 4};
+    ai::Replies apart;
+    apart.count = 2;
+    apart.item[0] = {40, 0, 3, 0, 1, 0};
+    apart.item[1] = {40, 0, 3, 1, 2, 0};
+    const int64_t inOrder = ai::answerChance(apart, 40, 0, 3, nullptr, 0, rules);
+    apart.item[0].color = 2, apart.item[1].color = 5;
+    const int64_t withGap = ai::answerChance(apart, 40, 0, 3, nullptr, 0, gapped);
+    check(inOrder == 333984 && withGap == 333984, "three of colour 2 or three of colour 5 among six unseen pieces of colours 1, 2, 3 and 5: "
+          "1,368 times of 4,096, " + std::to_string(inOrder) + " and " + std::to_string(withGap));
     check(ai::largestAnswer(r, 0) == 40 && ai::largestAnswer(r, 1) == 0, "the largest answer, and the largest that leaves a main chain");
+}
+
+// The coloured pieces a plan clears (Plan::used): a piece left in the 14th row is not cleared.
+static void testUsedRow14() {
+    // Column 1 twelve high, column 2 eleven high (no piece of the one touches one of the same colour in the other),
+    // three red pieces on the floor of column 5.
+    GameField mine;
+    for (int y = 0; y < 12; ++y) mine.f.set(0, y, Cell(1 + y % 2));
+    for (int y = 0; y < 11; ++y) mine.f.set(1, y, Cell(3 + y % 2));
+    for (int y = 0; y < 3; ++y) mine.f.set(4, y, 1);
+    const Pair reds{1, 1};
+    const int high = placementId({0, UP}), low = placementId({4, UP});
+    GameField put = mine;
+    juraic::place(put, placement(high), reds);
+    check(!mine.f.hasClear() && (legalPlacements(mine) >> high & 1) && put.row14[0] == 1 && !put.f.hasClear(),
+          "the test field is not what the test expects: a pair stood on the twelve-high column leaves its child in the 14th row");
+    check(ai::colouredPieces(mine) == 12 + 11 + 3 && ai::colouredPieces(put) == ai::colouredPieces(mine) + 2 &&
+          put.f.count() - put.f.garbage().count() == ai::colouredPieces(mine) + 1,
+          "the coloured pieces of a field count the one in the 14th row");
+    Rules rules;
+    rules.targetPoints = 10;
+    for (int i = 0; i < rules.marginSteps; ++i) rules.marginRates[size_t(i)] = 10;
+    const Round r = situation(rules, mine, GameField{}, reds);
+    const ai::Observation o = ai::observe(r, 0);
+    const ai::Params p;
+    ai::Gaze gaze;
+    ai::PlanSet one, two;
+    gaze.plans(o, 0, true, 1, p, 7, one);
+    bool stood = false, fired = false;
+    for (const ai::Plan& s : one.plans) {
+        if (s.count == 1 && s.id[0] == high && !s.fireDepth) {
+            stood = true;
+            check(s.used == 0, "a pair that clears nothing and leaves its child in the 14th row has used " + std::to_string(s.used) + " pieces, not 0");
+        }
+        if (s.count == 1 && s.id[0] == low && s.fireDepth == 1) {
+            fired = true;
+            check(s.used == 5, "five red pieces cleared on the floor: " + std::to_string(s.used) + " used, not 5");
+        }
+    }
+    check(stood && fired, "the plans of one pair hold the pair stood on the high column and the five reds cleared");
+    gaze.plans(o, 0, true, 2, p, 7, two);
+    int later = 0;
+    for (const ai::Plan& s : two.plans) {
+        if (s.count != 2 || s.id[0] != high || s.fireDepth != 2 || s.sent < W) continue;
+        ++later;
+        check(s.used == 5, "the pair stood on the high column, then five reds cleared: " + std::to_string(s.used) + " used, not 5");
+    }
+    check(later > 0, "the plans of two pairs hold the pair stood on the high column, then five reds cleared");
+    std::cout << "the pieces a plan clears: a child left in the 14th row is not one of them\n";
 }
 
 static void testSetupSpeed() {
@@ -4537,6 +5282,98 @@ static void testSmallReceive() {
         o.player[0].incoming.confirmed = garbage;
         check(probe.decide(o, legal) == 6, "regular Lv37 chooses the quiet answer safe for each garbage drop");
     }
+}
+
+// The small take of the provisional Lv38 (Params::lv38TakeSmall): the pieces of a drop beyond whole rows may fall on
+// any column, the third too, unless the order of the drop is seen.
+static void testLv38TakeSmallNoDeath() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        int take(const ai::Observation& o, int ordinary, unsigned legal) {
+            gaze.plans(o, o.me, true, 1, p, 7, mine);
+            return smallTake(o, ordinary, legal, true).best.id;
+        }
+    };
+    // A chain of five that a pair of colour 1 on the sixth column fires; the third column nine high.
+    static const char* const rows[] = {"..Y...", "..R...", "..Y...", "..R...", "..Y...", ".RGBY.", "RGBYR.", "RGBYR.", "RGBYR."};
+    ai::Observation o;
+    o.ownTsumo = true;
+    o.tsumo.pairs = {{1, 1}, {2, 3}, {4, 2}};
+    o.tsumo1.pairs = {{2, 3}, {4, 2}};
+    o.player[0].phase = o.player[1].phase = Phase::Next;
+    o.player[0].wait = 1;
+    o.player[1].wait = 150;
+    o.player[0].field = fieldOf(rows, int(std::size(rows)));
+    o.player[0].incoming.confirmed = 1;
+    const GameField field = o.self().field;
+    int heights[W];
+    field.heights(heights);
+    check(heights[DEATH_X] == 9, "small take fixture: the third column is nine high");
+    const unsigned legal = legalPlacements(field);
+    int ordinary = -1, tall = -1;
+    for (int id = 0; id < PLACEMENTS; ++id) {
+        if (!(legal >> id & 1)) continue;
+        GameField f = field;
+        place(f, placement(id), Pair{1, 1});
+        int h[W];
+        f.heights(h);
+        ai::Trial chain;
+        ai::runTrialChain(f.f, o.rules, o.timing, chain, false);
+        if (chain.chains >= 5 && ordinary < 0) ordinary = id;
+        if (h[DEATH_X] == 11 && !chain.chains) tall = id;
+    }
+    check(ordinary >= 0 && tall >= 0, "small take fixture: a chain of five and a vertical pair on the third column");
+    if (ordinary < 0 || tall < 0) return;
+    const unsigned choices = (1u << ordinary) | (1u << tall);
+    const ai::Params params = ai::agentParams("lv38ex", {});
+    check(params.lv38TakeSmall == 1, "the explicit lv38ex takes small attacks");
+    for (uint64_t seed = 1; seed <= 12; ++seed) {
+        Probe probe(params);
+        probe.startRound(0, seed);
+        check(probe.take(o, ordinary, choices) != tall,
+              "a small take that leaves the third column eleven high is taken while the drop columns are unknown (seed " + std::to_string(seed) + ")");
+    }
+    o.nextGarbageOrder[0] = std::array<uint8_t, W>{0, 1, 2, 3, 4, 5};
+    Probe first(params);
+    first.startRound(0, 1);
+    check(first.take(o, ordinary, choices) == tall, "the same small take is not kept when the piece is seen to fall on the first column");
+    o.nextGarbageOrder[0] = std::array<uint8_t, W>{2, 0, 1, 3, 4, 5};
+    Probe third(params);
+    third.startRound(0, 1);
+    check(third.take(o, ordinary, choices) != tall, "the same small take is kept when the piece is seen to fall on the third column");
+}
+
+// secondOffsets (x3Crush): a chain standing on his field is counted from the lock of the crush, as Plan::endFrame.
+static void testStandingSpare() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::standingSpare;
+    };
+    ai::Plan crush;
+    crush.lockFrame = 1000, crush.endFrame = 1200;
+    // (180 frames of waves end 20 frames before the own next pair, counted without the landing and the next pair)
+    const int64_t spare = Probe::standingSpare(crush, 180, TM);
+    check(spare == 180 + TM.landFrames + TM.nextFrames + 1 - 200,
+          "a chain standing on his field is not counted as a plan's endFrame - lockFrame (" + std::to_string(spare) + ")");
+    check(spare > 0, "his standing chain that ends after the own next pair appears is read as ending before it");
+}
+
+// exchangePoke (2): the frames to build on while his main chain runs, and what falls before the own main chain fires.
+static void testExchangeSpare() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::exchangeSpare;
+        using X3Agent::fallsFirst;
+    };
+    ai::Plan poke;
+    poke.lockFrame = 1000, poke.endFrame = 1200, poke.sent = 6;
+    // His plan on the screen: 250 frames from its lock at 900 to 1150, 50 frames before the own next pair.
+    check(Probe::exchangeSpare(poke, 250, 1150) == -50, "a plan of his on the screen is counted from the lock of the poke, not from its own");
+    // A trial drop of 250 frames, taken to lock with the poke.
+    check(Probe::exchangeSpare(poke, 250, -1) == 50, "a trial drop is not taken to lock with the poke");
+    const int rate = 70;
+    check(Probe::fallsFirst(poke, -50, (6 + W) * rate, rate), "a row beyond the poke that falls before the own next pair is not refused");
+    check(Probe::fallsFirst(poke, 0, (6 + W) * rate, rate), "a chain of his that ends as the own next pair appears is read as ending after it");
+    check(!Probe::fallsFirst(poke, -50, (6 + W - 1) * rate, rate), "less than a row beyond the poke is refused");
+    check(!Probe::fallsFirst(poke, 1, (6 + W) * rate, rate), "a chain of his that ends after the own next pair appears is refused");
 }
 
 static void testPressureFollowUp() {
@@ -5209,7 +6046,7 @@ static void testKnownPokeHandoff() {
     check(select(true, live) < 0, "an all-clear bonus retains the existing poke judgement");
     own.scoring.allClear = false;
     o.rules.cancel = true;
-    check(select(true, live) < 0, "cancel rules retain the existing poke judgement");
+    check(select(true, live) == 9, "cancel rules keep the known-pair poke judgement (the Ex levels read it as well)");
     o.rules.cancel = false;
     a.knownCount = 1;
     check(select(true, live) < 0, "an unseen offset pair cannot replace the poke");
@@ -5428,6 +6265,46 @@ static void testSmallReplyExchange() {
     check(ask([] { return false; }, 797) == -1, "an incoming main uses regular offset selection");
 }
 
+static void testVisiblePressureBeforeFire() {
+    Observation o;
+    o.ownTsumo = true;
+    o.rules.cancel = false;
+    o.tsumo.pairs = {{1, 2}, {4, 4}};
+    o.tsumo1.pairs = {{3, 3}, {3, 3}};
+    auto& self = o.player[0];
+    self.phase = Phase::Next;
+    self.wait = 1;
+    auto& enemy = o.player[1];
+    enemy.phase = Phase::Next;
+    enemy.wait = 1;
+    stairs(enemy.field, 0, 3);
+    enemy.field.f.set(5, 0, 4); // Prevent an all-clear from hiding the ordinary pressure.
+
+    constexpr uint64_t seed = 8551104070121336641ull + 25;
+    const auto p = ai::levelParams({}, 38);
+    ai::Gaze gaze;
+    ai::PlanSet ours, theirs;
+    gaze.plans(o, 0, true, 2, p, seed, ours);
+    gaze.plans(o, 1, false, 2, p, seed, theirs);
+    const auto pressure = ai::lv38_threat::threats(theirs);
+    check(pressure[0] && pressure[0]->count == 1, "相手が発火する前に手の組から2段以上の潰しを見つける");
+    const auto replay = ai::playOut(o, ours, nullptr, theirs, pressure[0], p, seed, true);
+    check(replay.player[1].moves == enemy.moves + 1 && replay.player[0].incoming.total() >= 2 * W,
+          "可視の潰しが実際の配置で2段以上届く");
+    auto onePair = theirs;
+    onePair.knownCount = 1;
+    const auto withoutNext = ai::lv38_threat::threats(onePair);
+    check(!withoutNext[2] && !withoutNext[3], "未表示の2手目から潰しを作らない");
+
+    using ai::lv38_threat::Outcome;
+    const int main = 34000, rate = 70;
+    const Outcome buried{20000, 28000, 14, 0, true};
+    const Outcome secondary{31000, 28000, 0, 2, true};
+    const Outcome forcedMain{1000, 28000, 0, 35, true};
+    check(buried.crushed(main, rate) && forcedMain.crushed(main, rate) && secondary.holds(main, rate) &&
+          secondary.margin(rate) > buried.margin(rate), "副砲で本線を残せる交換を潰される手と区別する");
+}
+
 static void testSetupKeepsVisibleAnswer() {
     using namespace juraic;
     ai::Observation o;
@@ -5571,6 +6448,35 @@ static void testOpenSetup() {
     };
     check(run(o) == 9, "the quiet reverse must strictly extend visible conditional coverage");
 
+    for (bool ex : {false, true}) {
+        auto picture = o;
+        picture.rules.cancel = ex;
+        const int held[2]{};
+        ai::PictureRoutes routes(2, held, true, true, false);
+        const auto usual = ai::setup_room::quietLanding(picture, mine.pair[0], 20, routes.first, true);
+        const auto other = ai::setup_room::quietLanding(picture, mine.pair[0], 9, routes.first, true);
+        const int id = ai::preferOpenSetup(picture, mine, b, 20, both, 2, lv37, [] { return false; }, &routes);
+        std::cout << "held open setup: cancel " << ex << ", selected " << id << ", locks "
+                  << (usual ? usual->frames : -1) << "/" << (other ? other->frames : -1) << "\n";
+        check(id == 20 || (id == 9 && usual && other && usual->frames == other->frames &&
+                           usual->check == other->check && usual->soft == other->soft), "held setup preserves lock, check and drop points");
+        check(ai::preferOpenSetup(picture,mine,b,20,both,2,lv37,[] { return true; },&routes) == 20,
+              "a held setup past its deadline retains the original move");
+    }
+    for (bool ex : {false, true}) {
+        auto picture = o;
+        picture.timing = play::realgame::realGameTiming();
+        picture.rules.cancel = ex;
+        picture.rules.preInput = true;
+        auto& own = picture.player[picture.me];
+        own.buttons = own.sideQueued = BTN_RIGHT;
+        own.sideAge = own.turnAge = 0;
+        const int held[2]{};
+        ai::PictureRoutes routes(2, held, true, true, false);
+        const int selected=ai::preferOpenSetup(picture,mine,b,20,both,2,lv37,[] {return false;},&routes);
+        check(selected == 9, "the held picture setup must select the better reachable orientation with a queued right tap");
+        std::cout << "held picture setup changed 20 -> " << selected << ", cancel " << ex << "\n";
+    }
     auto changed = o;
     changed.tsumo.pairs.pop_back();
     check(run(changed) == 20, "two pairs cannot prove the four-pair branches");
@@ -5785,7 +6691,7 @@ static void testKnownPartialBuild() {
     check(stable(mono, 5) && !stable(mono, 10), "a running chain blocks equivalent input only within its known interval");
 }
 
-static void testKnownAnswerWindow() {
+static void testKnownAnswerWindow(int pictureWait = 0, bool cancel = false) {
     const auto parse = [](const char* cells) {
         GameField field;
         for (int y = ROW_14; y >= 0; --y) for (int x = 0; x < W; ++x) {
@@ -5813,6 +6719,11 @@ static void testKnownAnswerWindow() {
     rival.scoring = {605, 45, false};
     rival.field = parse("000000000000000000000001200002242203343303342302114211122441333222242433224312441122");
 
+    if (pictureWait) {
+        o.timing = play::realgame::realGameTiming();
+        o.rules.cancel = cancel;
+        rival.wait = pictureWait;
+    }
     const auto params = ai::levelParams(ai::Params{}, 37);
     ai::Gaze gaze;
     ai::PlanSet ours, theirs;
@@ -5834,6 +6745,31 @@ static void testKnownAnswerWindow() {
         return ai::answer_window::prefer(view,ours,theirs,answer,&immediate,confirmed,legalPlacements(view.self().field),8,profile,1,stop);
     };
     const auto deadlineOpen = [] { return false; };
+    if (pictureWait) {
+        const int held[2]{};
+        ai::PictureRoutes routes(2,held,true,true,false);
+        const int picked = ai::answer_window::prefer(o,ours,theirs,ordinary,&immediate,confirmed,
+            legalPlacements(o.self().field),8,params,1,deadlineOpen,&routes);
+        std::cout << "held picture answer " << int(ordinary.id[0]) << " -> " << picked << ", cancel " << cancel << "\n";
+        check(picked == 20, "the held picture answer must choose the proven alternative before the chain lands");
+        return;
+    }
+    for (bool ex : {false, true}) {
+        auto picture = o;
+        picture.rules.cancel = ex;
+        ai::Duel visible(picture,1);
+        ai::toPairOf(visible,1,picture.frame+6000);
+        const int held[2]{};
+        ai::PictureRoutes routes(2, held, true, true, false);
+        const auto legal = legalPlacements(picture.self().field);
+        const int selected = ai::answer_window::prefer(picture,ours,theirs,ordinary,&immediate,visible,legal,8,params,1,deadlineOpen,&routes);
+        std::cout << "held answer window: cancel " << ex << ", selected " << selected << "\n";
+        check(selected < 0 || (selected == 20 && ai::picturePlacementInput(routes.first,picture.self().field,
+              spawnPair(picture.timing),placement(selected),picture.timing,picture.rules.speedPercent).frames > 0),
+              "held answer must qualify on the actual input path");
+        check(ai::answer_window::prefer(picture,ours,theirs,ordinary,&immediate,visible,legal,8,params,1,[] { return true; },&routes)<0,
+              "a held answer past its deadline retains the ordinary answer");
+    }
     check(ask(o,ordinary,params,deadlineOpen) == 20, "the first answer keeps both an early full offset and a visible main");
     check(ask(o,prepared,params,deadlineOpen) < 0, "the existing first placement with both answers is kept");
     auto onlyOne = o;
@@ -6011,6 +6947,14 @@ static void testSideResponse() {
     };
     side_response::Ready ready;
     check(choose(o, p, 1, ready) == 11 && ready.next == 8, "A short, visible full offset keeps the main chain");
+    {
+        // The other seat's chain as the memory reader shows it: landing, with the waves of the chain still to come.
+        Observation landing = o;
+        landing.player[1].phase = Phase::Land;
+        side_response::Ready shown;
+        check(chainShown(landing.player[1]) && choose(landing, p, 1, shown) == 11 && shown.next == 8,
+              "A chain shown landing is answered as one shown in its wave");
+    }
     Duel after(o, seed);
     toPairOf(after, 1, o.frame + 1000);
     PlanSet ours, rival;
@@ -6063,9 +7007,87 @@ static void testSideResponse() {
     check(choose(o, agentParams("x3", {}), 1, stopped) == 1, "Keep the Ex choice");
 }
 
+#include "agent_air_tests.h"
+
+#include "fastest_read_tests.h"
+
+#include "judgement_tests.h"
+#include "r4_board_tests.h"
+#include "r6_tests.h"
+
+// Mark the rival as prefetched without a pending job: takeRival must fail independently of machine speed.
+static void testMissedRivalNote() {
+    struct Probe : ai::X3Agent {
+        using X3Agent::X3Agent;
+        void miss(const Observation& o) {
+            noting = true;
+            beginChoice(o, true);
+            gaze.plans(o, 1 - o.me, false, 1, p, 7, theirs);
+            Rival rival;
+            prepareRival(o, 7, rival, o.frame + 60);
+            rival.prefetched = true;
+            ai::Plan attack;
+            attack.count = attack.fireDepth = 1;
+            attack.sent = 12;
+            attack.endFrame = o.frame + 60;
+            outlasts(o, 0, o.rules.rateAt(o.frame), 7, rival, &attack);
+            check(rivalMissed == 1 && poor && notes.size() == 1 && notes.back().cut == 1,
+                  "a missed rival search must be recorded on this choice");
+        }
+        bool restore(const Observation& o) { beginChoice(o, true); return poor; }
+    };
+    ai::Params p;
+    p.thinkBudget = 30;
+    p.checkKnownExchange = 0;
+    const auto o = ai::observe(situation(Rules{}, {}, {}, {1, 2}), 0);
+    Probe timed(p);
+    timed.startRound(0, 7);
+    timed.miss(o);
+    p.thinkBudget = 0;
+    Probe replay(p);
+    replay.startRound(0, 7);
+    replay.script = &timed.notes;
+    check(replay.restore(o), "a recorded miss must preserve the first choice on replay");
+}
+
+static void testR4Changes() {
+    testR4BoardCases();
+    testMissedRivalNote();
+    testDuelOwnSeatBeforeAppears();
+    testChosenInAirReach();
+    testExchangePoke();
+    testSetupSpeed();
+    testSmallReceive();
+    testLv38TakeSmallNoDeath();
+    std::cout << "round 4 regression tests passed\n";
+}
+
+
 int main(int argc, char** argv) {
     std::cout << std::unitbuf; // (every line out at once: a run that is stopped still tells how far it came)
     try {
+        if (argc == 2 && std::string(argv[1]) == "picture37") {
+            testLv38TakeSmallNoDeath();
+            const auto raw = ai::agentParams("lv38ex", {});
+            auto explicitOff = ai::namedDefaults("lv38ex");
+            explicitOff.lv38TakeSmall = 0;
+            check(raw.lv38TakeSmall == 1 && raw.lv38CutAhead == 2 &&
+                  ai::configuredParams("lv38ex", explicitOff).lv38TakeSmall == 0, "named defaults and explicit options");
+            testKnownAnswerWindow();
+            testKnownAnswerWindow(86, false);
+            testKnownAnswerWindow(86, true);
+            testOpenSetup();
+            std::cout << "picture37 checks passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "r4") {
+            testR4Changes();
+            return 0;
+        }
+        if (argc >= 2 && argc <= 3 && std::string(argv[1]) == "r6") {
+            testR6Changes(argc == 3 ? std::string(argv[2]) : std::string());
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "bench") {
             if (argc > 2 && std::string(argv[2]) == "build") {
                 // further arguments: name=value lines for ai/params.h
@@ -6081,11 +7103,24 @@ int main(int argc, char** argv) {
             benchDuel();
             return 0;
         }
+        testR4BoardCases();
+        testMissedRivalNote();
+        testR6Changes();
         testObserve();
         testDuel();
         testDuelSameFrame();
         testDuelOrder();
         testDuelTall();
+        testDuelCancel();
+        testRivalSeenCheck();
+        testDuelOwnSeat();
+        testDuelWildWait();
+        testDuelOwnWay();
+        testDuelTablesCancel();
+        testDuelSplitSoonest();
+        testFastestEndKept();
+        testSpawnInputCacheSame();
+        testDuelOwnSeatBeforeAppears();
         testTallSpawnInputCache();
         testInputStraight();
         testInputHigh(argc > 1 ? std::atoi(argv[1]) : 2000);
@@ -6099,6 +7134,11 @@ int main(int argc, char** argv) {
         testLevelTable();
         testKnownSearchPairs();
         testKnownExchange();
+        testDuelValue();
+        testOffsetsIn();
+        testChainRunning();
+        testWinRecheckUnfinished();
+        testBeamCut();
         testExchangePoke();
         testMidgamePressure();
         testMidgameBeam();
@@ -6107,11 +7147,16 @@ int main(int argc, char** argv) {
         testKnownMainReturn();
         testMidgameShelter();
         testSetupSpeed();
+        testLv38Tail();
+        testLv38AnswerWindowBoundary();
         testGazeDeadline();
         testEquivalentSetupRoute();
         testMidgameAttackRetention();
         testMidgamePreparation();
         testSmallReceive();
+        testLv38TakeSmallNoDeath();
+        testStandingSpare();
+        testExchangeSpare();
         testMidgameDig();
         testLevels();
         testBase();
@@ -6119,8 +7164,14 @@ int main(int argc, char** argv) {
         testKeys();
         testQuickTrials();
         testOutlast();
+        testJudgement();
         testSearchBy();
         testThinking();
+        testAskInAirWay();
+        testAskInAirReach();
+        testChosenInAirReach();
+        testNearestWayOverSoonest();
+        testThinkingWayRead();
         testSecondChoice();
         testSearchThreads();
         testBudget();
@@ -6129,6 +7180,7 @@ int main(int argc, char** argv) {
         testSoonKeep();
         testEnough();
         testAnswer();
+        testUsedRow14();
         testTactics();
         testSplitMainAttack();
         testWinImmediateFire();
@@ -6140,12 +7192,15 @@ int main(int argc, char** argv) {
         testSideResponse();
         testCommittedAnswerExchange();
         testKnownAnswerWindow();
+        testKnownAnswerWindow(86, false);
+        testKnownAnswerWindow(86, true);
         testKnownPartialBuild();
         testOpenSetup();
         testPokeAgainstStoredAllClear();
         testSetupKeepsVisibleAnswer();
         testSmallReplyExchange();
         testRunningChainOffsetRetention();
+        testVisiblePressureBeforeFire();
         std::cout << "ai tests passed\n";
         return 0;
     } catch (const std::exception& e) {

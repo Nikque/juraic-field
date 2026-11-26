@@ -51,6 +51,7 @@ int surviveBonus(const Observation& o, unsigned legal, uint64_t seed, const Para
     const int64_t initialSpawn = o.frame + o.self().wait - 1;
 
     Observation fromRival = o;
+    if (fromRival.ownAirSeat < 0) fromRival.ownAirSeat = o.me;
     fromRival.me = him;
     std::vector<Plan> lethal;
     Plan reply;
@@ -114,7 +115,7 @@ int prefer(const Observation& o, unsigned legal, int rate, uint64_t seed, const 
     bool expired = false;
     const auto stop = [&] { return expired = expired || outOfTime(); };
     if (!p.readMidgame || !p.checkKnownExchange || p.handWait || p.x3PokeNet != 3 || p.x3PokeRead || p.x3PokeUnanswered ||
-        o.rules.cancel || o.self().phase != Phase::Next || o.self().wait <= 0 || own.midAir || o.busyLeft[o.me] ||
+        o.self().phase != Phase::Next || o.self().wait <= 0 || own.midAir || o.busyLeft[o.me] ||
         own.knownCount < 2 || own.knownCount > 4 || o.self().incoming.total() || o.opponent().incoming.total() ||
         enemy.midAir != (o.opponent().phase == Phase::Control) || (enemy.midAir && o.opponent().pair.locked) ||
         o.self().scoring.allClear || !known(original, own) ||

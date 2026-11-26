@@ -3,6 +3,7 @@
 // (by the virtual key codes of play/keys.h), the clipboard, choosing a file, the folder of the program. And the
 // two formatting functions of the C library of Windows the game uses, for the C library of the system.
 #include <SDL3/SDL.h>
+#include "game_files.h"
 #include "keyboard.h"
 #include "raster.h"
 #include "settings.h"
@@ -53,36 +54,37 @@ inline std::filesystem::path programFolder() {
 // and music: both the folder of the program, except in an application bundle of macOS, whose Resources cannot be
 // written to (nor be next to the folders a person puts files in): there ~/Library/Application Support/JuraicField,
 // with the folders for one's own pictures and music made when they are not there.
-inline void programFolders(std::filesystem::path& data, std::filesystem::path& user) {
+inline void programFolders(std::filesystem::path& data, std::filesystem::path& user,
+                           std::optional<LegacyGameFiles>& legacy) {
+    legacy.reset();
     data = user = programFolder();
 #ifdef __ANDROID__
     // Android: the files that come with the game are assets of the APK, below "game" with their list game/files.txt; they are
-    // copied into the own folder of the app on the first start (and when the list is another: a new version). The
+    // copied into the own folder of the app on the first start (and when the list is another: a new version, or other
+    // contents - the list has a digest of them). The
     // settings, the replays and one's own pictures and music are in the folder of the app that a file manager or a PC
     // on USB can reach (Android/data/<the app>/files), else in the own folder.
-    data = programFolder() / "game";
+    const auto original = programFolder() / "game";
+    const auto cache = original / "packaged";
     std::error_code ignored;
     size_t listSize = 0;
     if (void* list = SDL_LoadFile("game/files.txt", &listSize)) {
         const std::string wanted(static_cast<const char*>(list), listSize);
         SDL_free(list);
-        std::ifstream had(data / "files.txt", std::ios::binary);
-        const std::string have((std::istreambuf_iterator<char>(had)), std::istreambuf_iterator<char>());
-        if (have != wanted) {
-            std::istringstream lines(wanted);
-            for (std::string line; std::getline(lines, line);) {
-                const size_t space = line.rfind(' ');
-                if (line.rfind("version ", 0) == 0 || space == std::string::npos) continue;
-                const std::string name = line.substr(0, space);
-                size_t size = 0;
-                void* bytes = SDL_LoadFile(("game/" + name).c_str(), &size);
-                if (!bytes) continue;
-                std::filesystem::create_directories((data / name).parent_path(), ignored);
-                std::ofstream(data / name, std::ios::binary).write(static_cast<const char*>(bytes), std::streamsize(size));
-                SDL_free(bytes);
-            }
-            std::ofstream(data / "files.txt", std::ios::binary) << wanted;
-        }
+        // Keep using the last complete generation if this installation cannot complete.
+        copyGameFiles(wanted, cache, [](const std::string& name, std::string& bytes) {
+            size_t size = 0;
+            void* got = SDL_LoadFile(("game/" + name).c_str(), &size);
+            if (!got) return false;
+            bytes.assign(static_cast<const char*>(got), size);
+            SDL_free(got);
+            return true;
+        });
+    }
+    data = gameFilesDirectory(cache);
+    if (data.empty()) {
+        legacy = legacyGameFiles(original);
+        data = legacy ? original : cache / "unavailable";
     }
     const char* outside = (SDL_GetAndroidExternalStorageState() & SDL_ANDROID_EXTERNAL_STORAGE_WRITE) ? SDL_GetAndroidExternalStoragePath() : nullptr;
     user = outside ? std::filesystem::path(outside) : programFolder() / "user";
@@ -308,9 +310,12 @@ inline bool chooseFile(Window& w, const wchar_t* filter, const std::filesystem::
         size_t size = 0;
         void* bytes = SDL_LoadFile(answer.file.c_str(), &size);
         if (!bytes) return false;
-        chosen = folder / "opened.jfreplay";
-        std::ofstream(chosen, std::ios::binary).write(static_cast<const char*>(bytes), std::streamsize(size));
+        // (into `folder` or, none given, the own folder of the app - not a name relative to wherever the program runs;
+        //  not written whole, nothing is chosen - not the file an earlier choice left there)
+        chosen = (folder.empty() ? programFolder() : folder) / "opened.jfreplay";
+        const bool written = writeWhole(chosen, bytes, size);
         SDL_free(bytes);
+        if (!written) return false;
     }
 #endif
     return true;

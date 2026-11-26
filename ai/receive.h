@@ -34,11 +34,11 @@ int smallReceive(const Observation& o, const PlanSet& mine, const PlanSet& their
     static thread_local SpawnInputCache inputs;
     inputs.configure(o.timing, o.rules.speedPercent);
     const auto places = [&](const Duel& d, const PlanSet& set, int k) {
-        return k == 0 && set.midAir ? set.firstReach : legalPlacements(d.player[set.who].field);
+        return k == 0 && set.firstInAir() ? set.firstReach : legalPlacements(d.player[set.who].field);
     };
     const auto placeKnown = [&](Duel& d, const PlanSet& set, int k, int id) {
         const int who = set.who;
-        if (k == 0 && set.midAir) {
+        if (k == 0 && set.firstInAir()) {
             d.place(who, placement(id), set.pair[k], set.firstLock[id], set.firstSoft[id], set.firstRest[id]);
             return true;
         }

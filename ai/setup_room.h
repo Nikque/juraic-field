@@ -9,18 +9,32 @@ struct Landing {
     int frames, check, soft;
 };
 
-inline std::optional<Landing> quietLanding(const Observation& o, Pair pair, int id, InputPlanner& planner) {
+inline std::optional<Landing> quietLanding(const Observation& o, Pair pair, int id, InputPlanner& planner, bool picture = false) {
     const auto& self = o.self();
-    auto control = appearingPair(self, o.rules, o.timing);
+    const PairControl* air = ownPairInAir(o);
+    auto control = air ? *air : appearingPair(self, o.rules, o.timing);
     const auto to = placement(id);
+    const Duel current(o);
+    const bool recorded = !picture && current.hasRecordedWay(o.me, to);
     InputPath path;
-    if (!planner.plan(self.field, control, to, o.timing, o.rules.speedPercent, path)) return {};
-    for (const auto button : path.buttons) stepPair(control, self.field, button, o.timing, o.rules.speedPercent);
-    if (!control.locked || placementId(control.placement()) != id) return {};
+    if (!recorded) {
+        if (picture) {
+            if (!planner.planSure(self.field, control, to, o.timing, o.rules.speedPercent, path) ||
+                planner.lostBySkip(self.field, control, to, o.timing, o.rules.speedPercent, path)) return {};
+        } else if (!planner.plan(self.field, control, to, o.timing, o.rules.speedPercent, path)) return {};
+        for (const auto button : path.buttons) stepPair(control, self.field, button, o.timing, o.rules.speedPercent);
+        if (!control.locked || placementId(control.placement()) != id) return {};
+    }
     GameField field = self.field;
     const auto placed = place(field, to, pair);
     if (field.dead() || anyClear(field.f, o.rules)) return {};
     const auto split = o.timing.splitFrames(placed.split, to.x, placed.lockY);
+    if (recorded) {
+        const auto& hand = current.inHand[o.me];
+        const auto check = split ? hand.wayLock + split + o.timing.landFrames : hand.wayCheck;
+        return Landing{field, int(hand.wayLock - o.frame + 1), int(check - o.frame + 1),
+                       o.rules.softDropBonus ? hand.waySoft : 0};
+    }
     const auto land = split ? o.timing.landFrames : std::max(o.timing.lockWait, o.timing.landFrames - restedFrames(control, o.timing));
     return Landing{field, path.frames(), path.frames() + split + land, o.rules.softDropBonus ? path.softDropRows : 0};
 }
@@ -28,7 +42,7 @@ inline std::optional<Landing> quietLanding(const Observation& o, Pair pair, int 
 template<class Stop>
 class Reader {
 public:
-    Reader(const Observation& observation, const Stop& stop, int target) : o(observation), expired(stop), goal(target) {
+    Reader(const Observation& observation, const Stop& stop, int target, InputPlanner* later = nullptr) : o(observation), expired(stop), goal(target), inputs(later) {
         inputs.configure(o.timing, o.rules.speedPercent);
         for (int a = 0; a < 4; ++a)
             for (int b = 0; b < 4; ++b) types[4 * a + b] = {o.rules.palette[a], o.rules.palette[b]};
@@ -112,7 +126,7 @@ private:
 // fixed until the fifth pair is actually shown.
 template<class Stop>
 int preferOpenSetup(const Observation& o, const PlanSet& mine, const BuildResult& b, int chosen,
-                    unsigned choices, int room, const Params& p, const Stop& stop) {
+                    unsigned choices, int room, const Params& p, const Stop& stop, PictureRoutes* picture = nullptr) {
     const auto& self = o.self();
     const auto& rival = o.opponent();
     if (chosen < 0 || !p.readMidgame || !p.checkKnownExchange || p.setupSpeedNear <= 0 || p.x3ChokeKeep <= 0 ||
@@ -140,16 +154,17 @@ int preferOpenSetup(const Observation& o, const PlanSet& mine, const BuildResult
     }
     if (!main || stop()) return chosen;
     const int goal = int((int64_t(main) * std::min(100, p.x3ChokeKeep) + 99) / 100);
-    InputPlanner planner;
-    const auto usual = setup_room::quietLanding(o, pair, chosen, planner);
+    InputPlanner ordinary;
+    auto& planner = picture ? picture->first : ordinary;
+    const auto usual = setup_room::quietLanding(o, pair, chosen, planner, picture != nullptr);
     if (!usual || stop()) return chosen;
-    const auto other = setup_room::quietLanding(o, pair, reversed, planner);
+    const auto other = setup_room::quietLanding(o, pair, reversed, planner, picture != nullptr);
     if (!other || usual->frames != other->frames || usual->check != other->check || usual->soft != other->soft ||
         usual->field.f.occupied() != other->field.f.occupied() || stop()) return chosen;
     for (int x = 0; x < W; ++x)
         if (bool(usual->field.row14[x]) != bool(other->field.row14[x])) return chosen;
 
-    setup_room::Reader read(o, stop, goal);
+    setup_room::Reader read(o, stop, goal, picture ? &picture->later : nullptr);
     const int lock = read.knownLock(usual->field, mine.pair[1]);
     if (lock == INT32_MAX || read.knownLock(other->field, mine.pair[1]) > lock || stop()) return chosen;
     bool gains = false;

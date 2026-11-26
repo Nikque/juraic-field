@@ -58,8 +58,11 @@ public:
 
     // What a search from `from` counts on at least: no way it finds ends sooner (InputPlanner::prepareFastest begins no
     // search when the straight way ends no later; the tests: how far below the end of the way it finds).
-    int estimate(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent) {
+    // lock: what it counts on at least for the frames to the lock.
+    int estimate(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent,
+                 int* lock = nullptr) {
         setUp(field, target, timing, speedPercent);
+        if (lock) *lock = least(from);
         return ahead(from);
     }
 
@@ -77,6 +80,13 @@ public:
     // of the down key on it and that end. false: there is none, or the search gave up.
     bool find(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, int limit,
               std::vector<uint8_t>& buttons, int& softDropRows, int& end) {
+        return search<false>(field, from, target, timing, speedPercent, limit, buttons, softDropRows, end, 0, false,
+                             [](const std::vector<uint8_t>&) { return true; });
+    }
+
+    template<bool picture, class Accept>
+    bool search(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, int limit,
+                std::vector<uint8_t>& buttons, int& softDropRows, int& end, uint8_t firstChanged, bool downAtTarget, Accept accept) {
         states = 0;
         gaveUp = false;
         if (from.locked || limit <= 0) return false;
@@ -84,60 +94,84 @@ public:
         const detail::Cells cells(field);
         nodes.clear(), best.clear();
         std::priority_queue<uint64_t, std::vector<uint64_t>, std::greater<uint64_t>> open;
-        const auto push = [&](const PairControl& p, int parent, int frames, int taps, uint8_t held, bool goal) {
+        const auto stateKey = [&](const PairControl& p, uint8_t changed) {
+            Key k = key(p);
+            if constexpr (picture) k.b |= uint64_t(changed) << 48;
+            return k;
+        };
+        const auto push = [&](const PairControl& p, int parent, int frames, int taps, uint8_t held, bool goal, uint8_t changed) {
             const int total = frames + (goal ? after(p, timing) : ahead(p));
             if (total > limit) return;
             // (the frame of the lock: that of a way found, else what the state needs at least)
             const int lock = goal ? frames : frames + least(p);
             if (!goal) {
-                const auto [at, fresh] = best.try_emplace(key(p), int(nodes.size()));
+                const auto [at, fresh] = best.try_emplace(stateKey(p, changed), int(nodes.size()));
                 if (!fresh) {
                     const Node& old = nodes[size_t(at->second)];
                     if (old.frames < frames || (old.frames == frames && old.taps <= taps)) return;
                     at->second = int(nodes.size());
                 }
             }
-            nodes.push_back({p, parent, uint16_t(frames), uint16_t(taps), held, goal});
+            nodes.push_back({p, parent, uint16_t(frames), uint16_t(taps), held, goal, changed});
             open.push(uint64_t(total & 0xfff) << 50 | uint64_t(lock & 0x3ff) << 40 | uint64_t(taps & 0xff) << 32 | uint64_t(nodes.size() - 1));
         };
-        push(from, -1, 0, 0, 0, false);
+        const auto readButtons = [&](int n) {
+            buttons.resize(nodes[size_t(n)].frames);
+            for (; nodes[size_t(n)].parent >= 0; n = nodes[size_t(n)].parent)
+                buttons[size_t(nodes[size_t(n)].frames) - 1] = nodes[size_t(n)].held;
+        };
+        push(from, -1, 0, 0, 0, false, firstChanged);
         int found = -1;
         while (!open.empty()) {
             const int n = int(open.top() & 0xffffffffu);
             open.pop();
             const Node node = nodes[size_t(n)]; // (a copy: the nodes grow below)
             if (node.goal) {
+                if constexpr (picture) {
+                    readButtons(n);
+                    if (!accept(buttons)) continue;
+                }
                 found = n;
                 break;
             }
-            if (best.find(key(node.p))->second != n) continue; // (a better way to this state came after it)
+            if (best.find(stateKey(node.p, node.changed))->second != n) continue;
             if (++states > maxStates) return gaveUp = true, false;
             if (stop && (states & 127) == 0 && stop->load(std::memory_order_relaxed)) return gaveUp = true, false;
             for (const uint8_t side : SIDES) {
                 // (a direction held is let go first; during a move none is taken)
-                if (side && ((node.p.held & side) || node.p.moveWait)) continue;
+                constexpr uint8_t moves = BTN_LEFT | BTN_RIGHT, turns = BTN_CW | BTN_CCW;
+                const uint8_t oldSide = node.p.held & moves, oldTurn = node.p.held & turns;
+                if constexpr (picture) {
+                    if (side != oldSide && ((node.changed & moves) || (side && (oldSide || node.p.moveWait)))) continue;
+                } else if (side && ((node.p.held & side) || node.p.moveWait)) continue;
                 for (const uint8_t turn : TURNS) {
                     // (a turn held is let go first; during a quick turn's lock none is taken)
-                    if (turn && ((node.p.held & turn) || node.p.quickLock)) continue;
+                    if constexpr (picture) {
+                        if (turn != oldTurn && ((node.changed & turns) || (turn && (oldTurn || node.p.quickLock)))) continue;
+                        if (turn && turn != oldTurn && side && side != oldSide) continue;
+                    } else if (turn && ((node.p.held & turn) || node.p.quickLock)) continue;
+                    const uint8_t changed = picture ? uint8_t((oldSide ^ side) | (oldTurn ^ turn)) : 0;
                     for (const uint8_t down : DOWNS) {
                         // (with the rules of the other model the down button is always held in the air: let go there, the
                         //  pair only comes down later)
-                        if (!down && !node.p.grounded && !hover) continue;
+                        if constexpr (picture) {
+                            if (down && downAtTarget && (node.p.x != target.x || node.p.dir != target.dir)) continue;
+                        } else if (!down && !node.p.grounded && !hover) continue;
                         const uint8_t b = uint8_t(side | turn | down);
                         PairControl q = node.p;
                         const ControlEvents e = stepPair(q, cells, b, timing, speedPercent);
                         if (low && (e.quickTurned || q.y >= ROW_14 - 1)) continue;
                         if (noRise && e.quickTurned && q.dir == DOWN) continue;
-                        const int taps = node.taps + (side ? 1 : 0) + (turn ? 1 : 0);
-                        if (!q.locked) push(q, n, node.frames + 1, taps, b, false);
-                        else if (q.x == target.x && q.dir == target.dir) push(q, n, node.frames + 1, taps, b, true);
+                        const int taps = node.taps + (side && side != oldSide) + (turn && turn != oldTurn);
+                        if (!q.locked) push(q, n, node.frames + 1, taps, b, false, changed);
+                        else if (q.x == target.x && q.dir == target.dir && !(changed & b))
+                            push(q, n, node.frames + 1, taps, b, true, changed);
                     }
                 }
             }
         }
         if (found < 0) return false;
-        buttons.assign(size_t(nodes[size_t(found)].frames), 0);
-        for (int n = found; nodes[size_t(n)].parent >= 0; n = nodes[size_t(n)].parent) buttons[size_t(nodes[size_t(n)].frames) - 1] = nodes[size_t(n)].held;
+        if constexpr (!picture) readButtons(found);
         // (played once more from the start: the points of the down key, and the way must lock the pair there)
         PairControl p = from;
         softDropRows = 0;
@@ -159,6 +193,7 @@ private:
         uint16_t frames, taps;
         uint8_t held; // the buttons of the frame that led here
         bool goal;    // locked at the target
+        uint8_t changed; // tap edges in the preceding frame, for two-frame controls
     };
     std::vector<Node> nodes;
     struct Key {
@@ -170,6 +205,9 @@ private:
     };
     std::unordered_map<Key, int, KeyHash> best; // a state's node of the fewest frames (then presses) so far
     int goalX = 0, restY = 0, sunk = 0, natural = 0, landFrames = 0, lockWait = 0;
+    bool groundCount = false; // Timing::fallOnGround: the fall goes on being counted while the pair lies
+    bool turnClears = false;  // Timing::quickFirstEndsTurn at the target: the wait of a turn can end at once there
+    bool ceiling = false;     // a piece in the 14th row: a move can push an upright pair's child off it, on its side
     int moveLost = 2;       // frames without the down button a move costs at least
     bool floorLimited = false; // Timing::floorKickLimit: the clock of a lock by itself is part of a state
     bool firstOwn = false;  // Timing::firstOwnLanding
@@ -200,7 +238,7 @@ private:
         uint64_t k = uint64_t(p.x) & 7;
         const auto add = [&](uint64_t value, int bits) { k = k << bits | (value & ((uint64_t(1) << bits) - 1)); };
         add(uint64_t(p.y), 4), add(p.dir, 2), add(p.upper, 1), add(p.grounded, 1), add(uint64_t(p.gain), 8), add(p.moveWait, 2);
-        add(p.landings, 4), add(firstOwn && !floorLimited ? 0 : p.groundFrames, 8), add(p.quickWindow, 6);
+        add(p.landings, 4), add(firstOwn && !floorLimited && !groundCount ? 0 : p.groundFrames, 8), add(p.quickWindow, 6);
         add(p.held & (BTN_LEFT | BTN_RIGHT | BTN_CW | BTN_CCW), 6);
         add(p.turnWait, 3), add(p.quickFast, 4), add(p.owned, 1), add(p.ownFrames, 8);
         return {k, uint64_t(p.lifted) | uint64_t(p.rise) << 1 | uint64_t(p.restless) << 9 | uint64_t(p.liftFall) << 10 | uint64_t(p.locking) << 18 |
@@ -215,6 +253,7 @@ private:
         // (the row of the axis when the pair locks there: place() of game/field.h)
         restY = target.dir == UP ? h[x] : target.dir == DOWN ? h[x] + 1 : std::max(h[x], h[cx]);
         natural = timing.fallPerFrame * speedPercent / 100;
+        groundCount = timing.fallOnGround != 0;
         landFrames = timing.landFrames, lockWait = timing.lockWait;
         firstOwn = timing.firstOwnLanding;
         floorLimited = timing.floorKickLimit != 0;
@@ -225,6 +264,12 @@ private:
         moveLost = timing.readyOnGround ? 1 : 2;
         const auto wall = [&](int c, int over) { return c < 0 || c >= W || h[c] > over || field.row14[size_t(c)]; };
         for (int c = 0; c < W; ++c) pushed[1][c] = wall(c - 1, h[c]), pushed[0][c] = wall(c + 1, h[c]);
+        // (Timing::quickFirstEndsTurn: an upright pair with both sides of its axis closed ends the wait of its last turn
+        //  with the first press of a quick turn. A pair that can lock upright at the target only between columns that close
+        //  both sides of the row its axis rests in - and so of every row above it - may do so there.)
+        turnClears = timing.quickFirstEndsTurn && (target.dir == UP || target.dir == DOWN) && wall(x - 1, restY) && wall(x + 1, restY);
+        ceiling = false;
+        for (int c = 0; c < W; ++c) ceiling = ceiling || field.row14[size_t(c)];
         // The half steps quick turns can take the axis down, beyond its fall, in column c above the row `rest`: only
         // in a groove there, and no more than the groove is deep. One quick turn: three, and what its faster fall adds
         // (Timing::quickFall); a turn back and another one: three more in eight frames at the soonest.
@@ -273,6 +318,10 @@ private:
         quickFall = timing.quickFallFrames > 0 ? timing.quickFall : 0;
     }
 
+    // The count of the fall `p` goes on from when it loses its ground: with Timing::fallOnGround what it counted while it
+    // lay, a step that came due then made at once (detail::dueOn); else its gain.
+    int gainOf(const PairControl& p) const { return groundCount && p.grounded ? detail::dueOn(p, natural) : p.gain; }
+
     // The half steps the axis of `p` is above the row it rests in at the target (less those a quick turn can take).
     int above(const PairControl& p) const { return 2 * (p.y - restY) + (p.upper ? 1 : 0) - sunk; }
 
@@ -281,11 +330,12 @@ private:
         int lost = p.moveWait; // frames without the down button: of the move going on, and of the moves to come
         for (int c = p.x; c != goalX; c += c < goalX ? 1 : -1)
             if (!pushed[c < goalX][c]) lost += moveLost;
-        const int byItself = std::min(lost, (p.gain + natural * lost) / HALF_STEP); // (half steps of the fall in those frames)
+        const int gain = gainOf(p);
+        const int byItself = std::min(lost, (gain + natural * lost) / HALF_STEP); // (half steps of the fall in those frames)
         const int level = 2 * p.y + (p.upper ? 1 : 0), raw = level - 2 * restY;
         // Without another quick turn: one half step a frame, and what is left of the faster fall of a quick turn made.
         const int acceleration = p.dir == DOWN && slowDownTurn ? 0 : int(p.quickFast) * quickFall;
-        int frames = lost + std::max(0, raw - (p.gain + acceleration) / HALF_STEP - byItself);
+        int frames = lost + std::max(0, raw - (gain + acceleration) / HALF_STEP - byItself);
         // With a quick turn still to make: it takes the axis down `sunk` more at the most, is made in the groove, a
         // frame after the axis is in it at the soonest, and keeps the pair from locking while its animation runs.
         if (sunk > 0) {
@@ -297,10 +347,14 @@ private:
         if (landLock && raw > 0 && int(p.landings) + 1 < maxLandings) ++frames;
         frames = std::max(1, frames);
         // (Timing::turnLockFrames: no lock while a turn's animation runs - of the turn made, and of the one still to
-        //  make when the pair is not turned as at the target)
-        if (turnLock > 0) {
+        //  make when the pair is not turned as at the target; not where the first press of a quick turn ends it: turnClears)
+        //  (A pair upright with its child in the 14th row is turned on its side by a move that pushes the child off a piece
+        //  there - game/control.h - with no wait of a turn; any other way to another direction is a turn, or begins
+        //  with one that takes the axis up to that row.)
+        if (turnLock > 0 && !turnClears) {
             frames = std::max(frames, int(p.turnWait) + 1);
-            if (p.dir != goalDir) frames = std::max(frames, turnLock + 1);
+            const bool pushed = ceiling && p.dir == UP && p.y == ROW_14 - 1 && (goalDir == LEFT || goalDir == RIGHT);
+            if (p.dir != goalDir && !pushed) frames = std::max(frames, turnLock + 1);
         }
         return frames;
     }
@@ -311,10 +365,12 @@ private:
         const int level = 2 * p.y + (p.upper ? 1 : 0);
         for (int c = 0; c < W; ++c) {
             if (!nearby[c]) continue;
-            int lost = p.moveWait;
+            int lost = 0;
             for (int k = p.x; k != c; k += k < c ? 1 : -1)
                 if (!pushed[k < c][k]) lost += moveLost;
-            const int byItself = std::min(lost, (p.gain + natural * lost) / HALF_STEP);
+            if (lost > 0) --lost; // (as in soonestLevel: a pair moved onto a ledge in the frame it comes level with it lies in that frame)
+            lost += p.moveWait;
+            const int byItself = std::min(lost, (gainOf(p) + natural * lost) / HALF_STEP);
             best = std::min(best, lost + std::max(0, level - ownTop[c] - byItself));
         }
         return std::max(1, best);
@@ -332,7 +388,7 @@ private:
                 if (!pushed[k < c][k]) lost += moveLost;
             if (lost > 0) --lost;
             lost += p.moveWait;
-            const int byItself = std::min(lost, (p.gain + natural * lost) / HALF_STEP);
+            const int byItself = std::min(lost, (gainOf(p) + natural * lost) / HALF_STEP);
             best = std::min(best, lost + std::max(0, above(p) - byItself));
         }
         return std::max(1, best);
@@ -348,8 +404,15 @@ private:
             //  clock that counts runs with the pair lying in the row it rests in at the placement - it is dropped by a
             //  step down and by a turn, and a quick turn in a groove takes the axis down `sunk` half steps with it.
             //  Running there already, what is left of it; else all of it from a lying still to come.)
-            if (splits) return least(p) + landFrames;
+            // (what after() gives at such a lock: no clock behind it - restedFrames counts the frame of the lock with
+            //  Timing::floorKickLimit -; the fall that follows is the same for every way and left out)
+            if (splits) return least(p) + std::max(landFrames - (floorLimited ? 1 : 0), lockWait);
             landing = p.owned && above(p) <= 0 && run[p.x] ? landFrames - int(p.ownFrames) : landFrames - 1 + soonestLevel(p);
+            // (the clock of Timing::firstOwnLanding can run on over a step down of one row, as below: a pair that touched
+            //  the column beside the target one row higher and slid down from it keeps it. What it counts on is the less of
+            //  the two, so that no way is counted on as ending later than it can.)
+            const int own = p.owned && nearby[p.x] ? landFrames - int(p.ownFrames) : landFrames - 1 + soonest(p);
+            landing = std::min(landing, own);
         } else if (firstOwn) {
             // (Timing::firstOwnLanding. The clock running now may run on to the lock when the pair is in a column from
             //  which the ground steps down to the target; else the clock that does starts with a lying over its own

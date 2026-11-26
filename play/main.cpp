@@ -17,6 +17,7 @@
 //       n = -11 to -14: the four parts of the settings
 //              in 8: a match over a line inside the program that delays and loses, saved and played as a replay)
 //   JuraicField.exe --check-replay <file>   self test: play a replay without a window, write <file>.result, exit
+//   JuraicField.exe --check-replay-expected <file>   the same, and a missing <file>.expected is a failure (exit 9)
 //   JuraicField.exe --net-test host <port> <result file>            self test: a match over UDP on this machine, without
 //                              (host4: the host listens at 127.0.0.1 instead of ::1; hostall: at every address of the machine)
 //   JuraicField.exe --net-test join <address> <port> <result file>  a window: two programs, their result files must be equal
@@ -45,6 +46,7 @@
 #include "netplay.h"
 #include "replay.h"
 #include "session.h"
+#include "check_ai_round.h"
 #include "settings.h"
 #include "start_beat.h"
 #include "udp.h"
@@ -127,6 +129,9 @@ struct App {
     // the replays and one's own pictures and music are in userDirectory. Both are the folder of the program, except in
     // an application bundle of macOS (play/platform_sdl.h, programFolders).
     std::filesystem::path dataDirectory, userDirectory;
+#ifndef _WIN32
+    std::optional<LegacyGameFiles> legacyAssets;
+#endif
     Screen screen = Screen::Menu;
     int menuIndex = 0, settingIndex = 0, bindIndex = 0, bindLayout = 0;
     int settingSection = 0;     // the part of the settings screen that is shown (SettingSection)
@@ -205,14 +210,22 @@ struct App {
     std::filesystem::path mediaFile(const wchar_t* kind, const std::filesystem::path& name) const {
         const std::filesystem::path own = userDirectory / kind / name;
         std::error_code ignored;
-        return userDirectory == dataDirectory || std::filesystem::exists(own, ignored) ? own : dataDirectory / kind / name;
+        if (userDirectory == dataDirectory || std::filesystem::exists(own, ignored)) return own;
+#ifndef _WIN32
+        if (legacyAssets && !legacyAssets->contains(std::filesystem::path(kind) / name)) return own;
+#endif
+        return dataDirectory / kind / name;
     }
     // The files of a folder below "background" or "bgm", of both places, each name once, in the order of the names.
     template <size_t N> std::vector<std::wstring> mediaFiles(const wchar_t* kind, const wchar_t* folder, const wchar_t* const (&endings)[N]) const {
         std::vector<std::wstring> names = filesOf(userDirectory / kind / folder, endings);
         if (dataDirectory == userDirectory) return names;
-        for (const std::wstring& name : filesOf(dataDirectory / kind / folder, endings))
+        for (const std::wstring& name : filesOf(dataDirectory / kind / folder, endings)) {
+#ifndef _WIN32
+            if (legacyAssets && !legacyAssets->contains(std::filesystem::path(kind) / folder / name)) continue;
+#endif
             if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+        }
         std::sort(names.begin(), names.end());
         return names;
     }
@@ -298,9 +311,9 @@ struct App {
             if (raw >> PAD_DOWN & 1) navHeld |= 1u << NAV_DOWN;
             if (raw >> PAD_LEFT & 1) navHeld |= 1u << NAV_LEFT;
             if (raw >> PAD_RIGHT & 1) navHeld |= 1u << NAV_RIGHT;
-            if (raw >> bind[ACT_MENU_OK] & 1) navHeld |= 1u << NAV_OK;
-            if (raw >> bind[ACT_MENU_BACK] & 1) navHeld |= 1u << NAV_BACK;
-            if (raw >> bind[ACT_START] & 1) navHeld |= 1u << NAV_START;
+            if (padHeld(raw, bind[ACT_MENU_OK])) navHeld |= 1u << NAV_OK;
+            if (padHeld(raw, bind[ACT_MENU_BACK])) navHeld |= 1u << NAV_BACK;
+            if (padHeld(raw, bind[ACT_START])) navHeld |= 1u << NAV_START;
         }
     }
 
@@ -325,26 +338,22 @@ struct App {
     void loadAll() {
         scanMedia();
         const std::filesystem::path file = iniPath();
-        loadSettings(file, settings);
-        std::ifstream in(file);
-        std::string line;
-        while (std::getline(in, line)) {
-            const size_t eq = line.find('=');
-            if (eq == std::string::npos) continue;
+        loadSettings(file, settings, [&](const std::string& line, size_t eq) {
             const std::string key = line.substr(0, eq);
-            const int v = atoi(line.c_str() + eq + 1);
-            if (key == "device1") input.device[0] = v;
-            if (key == "device2") input.device[1] = v;
             if (key == "netName" && eq + 1 < line.size()) netName = fromUtf8(line.substr(eq + 1)).substr(0, 12);
             if (key == "netAddress") netAddress = fromUtf8(line.substr(eq + 1)).substr(0, 80);
-            if (key == "netPort" && v > 0 && v < 65536) netPort = v;
             if (key == "arenaServer" && eq + 1 < line.size()) arenaServer = fromUtf8(line.substr(eq + 1)).substr(0, 80);
             if (key == "arenaName") arenaName = fromUtf8(line.substr(eq + 1)).substr(0, 32);
             if (key == "arenaToken") arenaToken = fromUtf8(line.substr(eq + 1)).substr(0, 64);
+            int v;
+            if (!settingInteger(std::string_view(line).substr(eq + 1), v)) return;
+            if (key == "device1" && v >= -1) input.device[0] = v;
+            if (key == "device2" && v >= -1) input.device[1] = v;
+            if (key == "netPort" && v > 0 && v < 65536) netPort = v;
             for (int l = 0; l < LAYOUT_COUNT; ++l)
                 for (int a = 0; a < ACT_COUNT; ++a)
-                    if (key == std::string(layoutKeys[l]) + "." + std::to_string(a) && v >= 0 && v < 256) input.bind[l][a] = v;
-        }
+                    if (key == std::string(layoutKeys[l]) + "." + std::to_string(a) && InputConfig::fits(l, v)) input.bind[l][a] = v;
+        });
         // Two actions on one button (possible in files of older versions) could
         // make a controller useless: such a layout starts again from the defaults.
         for (int l = 0; l < LAYOUT_COUNT; ++l)
@@ -352,13 +361,14 @@ struct App {
     }
     void saveAll() {
         if (selfTest) return;
-        saveSettings(iniPath(), settings);
-        std::ofstream out(iniPath(), std::ios::app);
-        out << "device1=" << input.device[0] << "\ndevice2=" << input.device[1] << '\n';
-        out << "netName=" << toUtf8(netName) << "\nnetAddress=" << toUtf8(netAddress) << "\nnetPort=" << netPort << '\n';
-        out << "arenaServer=" << toUtf8(arenaServer) << "\narenaName=" << toUtf8(arenaName) << "\narenaToken=" << toUtf8(arenaToken) << '\n';
-        for (int l = 0; l < LAYOUT_COUNT; ++l)
-            for (int a = 0; a < ACT_COUNT; ++a) out << layoutKeys[l] << '.' << a << '=' << input.bind[l][a] << '\n';
+        const bool saved = saveSettings(iniPath(), settings, [&](std::ostream& out) {
+            out << "device1=" << input.device[0] << "\ndevice2=" << input.device[1] << '\n';
+            out << "netName=" << toUtf8(netName) << "\nnetAddress=" << toUtf8(netAddress) << "\nnetPort=" << netPort << '\n';
+            out << "arenaServer=" << toUtf8(arenaServer) << "\narenaName=" << toUtf8(arenaName) << "\narenaToken=" << toUtf8(arenaToken) << '\n';
+            for (int l = 0; l < LAYOUT_COUNT; ++l)
+                for (int a = 0; a < ACT_COUNT; ++a) out << layoutKeys[l] << '.' << a << '=' << input.bind[l][a] << '\n';
+        });
+        if (!saved) say(L"設定を保存できませんでした。");
     }
 
     // The scene the music is chosen for: a match and its replay, toko and its replay, everything
@@ -469,20 +479,8 @@ struct App {
     // ---- files ----
     bool loadBoardFile(const std::filesystem::path& path) {
         try {
-            std::ifstream in(path, std::ios::binary);
-            std::string magic;
-            in >> magic;
-            in.close();
-            BitField f;
-            if (magic == "JURAIC_FIELD_BOARD") {
-                f = juraic_gui::bitsFromBoard(juraic_gui::loadBoard(path));
-            } else {
-                // A result of the generator: the board right after the last pair.
-                // Take the last pair away so that finding it is the exercise.
-                const Solution s = juraic_gui::loadRecord(path).solution;
-                f = s.field;
-                if (s.firePairs) f.erase(pairCells(s.field, std::countr_zero(s.firePairs)));
-            }
+            // (a result of the generator: the board right after the last pair, without that pair)
+            BitField f = juraic_gui::practiceField(path);
             f.drop();
             if (f.hasClear()) say(L"この盤面は最初から消える形を含んでいます（最初の手で消えます）");
             toko.startField = GameField{};
@@ -490,6 +488,9 @@ struct App {
             toko.hasBoard = true;
             toko.boardName = path.stem().wstring(); // (shown on the screen: the name without its extension)
             return true;
+        } catch (const juraic_gui::WideBoardRefused&) {
+            say(L"10 × 18 の盤面は、とこでは使えません（6 × 13 だけ）: " + path.stem().wstring());
+            return false;
         } catch (const std::exception&) {
             say(L"盤面ファイルを読めませんでした: " + path.stem().wstring());
             return false;
@@ -553,9 +554,15 @@ struct App {
         return true;
     }
     // A file dropped on the window: a replay is played, a board opens a game alone. Not during a match over a
-    // network: the other end would be left without a word, and the line would stay open behind the new screen.
+    // network: the other end would be left without a word, and the line would stay open behind the new screen. Nor on
+    // the screen of the arena (its line and match would stay on) or of the real game (its reading, its pad and the AI
+    // would go on behind the new screen): those are left as they are, by their own way back.
     void openDropped(const std::filesystem::path& path) {
         if (screen == Screen::Net) return say(L"ネット対戦の間は、ファイルを開けません（先に対戦を抜けてください）");
+        if (screen == Screen::Arena) return say(L"対戦場の画面では、ファイルを開けません（先に対戦場を抜けてください）");
+#ifdef _WIN32
+        if (screen == Screen::RealGame) return say(L"実機モードの間は、ファイルを開けません（先に実機モードを抜けてください）");
+#endif
         if (path.extension() == L".jfreplay") openReplay(path);
         else if (loadBoardFile(path)) toko.start(settings), screen = Screen::Toko;
     }
@@ -679,7 +686,7 @@ struct App {
             break;
         case MENU_REAL_GAME:
 #ifdef _WIN32
-            realGame.open(settings.aiStyle, settings.aiLevel), realGame.ex = settings.aiEx != 0;
+            realGame.open(settings.aiStyle, settings.aiLevel), realGame.useSettingsEx(levelEx(settings.aiLevel, settings.aiEx != 0, settings.rules.cancel));
 #if JURAIC_REALGAME_MEMORY
             loadRealGameWay();
 #endif
@@ -752,7 +759,7 @@ struct App {
             if (m.row == RealGameMode::ROW_WAY) saveRealGameWay();
 #endif
             // (the AI plays as soon as the window is read: changed now, it plays so from its next pair on)
-            if ((m.row == RealGameMode::ROW_STYLE || m.row == RealGameMode::ROW_LEVEL) && m.playing) startRealGameAI();
+            if ((m.row == RealGameMode::ROW_LEVEL) && m.playing) startRealGameAI();
 #if JURAIC_REALGAME_MEMORY
             // (how the real game is read was changed while the AI played: it stopped, and begins again so)
             if (m.restartWanted) m.restartWanted = false, startRealGameAI();
@@ -784,6 +791,128 @@ struct App {
             screen = Screen::Menu;
         }
     }
+    void seatRealAgent(Versus& v) {
+        const auto& m = realGame;
+        v.seat(m.seat, aiOfLevel(m.level, m.style), settings, true, m.cancels());
+        if (auto* x3 = dynamic_cast<ai::X3Agent*>(v.agent[m.seat].get())) x3->noting = false;
+    }
+
+    // Exercise the on-screen controls and their normal save/load path in a new, isolated folder.
+    bool checkLocalLevels(const std::filesystem::path& folder) {
+        if (!std::filesystem::create_directory(folder)) return false;
+        std::ofstream report(folder / "results.txt");
+        const auto press = [&](Nav key) {
+            const auto frame = [&](unsigned bits) {
+                selfNav = bits;
+                ++uiFrame;
+                if (screen == Screen::Menu) updateMenu();
+                else if (screen == Screen::Settings) updateSettings();
+                else if (screen == Screen::Versus) updateVersus();
+                selfNavWas = bits;
+            };
+            frame(1u << key);
+            frame(0);
+        };
+        const auto enter = [&](MenuItem target) {
+            screen = Screen::Menu;
+            for (int i = 0; MENU_ITEMS[menuIndex] != target && i < MENU_COUNT; ++i) press(NAV_DOWN);
+            press(NAV_OK);
+        };
+        focused = false;
+        for (int rematch : {0, 1}) for (int seat : {0, 1}) for (int offset = -5; offset <= 1; ++offset) {
+            constexpr int levels[] = {36, 36, 36, 37, 37, 38, 38};
+            const int level = levels[offset + 5];
+            const bool quiet = offset == -4, ex = offset == -3 || offset == -1 || offset == 1;
+            userDirectory = dataDirectory = folder / (std::to_string(rematch) + "-" + std::to_string(seat) + "-" + std::to_string(offset + 5));
+            if (!std::filesystem::create_directory(userDirectory)) return false;
+            settings = Settings{};
+            if (settings.rules.cancel) return false;
+            const std::string key = seat ? "aiLevel" : "aiLevel1";
+            if (rematch) {
+                enter(seat ? MENU_VS_AI : MENU_WATCH);
+                versus.state = Versus::MatchEnd;
+            } else {
+                settingInside = false;
+                settingSection = SEC_RULES;
+                enter(MENU_SETTINGS);
+                if (screen != Screen::Settings) return false;
+                for (int i = 0; settingSection != SEC_AI && i < SETTING_SECTIONS; ++i) press(NAV_DOWN);
+                press(NAV_OK);
+                SettingsTable table(settings);
+                for (size_t i = 0; i < table.items.size() && table.items.at(settingIndex).key != key; ++i) press(NAV_DOWN);
+                if (!settingInside || table.items.at(settingIndex).key != key) return false;
+            }
+            auto step = [&](int direction) {
+                if (!rematch) { press(direction > 0 ? NAV_RIGHT : NAV_LEFT); return; }
+                const RectF box = pickBox(seat, direction > 0 ? 2 : 0);
+                clickX = mouseX = (box.left + box.right) / 2;
+                clickY = mouseY = (box.top + box.bottom) / 2;
+                mouseDown = clicked = true;
+                updateVersus();
+                mouseDown = clicked = false;
+                updateVersus();
+            };
+            // Starting at the default Lv38, the first click must also work with cancel off.
+            for (int i = 0; i < std::abs(offset); ++i) step(offset > 0 ? 1 : -1);
+            if (!offset && rematch) { step(-1); step(1); }
+            if ((ex && !settings.rules.cancel) || (seat ? settings.aiLevel : settings.aiLevel1) != level ||
+                (seat ? settings.aiEx : settings.aiEx1) != int(ex) || (seat ? settings.aiStyle : settings.aiStyle1) != int(quiet) || (seat ? settings.aiEx1 : settings.aiEx)) return false;
+            if (!rematch) {
+                SettingsTable table(settings);
+                if (table.items.at(settingIndex).show(level) != levelText(level, ex, quiet)) return false;
+                press(NAV_OK);
+                press(NAV_BACK);
+            } else {
+                press(NAV_OK);
+                auto* bot = dynamic_cast<const ai::X3Agent*>(versus.agent[seat].get());
+                if (versus.state == Versus::MatchEnd || !bot || bot->fastestWays != ex || bot->exFlip != (level == 38 && ex)) return false;
+            }
+            settings = Settings{};
+            loadAll();
+            if ((ex && !settings.rules.cancel) || (seat ? settings.aiLevel : settings.aiLevel1) != level ||
+                (seat ? settings.aiEx : settings.aiEx1) != int(ex) || (seat ? settings.aiStyle : settings.aiStyle1) != int(quiet)) return false;
+            enter(seat ? MENU_VS_AI : MENU_WATCH);
+            auto* bot = dynamic_cast<const ai::X3Agent*>(versus.agent[seat].get());
+            if (!bot || bot->fastestWays != ex || bot->exFlip != (level == 38 && ex)) return false;
+            report << (rematch ? "local rematch" : "settings") << " seat " << seat + 1 << " Lv" << level << (quiet ? " quiet" : ex ? "Ex" : "") << " saved, reloaded, active\n";
+        }
+        return bool(report.flush());
+    }
+
+
+    bool checkPictureLevels(const std::filesystem::path& report) {
+        std::ofstream out(report);
+        auto& m = realGame;
+        m.open(0, 36);
+        for (int fallback = 0; fallback <= 1; ++fallback) {
+#if JURAIC_REALGAME_MEMORY
+            m.source = fallback ? RealGameMode::SOURCE_FIRST_CANCEL : RealGameMode::SOURCE_SCREEN;
+#else
+            if (fallback) continue;
+#endif
+            m.row = RealGameMode::ROW_LEVEL;
+            for (int level = 36; level <= 38; ++level) {
+                m.level = level, m.ex = false;
+                for (int ex = 0; ex <= 1; ++ex) {
+                    if (ex && level == 36) { m.change(1); if (!m.style) return false; }
+                    if (ex) m.change(1);
+                    if (m.level != level || m.cancels() != bool(ex)) return false;
+                    Versus v;
+                    seatRealAgent(v);
+                    m.beginDriver(std::move(v.agent[m.seat]));
+                    const auto* bot = dynamic_cast<const ai::X3Agent*>(m.driver.agent.get());
+                    if (!bot || m.driver.me != m.seat || bot->tapHold != 2 || !bot->spareFrame ||
+                        bot->fastestWays != bool(ex) || m.driver.rules.cancel != bool(ex) ||
+                        bot->exFlip != (level == 38 && ex)) return false;
+                    out << "seat " << m.seat << " fallback " << fallback << " level " << level << " ex " << ex
+                        << " agent " << v.seatLog[m.seat].name << " hold " << bot->tapHold << " spare " << bot->spareFrame
+                        << " fastest " << bot->fastestWays << " E2 " << bot->exFlip << '\n';
+                }
+            }
+        }
+        return bool(out.flush());
+    }
+
     // The AI begins to play 2P of the real game: as in a match against it, its search and its thinking as the settings
     // say (ai/level.h). (It waits for the pairs of 2P: in the menus nothing is pressed but what they need.) Playing
     // already, the AI of the level and style now chosen takes over from the next pair on.
@@ -806,23 +935,14 @@ struct App {
             std::string unread;
             realgame::overlayParams(p, m.aiSettings, unread);
         };
-        // The AI of the level and kind chosen, seated in `v`: it keeps no notes (no replay keeps them), and it takes the
-        // straight ways (the ways over soonest are not for the rules of a game of this program here: the play by the
-        // memory first sets them for the real game - RealGameMode::cancels -, and the driver of the pictures takes the
-        // straight ways).
-        const auto seatAI = [&](Versus& v) {
-            v.seat(m.seat, aiOfLevel(m.level, m.style), settings);
-            if (ai::X3Agent* x3 = dynamic_cast<ai::X3Agent*>(v.agent[m.seat].get())) x3->noting = false;
-            if (ai::PlacementAgent* placing = dynamic_cast<ai::PlacementAgent*>(v.agent[m.seat].get())) placing->fastestWays = false;
-        };
-        seatAI(made);
+        seatRealAgent(made);
         // (the play by the memory first: an agent like it more, for the driver of the pictures to take over with while
         //  the memory cannot be read - RealGameMode::watchPrimary)
         Versus spare;
 #if JURAIC_REALGAME_MEMORY
         if (m.sourceFirst()) {
             spare.adjust = made.adjust;
-            seatAI(spare);
+            seatRealAgent(spare);
         }
 #endif
         if (m.playing) return m.replaceAgent(std::move(made.agent[m.seat]), std::move(spare.agent[m.seat]));
@@ -1149,21 +1269,13 @@ struct App {
             int pick = clicked ? pickAt(clickX, clickY) : -1;
             bool heard = pick >= 0;
             if (pick >= 0) pickNow = pick, pickHeld = 1;
-            else if (pickHeld > 0 && mouseDown && pickNow % 4 >= 2 && pickAt(mouseX, mouseY) == pickNow) {
+            else if (pickHeld > 0 && mouseDown && pickAt(mouseX, mouseY) == pickNow) {
                 const int over = ++pickHeld - HELD_WAIT;
                 if (over > 0 && over % (over <= HELD_SLOW ? 4 : 2) == 0) pick = pickNow, heard = over % 4 == 0;
             } else pickHeld = 0;
             if (pick >= 0) {
-                const int seat = pick / 4;
-                int& style = seat ? settings.aiStyle : settings.aiStyle1;
-                int& level = seat ? settings.aiLevel : settings.aiLevel1;
-                int& ex = seat ? settings.aiEx : settings.aiEx1;
-                if (pick % 4 < 2) style = !style;
-                else {
-                    // (with the cancel: Lv 36, then Lv 36Ex - play/level_ex.h)
-                    const LevelPick to = levelStep(level, ex != 0, pick % 4 == 2 ? -1 : 1, settings.rules.cancel);
-                    level = to.level, ex = to.ex;
-                }
+                const int seat = pick / 2;
+                stepAiLevel(settings, seat, pick % 2 ? 1 : -1);
                 v.picked[seat] = true;
                 if (heard) audio.play(SND_ROTATE);
             }
@@ -1213,21 +1325,17 @@ struct App {
             if (round[0] >= 5 && ((round[1] + round[2]) * 5 >= round[0] || round[3] * 2 >= round[0] || round[4] >= round[0])) v.weak = true;
         }
     }
-    // The match-end banner has a row for every AI seat, in which its AI and its level are changed with the mouse:
-    // ◀ and ▶ on either side of each (and the value itself, which goes on as ▶ does). The boxes of the row of
-    // `seat`, k = 0 to 5: ◀, the AI, ▶, ◀, the level, ▶.
+    // Each AI seat has a previous button, a value (click to advance), and a next button.
     RectF pickBox(int seat, int k) const {
-        const float x[8] = {396, 426, 600, 630, 640, 670, 898, 928}, y = 586 + (seat == 1 && versus.agent[0] ? 32.f : 0.f);
-        const int at = k < 3 ? k : k + 1; // (a gap between the two)
-        return rectF(x[at], y, x[at + 1], y + 28);
+        constexpr float x[] = {396, 430, 842, 876};
+        const float y = 586 + (seat == 1 && versus.agent[0] ? 32.f : 0.f);
+        return rectF(x[k], y, x[k + 1], y + 28);
     }
-    // What a click at (x, y) of the canvas changes: seat * 4 + (0, 1: the other AI; 2, 3: the level below and above), -1 = nothing.
     int pickAt(float x, float y) const {
         for (int seat = 0; seat < 2; ++seat)
-            for (int k = 0; versus.agent[seat] && k < 6; ++k) {
-                if (k >= 3 && (seat ? settings.aiStyle : settings.aiStyle1)) continue;
+            for (int k = 0; versus.agent[seat] && k < 3; ++k) {
                 const RectF r = pickBox(seat, k);
-                if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return seat * 4 + (k < 3 ? (k == 0 ? 0 : 1) : (k == 3 ? 2 : 3));
+                if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return 2 * seat + (k != 0);
             }
         return -1;
     }
@@ -1660,13 +1768,13 @@ struct App {
                 const int level = styleLevel(seat ? settings.aiLevel : settings.aiLevel1, style);
                 const unsigned tint = levelColor(level);
                 const bool ex = !style && levelEx(level, (seat ? settings.aiEx : settings.aiEx1) != 0, settings.rules.cancel);
-                const std::wstring words[6] = {L"◀", style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）", L"▶", style ? L"" : L"◀", levelText(level, ex), style ? L"" : L"▶"};
+                const std::wstring words[3] = {L"◀", levelText(level, ex, style != 0), L"▶"};
                 gfx.text(seat ? L"2P" : L"1P", 352, pickBox(seat, 0).top, 40, 28, 0, rgb(200, 206, 226));
-                for (int k = 0; k < 6; ++k) {
+                for (int k = 0; k < 3; ++k) {
                     const RectF r = pickBox(seat, k);
-                    if (k % 3 != 1 && !words[k].empty()) gfx.round(rectF(r.left + 2, r.top + 1, r.right - 2, r.bottom - 1), 6, rgb(84, 104, 190));
+                    if (k != 1) gfx.round(rectF(r.left + 2, r.top + 1, r.right - 2, r.bottom - 1), 6, rgb(84, 104, 190));
                     gfx.text(words[k], r.left, r.top + 1, r.right - r.left, 26, 0,
-                             k == 4 ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 0);
+                             k == 1 ? rgb(int(tint >> 16 & 255), int(tint >> 8 & 255), int(tint & 255)) : rgb(255, 255, 255), 0);
                 }
             }
             if (picks) gfx.text(L"AI の変更: ◀ ▶ をクリック（レベルは押したままで連続。次の対戦から）", 340, 586 + float(picks) * 32, 600, 24, 0, rgb(150, 158, 186), 0);
@@ -1680,8 +1788,7 @@ struct App {
         gfx.fitText(L"実機の 2P を Juraic が操作", 0, 30, CANVAS_W, 60, 2, rgb(255, 255, 255), 0);
         const unsigned tint = levelColor(m.shownLevel());
         std::wstring rows[RealGameMode::ROWS], values[RealGameMode::ROWS];
-        rows[RealGameMode::ROW_STYLE] = L"AI", values[RealGameMode::ROW_STYLE] = m.style ? L"Juraic 催促（極小）" : L"Juraic 催促（小）";
-        rows[RealGameMode::ROW_LEVEL] = L"レベル", values[RealGameMode::ROW_LEVEL] = levelText(m.shownLevel(), m.cancels());
+        rows[RealGameMode::ROW_LEVEL] = L"レベル", values[RealGameMode::ROW_LEVEL] = levelText(m.shownLevel(), m.cancels(), m.style != 0);
 #if JURAIC_REALGAME_MEMORY
         rows[RealGameMode::ROW_SOURCE] = L"盤面の取得方法";
         values[RealGameMode::ROW_SOURCE] = m.source==RealGameMode::SOURCE_FIRST_CANCEL?L"メモリ読み取り（キャンセルあり）":m.source==RealGameMode::SOURCE_FIRST?L"メモリ読み取り（キャンセルなし）":
@@ -2249,25 +2356,22 @@ struct App {
             // the reading, and up again. The picture: the row of the level chosen.
             const int style = settings.aiStyle, level = settings.aiLevel;
             realGame.open(style, level);
-            bool good = realGame.style == style && realGame.level == level && realGame.row == RealGameMode::ROW_STYLE;
+            bool good = realGame.style == style && realGame.level == level && realGame.row == RealGameMode::ROW_LEVEL;
             const auto frame = [&](unsigned held) { selfNav = held, updateRealGame(), selfNavWas = selfNav; };
             const unsigned right = 1u << NAV_RIGHT, left = 1u << NAV_LEFT, below = 1u << NAV_DOWN, above = 1u << NAV_UP;
-            if (style == 0) frame(left), frame(0);
-            good = good && realGame.style == 1 && realGame.shownLevel() == ai::LEVELS;
-            frame(below), frame(0), frame(right), frame(0);
-            good = good && realGame.row == RealGameMode::ROW_LEVEL && realGame.level == level && !realGame.cancels();
-            frame(above), frame(0), frame(left), frame(0), frame(below), frame(0);
-            good = good && realGame.style == 0 && realGame.row == RealGameMode::ROW_LEVEL;
-            bool passed = false;
-            for (int k = 0; k < ai::LAST_LEVEL; ++k) frame(right), frame(0), passed = passed || realGame.level == 1;
-            good = good && realGame.level == level && (passed || level == 1);
-            frame(left), frame(0);
-            good = good && realGame.level == (level == 1 ? ai::LAST_LEVEL : level - 1);
-            frame(right), frame(0), frame(left | right), frame(0);
+            bool quiet = false, seenEx[3]{};
+            for (int k = 0; k < levelPicks(true) + 1; ++k) {
+                frame(right), frame(0);
+                quiet |= realGame.style && realGame.shownLevel() == 36;
+                if (realGame.cancels()) seenEx[realGame.level - 36] = true;
+            }
+            good = good && quiet && seenEx[0] && seenEx[1] && seenEx[2] && realGame.style == style && realGame.level == level;
+            frame(left), frame(0), frame(right), frame(0), frame(left | right), frame(0);
             good = good && realGame.level == level && screen == Screen::RealGame && realGame.seat == 1;
             frame(below), frame(0);
 #if JURAIC_REALGAME_MEMORY
-            good = good && realGame.row==RealGameMode::ROW_SOURCE;
+            good = good && realGame.row == RealGameMode::ROW_SOURCE && realGame.source == RealGameMode::SOURCE_FIRST_CANCEL;
+            frame(right), frame(0), frame(right), frame(0);
             good = good && realGame.source == RealGameMode::SOURCE_FIRST && realGame.pad.way() == RealPad::WAY_KEYS;
             good = good && !realGame.lateTrial && !realGame.listedPairs && !realGame.garbageRandom && !realGame.opponentInput;
             const bool memoryBefore=realGame.memoryEnabled;
@@ -2326,21 +2430,17 @@ struct App {
             settings.aiLevel = 10;
             const int style = settings.aiStyle;
             settings.aiStyle = 0;
-            at(5, true);
-            for (int f = 1; f < 40; ++f) at(5, false);
+            at(2, true);
+            for (int f = 1; f < 40; ++f) at(2, false);
             bool good = settings.aiLevel == 15;
-            for (int f = 40; f < 84; ++f) at(5, false);
+            for (int f = 40; f < 84; ++f) at(2, false);
             good = good && settings.aiLevel == 26;
             mouseX = 10, mouseY = 10;
             for (int f = 0; f < 100; ++f) updateVersus();
             good = good && settings.aiLevel == 26;
             mouseDown = false, updateVersus();
-            at(0, true);
-            for (int f = 1; f < 100; ++f) at(0, false);
-            good = good && settings.aiStyle == 1 && settings.aiLevel == 26 && v.state == Versus::MatchEnd;
-            mouseDown = false, updateVersus(), at(5, true);
-            good = good && settings.aiLevel == 26 && aiOfLevel(settings.aiLevel, settings.aiStyle) == "x3q";
-            mouseDown = false, updateVersus();
+            at(0, true), mouseDown = false, updateVersus();
+            good = good && settings.aiLevel == 25 && v.state == Versus::MatchEnd;
 #ifdef _WIN32
             // The window's part (windowProc), on a window that is never shown: the button that goes down takes the
             // mouse, so that its release and the pointer are heard outside the window too; the release gives the mouse
@@ -2362,16 +2462,22 @@ struct App {
             {
                 const int level = settings.aiLevel, ex = settings.aiEx;
                 const bool cancel = settings.rules.cancel;
-                settings.aiStyle = 0, settings.rules.cancel = true, settings.aiLevel = ai::LEVELS, settings.aiEx = 0;
-                at(5, true), mouseDown = false, updateVersus();
-                good = good && settings.aiLevel == ai::LEVELS && settings.aiEx == 1;
-                at(5, true), mouseDown = false, updateVersus();
+                settings.aiStyle = 0, settings.rules.cancel = false, settings.aiLevel = ai::LEVELS, settings.aiEx = 0;
+                at(2, true), mouseDown = false, updateVersus();
+                good = good && settings.aiLevel == 36 && settings.aiStyle == 1 && !settings.aiEx;
+                at(2, true), mouseDown = false, updateVersus();
+                good = good && settings.aiLevel == 36 && !settings.aiStyle && settings.aiEx == 1;
+                at(2, true), mouseDown = false, updateVersus();
+                good = good && settings.aiLevel == 37 && settings.aiEx == 0;
+                at(2, true), mouseDown = false, updateVersus();
+                good = good && settings.aiLevel == 37 && settings.aiEx == 1;
+                at(2, true), mouseDown = false, updateVersus();
                 good = good && settings.aiLevel == ai::LAST_LEVEL && settings.aiEx == 0;
-                at(5, true), mouseDown = false, updateVersus();
+                at(2, true), mouseDown = false, updateVersus();
                 good = good && settings.aiLevel == ai::LAST_LEVEL && settings.aiEx == 1;
-                at(5, true), mouseDown = false, updateVersus();
+                at(2, true), mouseDown = false, updateVersus();
                 good = good && settings.aiLevel == 1 && settings.aiEx == 0;
-                at(3, true), mouseDown = false, updateVersus();
+                at(0, true), mouseDown = false, updateVersus();
                 good = good && settings.aiLevel == ai::LAST_LEVEL && settings.aiEx == 1;
                 const auto soonest = [&](const char* name, int mark, bool with) {
                     Versus t;
@@ -2848,18 +2954,21 @@ void handleEvents(App& a) {
 
 #ifndef _WIN32
 int main(int argc, char** argv) {
+    if (argc == 4 && std::string_view(argv[1]) == "--check-ai-round")
+        return play::checkAiRound(fromUtf8(argv[2]), fromUtf8(argv[3]));
     static App a; // large (move history): not on the stack
     app = &a;
     a.exeDirectory = programFolder();
-    programFolders(a.dataDirectory, a.userDirectory);
+    programFolders(a.dataDirectory, a.userDirectory, a.legacyAssets);
     a.loadAll();
-    a.gfx.loadFonts(a.dataDirectory / "fonts");
+    a.gfx.loadFonts(a.dataDirectory / "fonts", a.legacyAssets ? &*a.legacyAssets : nullptr);
     std::filesystem::path board, replay;
     for (int i = 1; i + 1 < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--board") board = fromUtf8(argv[i + 1]);
         if (arg == "--replay") replay = fromUtf8(argv[i + 1]);
         if (arg == "--check-replay") return checkReplay(fromUtf8(argv[i + 1]));
+        if (arg == "--check-replay-expected") return checkReplay(fromUtf8(argv[i + 1]), true);
         if (arg == "--net-test" && i + 3 < argc) {
             const std::string kind = argv[i + 1];
             const int host = kind == "host" ? 1 : kind == "host4" ? 2 : kind == "hostall" ? 3 : 0;
@@ -2908,6 +3017,24 @@ int main(int argc, char** argv) {
 #include "media_check_win.h"
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+    int caseArgc = 0;
+    wchar_t** caseArgs = CommandLineToArgvW(GetCommandLineW(), &caseArgc);
+    if (caseArgs && caseArgc == 3 && std::wstring_view(caseArgs[1]) == L"--check-local-levels") {
+        const bool good = std::make_unique<App>()->checkLocalLevels(caseArgs[2]);
+        LocalFree(caseArgs);
+        return good ? 0 : 1;
+    }
+    if (caseArgs && caseArgc == 3 && std::wstring_view(caseArgs[1]) == L"--check-picture-levels") {
+        const bool good = std::make_unique<App>()->checkPictureLevels(caseArgs[2]);
+        LocalFree(caseArgs);
+        return good ? 0 : 1;
+    }
+    if (caseArgs && caseArgc == 4 && std::wstring_view(caseArgs[1]) == L"--check-ai-round") {
+        const auto status = play::checkAiRound(caseArgs[2], caseArgs[3]);
+        LocalFree(caseArgs);
+        return status;
+    }
+    if (caseArgs) LocalFree(caseArgs);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     static App a; // large (move history): not on the stack
     app = &a;
@@ -2933,6 +3060,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         if (std::wstring(argv[i]) == L"--board") board = argv[i + 1];
         if (std::wstring(argv[i]) == L"--replay") replay = argv[i + 1];
         if (std::wstring(argv[i]) == L"--check-replay") return checkReplay(argv[i + 1]);
+        if (std::wstring(argv[i]) == L"--check-replay-expected") return checkReplay(argv[i + 1], true);
         if (std::wstring(argv[i]) == L"--check-media") return checkPackageMedia(a, argv[i + 1]);
         if (std::wstring(argv[i]) == L"--net-test" && i + 3 < argc) {
             const int host = std::wstring(argv[i + 1]) == L"host" ? 1 : std::wstring(argv[i + 1]) == L"host4" ? 2 : std::wstring(argv[i + 1]) == L"hostall" ? 3 : 0;
@@ -2954,7 +3082,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassW(&wc);
     RECT rc{0, 0, 1280, 720};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    a.window = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Juraic Field 0.9.8.1", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+    a.window = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Juraic Field 0.9.9", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, instance, nullptr);
     if (!a.window || !a.createTarget()) return 1;
     a.audio.init();

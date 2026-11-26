@@ -49,6 +49,17 @@ jobs:
             # (the signature checked, and whose it is)
             apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
             "$apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk | tee ../apk-signature.txt
+            apk=app/build/outputs/apk/release/app-release.apk
+            unzip -Z1 "$apk" > ../release-files.txt
+            grep -Fxq lib/arm64-v8a/libmain.so ../release-files.txt
+            grep -Fxq lib/arm64-v8a/libSDL3.so ../release-files.txt
+            test "$(awk -F/ '/^lib\/[^/]+\/[^/]+$/ {print $2}' ../release-files.txt | sort -u)" = arm64-v8a
+            unzip -p "$apk" assets/game/files.txt > ../release-assets.txt
+            test -s ../release-assets.txt
+            sha256sum "$apk" > ../release-sha256.txt
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "A tagged Android distribution requires the repository signing key." >&2
+            exit 1
           fi
           echo "warnings of the game's code: $(grep -c 'puyo-19-chain-generator.*warning:\|juraic-field.*warning:' ../gradle.log || true)"
           ls -l app/build/outputs/apk/debug/
@@ -66,6 +77,9 @@ jobs:
             gradle.log
             apk-contents.txt
             apk-signature.txt
+            release-files.txt
+            release-assets.txt
+            release-sha256.txt
             android/app/build/outputs/apk/debug/app-debug.apk
             android/app/build/outputs/apk/release/*.apk
 

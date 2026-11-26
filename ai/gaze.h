@@ -18,6 +18,13 @@
 
 namespace juraic::ai {
 
+// The coloured pieces of a field, those in the 14th row included.
+inline int colouredPieces(const GameField& g) {
+    int n = g.f.count() - g.f.garbage().count();
+    for (const Cell c : g.row14) n += c >= 1 && c <= MAX_COLORS;
+    return n;
+}
+
 constexpr int MIDGAME_PLAN_PAIRS = 5;
 
 struct Plan {
@@ -34,6 +41,7 @@ struct Plan {
     int fallen = 0;       // garbage that fell on the own field on the way, and what still waits above it when the next pair appears
     int64_t lockFrame = 0; // the frame the last placement locks
     int64_t endFrame = 0;  // the frame after the one in which the next pair appears
+    int64_t confirmFrame = 0; // the frame the landing or chain of the last placement is over in: what the chain sent is confirmed then (0: not known)
 };
 
 // Do two plans put the pairs on the same placements?
@@ -45,10 +53,13 @@ struct PlanSet {
     int pairCount = 0; // exhaustive plans
     int knownCount = 0; // beam search
     bool midAir = false;             // the first pair is already in the player's hands
-    unsigned firstReach = 0;         // midAir: the placements it can still reach
-    int64_t firstLock[PLACEMENTS]{}; // midAir: the frame it locks there at the earliest
-    int firstSoft[PLACEMENTS]{};     // midAir: rows of soft drop on the way
-    int firstRest[PLACEMENTS]{};     // midAir: frames it will have lain on the ground at that lock (Params::x3AirRest; 0 = not counted)
+    bool airAsNext = false;          // the held pair presented as the next pair
+    bool firstInAir() const { return midAir || airAsNext; }
+    unsigned firstReach = 0;         // firstInAir(): the placements it can still reach
+    int64_t firstLock[PLACEMENTS]{}; // firstInAir(): the frame it locks there at the earliest
+    int firstSoft[PLACEMENTS]{};     // firstInAir(): rows of soft drop on the way
+    int firstRest[PLACEMENTS]{};     // firstInAir(): frames it will have lain on the ground at that lock (Params::x3AirRest; 0 = not counted)
+    int firstRecorded = -1;          // firstInAir(): the placement its recorded buttons go on to (Duel::hasRecordedWay; -1: none)
     std::vector<Plan> plans;
     // Params::x3Crush: of the plans that fire, for every slot of `plans` (Gaze::keep), the one that keeps the most of
     // the main chain - kept apart: the slot keeps one plan by another rule, and an answer that keeps the main chain can
@@ -61,14 +72,19 @@ struct PlanSet {
 
 // Once a same-colour pair is in the air, a wall or the lock timer can leave
 // just one orientation reachable. Keep one actual path for each resulting field.
+// Of the two placements that make the same field, the one the recorded buttons go on to is the one kept.
+inline unsigned keepRecordedFirst(unsigned kept, unsigned reach, int recorded) {
+    if (recorded < PLACEMENTS / 2 || !(reach >> recorded & 1)) return kept;
+    return (kept | 1u << recorded) & ~(1u << (recorded - PLACEMENTS / 2));
+}
 inline unsigned knownPlacements(const GameField& field, const PlanSet& set, int index, const Params& p) {
-    if (index == 0 && set.midAir) {
+    if (index == 0 && set.firstInAir()) {
         const unsigned reach = set.firstReach;
-        if (p.readMidgame && set.pair[0].axis == set.pair[0].child) {
+        if (set.pair[0].axis == set.pair[0].child) {
             const unsigned preferred = differentFields(reach, set.pair[0]);
-            return reach & ~(preferred << (PLACEMENTS / 2));
+            return keepRecordedFirst(reach & ~(preferred << (PLACEMENTS / 2)), reach, set.firstRecorded);
         }
-        return differentFields(reach, set.pair[0]);
+        return reach;
     }
     return differentFields(legalPlacements(field), set.pair[index]);
 }
@@ -88,7 +104,8 @@ constexpr int fineSize(int garbage) {
 // Puts placement number k of a plan for its player. The pair must be in his hands.
 inline void applyMove(Duel& d, const PlanSet& set, const Plan& plan, int k) {
     const int id = plan.id[k];
-    if (k == 0 && set.midAir) d.place(set.who, placement(id), set.pair[0], set.firstLock[id], set.firstSoft[id], set.firstRest[id]);
+    if (k == 0 && set.airAsNext && !(set.firstReach >> id & 1)) return;
+    if (k == 0 && set.firstInAir()) d.place(set.who, placement(id), set.pair[0], set.firstLock[id], set.firstSoft[id], set.firstRest[id]);
     else d.placeFast(set.who, placement(id), set.pair[k]);
 }
 
@@ -97,6 +114,26 @@ inline bool toPairOf(Duel& d, int who, int64_t limit) {
     while (d.state == RoundState::Playing && d.frame < limit)
         if (d.run(limit) >> who & 1) return true;
     return false;
+}
+
+// What is above the field of the player other than `who` (waiting, and fallen since `d` began) when his landing or
+// chain that runs in `d` is over, with `who` placing nothing and no wave of `who` played: of the garbage that waited
+// there, what falls on him stays in the count and what his chain offsets leaves it.
+inline int aboveAfterHis(const Duel& d, int who, int64_t limit) {
+    Duel alone = d;
+    alone.exchangeTrace = nullptr, alone.firstDrops = nullptr;
+    const DuelPlayer& he = alone.player[1 - who];
+    if (he.phase == DuelPhase::Check || he.phase == DuelPhase::Settle) {
+        if (alone.player[who].phase != DuelPhase::Dead) alone.player[who].phase = DuelPhase::Control; // (run() passes a player in Control by)
+        toPairOf(alone, 1 - who, limit);
+    }
+    return he.fallen + he.incoming.total();
+}
+// What waits above the field of the player other than `who` in the observation; with Params::x3SentAfterHis, what
+// is above it when his landing or chain that runs is over (aboveAfterHis).
+inline int aboveOther(const Observation& o, int who, const Params& p) {
+    if (!p.x3SentAfterHis) return o.player[1 - who].incoming.total();
+    return aboveAfterHis(Duel(o), who, o.frame + 6000);
 }
 
 class Gaze {
@@ -132,40 +169,59 @@ private:
         set.tactical.clear();
         set.pairCount = 0;
         set.midAir = player.phase == Phase::Control;
+        const PairControl* air = pairInAir(o, who);
+        set.airAsNext = air && !set.midAir;
         set.firstReach = 0;
+        set.firstRecorded = -1;
         const int planLimit = std::max(set.midAir ? 1 : 0, std::min(3, depthLimit));
         set.knownCount = copySearchPairs(o, who, true, set.pair, std::max(planLimit, p.searchKnownLimit(depthLimit)));
         set.pairCount = std::min(set.knownCount, planLimit);
         if (!set.pairCount || player.phase == Phase::Dead) return true;
-        if (set.midAir) {
+        Duel d(o, seed);
+        if (air) {
             const unsigned legal = legalPlacements(player.field);
             for (int id = 0; id < PLACEMENTS; ++id) {
                 if (deadline && Builder::Clock::now() >= *deadline) return false;
-                if (!(legal >> id & 1) || !planner.plan(player.field, player.pair, placement(id), o.timing, o.rules.speedPercent, path)) continue;
+                if (!(legal >> id & 1)) continue;
+                const Placement target = placement(id);
+                if (d.hasRecordedWay(who, target)) {
+                    const auto& hand = d.inHand[who];
+                    set.firstReach |= 1u << id;
+                    set.firstRecorded = id;
+                    set.firstLock[id] = hand.wayLock;
+                    set.firstSoft[id] = hand.waySoft;
+                    set.firstRest[id] = 0; // Duel::place retains the recorded first check.
+                    continue;
+                }
+                if (!planner.plan(player.field, *air, target, o.timing, o.rules.speedPercent, path)) continue;
                 set.firstReach |= 1u << id;
                 set.firstLock[id] = o.frame + path.frames() - 1;
                 set.firstSoft[id] = path.softDropRows;
                 set.firstRest[id] = 0;
                 if (p.x3AirRest) {
                     // (the pair as those buttons leave it: how long it has lain on the ground when it locks)
-                    PairControl q = player.pair;
+                    PairControl q = *air;
                     for (const uint8_t b : path.buttons) stepPair(q, player.field, b, o.timing, o.rules.speedPercent);
-                    set.firstRest[id] = int(q.groundFrames);
+                    set.firstRest[id] = restedFrames(q, o.timing);
                 }
             }
         }
         limit = o.frame + 6000;
-        Duel d(o, seed);
         d.tallPaths = p.x3TallPaths;
-        if (p.readMidgame && d.tallPaths > 0) {
+        // (the buttons of placeFast kept by field: on tall fields, and on every field with Timing::landThenLock, where
+        //  Duel::place takes them always; the same buttons as tallSpawnInput gives)
+        if ((p.readMidgame && d.tallPaths > 0) || o.timing.landThenLock) {
             spawnInputs.configure(o.timing, o.rules.speedPercent);
             d.spawnInputs = &spawnInputs;
         }
         d.wait[o.me] = p.handWait > 0 ? p.handWait : 0; // (the hands of the player who reads, whoever's plans these are)
-        base = d.player[1 - who].incoming.total();
+        // (what waits above the other field and what of it has fallen: garbage that was waiting falls there while he lands
+        //  or his chain ends, and is no part of what a plan sends)
+        // (Params::x3SentAfterHis: nor is what his chain that runs offsets of it)
+        base = p.x3SentAfterHis ? aboveAfterHis(d, who, limit) : d.player[1 - who].fallen + d.player[1 - who].incoming.total();
         baseScore = d.player[who].scoring.score;
-        baseColoured = d.player[who].field.f.count() - d.player[who].field.f.garbage().count();
-        retainOffset = p.readMidgame && p.checkKnownExchange && who == o.me && o.opponent().phase == Phase::Wave;
+        baseColoured = colouredPieces(d.player[who].field);
+        retainOffset = p.readMidgame && p.checkKnownExchange && who == o.me && chainShown(o.opponent());
         if (!set.midAir && !toPairOf(d, who, limit)) return true;
         for (int& k : kept) k = -1;
         for (int& k : keptToo) k = -1;
@@ -227,6 +283,7 @@ private:
             plan.id[k] = int8_t(id);
             plan.count = int8_t(k + 1);
             applyMove(c, set, plan, k);
+            if (c.player[who].moves == d.player[who].moves) continue;
             const bool again = toPairOf(c, who, limit);
             const DuelPlayer& mine = c.player[who];
             if (mine.phase == DuelPhase::Dead) continue;
@@ -239,13 +296,15 @@ private:
             plan.fireDepth = int8_t(fired ? k + 1 : 0);
             plan.chains = int8_t(fired ? mine.chain.chains : 0);
             plan.allClear = fired && mine.scoring.allClear;
-            plan.sent = c.player[1 - who].incoming.total() - base;
+            // (Params::x3SentAfterHis: taken when his chain that runs is over too, as `base` is)
+            plan.sent = (p.x3SentAfterHis ? aboveAfterHis(c, who, limit) : c.player[1 - who].fallen + c.player[1 - who].incoming.total()) - base;
             plan.value = buildValue(mine.field, o.rules, o.timing, p, &plan.mainAfter);
             plan.points = mine.scoring.score - baseScore;
-            plan.used = baseColoured + 2 * (k + 1) - (mine.field.f.count() - mine.field.f.garbage().count());
+            plan.used = baseColoured + 2 * (k + 1) - colouredPieces(mine.field);
             plan.fallen = mine.fallen + mine.incoming.total();
             plan.lockFrame = mine.lockFrame;
             plan.endFrame = c.frame;
+            plan.confirmFrame = mine.settleFrame > 0 ? mine.settleFrame : 0;
             int finalLoss = -1;
             if (retainOffset && fired && !plan.allClear) {
                 // A short answer often finishes while most of the rival chain is still to come.

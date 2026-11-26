@@ -3,6 +3,7 @@
 // threads, attempts committed in numerical order, de-duplication against the
 // history file of the output directory, hooks and the console progress line.
 #include "generator.h"
+#include "thread_pool.h"
 #include "../app/console_output.h"
 #include <algorithm>
 #include <cctype>
@@ -108,12 +109,16 @@ int runLoop(const GeneratorConfig& config, const GeneratorHooks* hooks, const st
 
     // Attempt k always uses random stream k, and attempts are committed in
     // numerical order, so the results do not depend on the thread count.
+    // The attempt counters are 64-bit: restarts may be INT_MAX, and every thread draws one number past it
+    // and the commit loop looks one past the last attempt.
     std::mutex mutex;
-    std::map<int, std::optional<Sol>> finished;
-    std::atomic_int nextAttempt{1}, depth{0};
+    std::map<int64_t, std::optional<Sol>> finished;
+    std::atomic<int64_t> nextAttempt{1};
+    std::atomic_int depth{0};
     std::atomic_bool stop{false};
     std::exception_ptr failure;
-    int committed = 0, successCount = 0, duplicateCount = 0;
+    int64_t committed = 0;
+    int successCount = 0, duplicateCount = 0;
     bool progressShown = false;
     auto lastReport = std::chrono::steady_clock::time_point{};
 
@@ -134,7 +139,7 @@ int runLoop(const GeneratorConfig& config, const GeneratorHooks* hooks, const st
         writeProgressLine(status.str());
         progressShown = true;
     };
-    const auto commit = [&](int attempt, std::optional<Sol> result) { // mutex held
+    const auto commit = [&](int64_t attempt, std::optional<Sol> result) { // mutex held
         finished.emplace(attempt, std::move(result));
         for (auto it = finished.find(committed + 1); it != finished.end() && !stop;
              it = finished.find(committed + 1)) {
@@ -167,11 +172,11 @@ int runLoop(const GeneratorConfig& config, const GeneratorHooks* hooks, const st
     const auto worker = [&] {
         try {
             for (;;) {
-                const int attempt = nextAttempt.fetch_add(1);
+                const int64_t attempt = nextAttempt.fetch_add(1);
                 if (attempt > config.restarts || stop || cancelled()) break;
                 {
                     std::lock_guard lock(mutex);
-                    report(attempt, attempt == 1);
+                    report(int(attempt), attempt == 1); // attempt <= restarts: it fits an int
                 }
                 Rng rng(config.initialSeed, uint64_t(attempt));
                 std::optional<Sol> result = parts.generate(rng, &stop, &depth, hooks ? hooks->cancel : nullptr);
@@ -189,9 +194,7 @@ int runLoop(const GeneratorConfig& config, const GeneratorHooks* hooks, const st
     if (threads == 1) {
         worker();
     } else {
-        std::vector<std::thread> pool;
-        for (int i = 0; i < threads; ++i) pool.emplace_back(worker);
-        for (auto& t : pool) t.join();
+        runOnThreads(threads, worker, [&] { stop = true; });
     }
     if (failure) std::rethrow_exception(failure);
     if (progressShown) std::cout << '\n';

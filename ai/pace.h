@@ -149,7 +149,7 @@ protected:
     // That side as a frame shows it: a chain is running, or about to - the pair that fires it has locked.
     // (Rules that clear another number than four: only a chain that runs.)
     static bool firing(const Player& q, const Rules& rules) {
-        if (q.phase == Phase::Wave || (q.phase == Phase::Land && q.chain.chains > 0)) return true;
+        if (chainShown(q)) return true;
         return (q.phase == Phase::Split || q.phase == Phase::Land) && rules.clearCount == 4 && q.field.f.hasClear();
     }
     // Before every frame of the round: keeps what the screen shows, and moves the frame the opponent is seen at.
@@ -495,14 +495,14 @@ protected:
 
     // A beam search that is to end when `percent` of the time of the choice are over.
     BuildResult search(Builder& b, const GameField& field, const Pair* known, int count, const Observation& o, Params q, uint64_t seed, int percent,
-                       bool fit) {
+                       bool fit, bool cutBuild = false) {
         // (the values of the last layer are read only by the two ways of choosing by them, and those of
         // a search that the clock stopped, which never has a last layer)
         if (!valuesWanted()) q.beamLastValues = 0;
         if (p.thinkBudget <= 0) {
             if (fit && scripted && widthAt < scripted->widths.size()) q.beamWidth = scripted->widths[widthAt++];
             if (&b == &builder) ownWidth = q.beamWidth;
-            return b.search(field, known, count, o.rules, o.timing, q, seed, p.searchThreads);
+            return b.search(field, known, count, o.rules, o.timing, q, seed, p.searchThreads, nullptr, cutBuild);
         }
         const Builder::Clock::time_point end = began + std::chrono::microseconds(int64_t(budgetNow) * 10 * percent), now = Builder::Clock::now();
         const int queues = q.queues(), depth = q.depth();
@@ -523,7 +523,7 @@ protected:
             }
         }
         if (&b == &builder && fit && early.on) {
-            if (early.is(field, known, count, seed, q) && early.width >= width) {
+            if (!cutBuild && early.is(field, known, count, seed, q) && early.width >= width) {
                 // The search begun while the last pair fell is this one. It ends when this one must.
                 searching.store(&earlyBuilder);
                 earlyBuilder.until(end);
@@ -540,6 +540,7 @@ protected:
                 ownWidth = early.width;
                 if (Note* n = note()) n->widths.push_back(early.width), n->cut += r.cut;
                 cutSearches += dropped ? 0 : r.cut;
+                if (r.cut) poor = true, againCut += choosingAgain && !dropped; // (as a search made here: the clock stopped it)
                 return r;
             }
             dropEarly();
@@ -551,7 +552,7 @@ protected:
         q.beamWidth = width;
         if (&b == &builder) ownWidth = q.beamWidth;
         if (Note* n = note(); n && fit) n->widths.push_back(q.beamWidth);
-        BuildResult r = b.search(field, known, count, o.rules, o.timing, q, seed, p.searchThreads);
+        BuildResult r = b.search(field, known, count, o.rules, o.timing, q, seed, p.searchThreads, nullptr, cutBuild);
         searching.store(nullptr);
         const bool dropped = stale.load(); // (cutStale: the choice was dropped - what the search took is not learnt)
         const int layers = r.cut ? r.layers : depth;

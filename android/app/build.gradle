@@ -70,12 +70,15 @@ android {
 }
 
 // The files that come with the game, below "game" in the assets, and their list (game/files.txt), by which the game
-// copies them out on its first start and again when the list is another.
+// copies them out on its first start and again when the list is another (the list has the version, a digest of the
+// contents, and every file with its size).
 tasks.register('gameAssets') {
     inputs.dir("${repository}/media/background")
     inputs.dir("${repository}/media/bgm")
     inputs.dir("${repository}/media/fonts")
     inputs.dir("${repository}/licenses")
+    inputs.file("${repository}/LICENSE")
+    inputs.property('version', version) // (written into the list)
     outputs.dir(assetsFolder)
     doLast {
         delete assetsFolder
@@ -95,7 +98,19 @@ tasks.register('gameAssets') {
         def names = []
         game.eachFileRecurse(groovy.io.FileType.FILES) { names << game.toPath().relativize(it.toPath()).toString().replace('\\', '/') }
         names.sort()
-        new File(game, 'files.txt').text = "version ${version}\n" + names.collect { n -> "${n} ${new File(game, n).length()}" }.join('\n') + '\n'
+        // (a SHA-256 of the names and the contents of all the files: a file replaced by another of the same name and size
+        //  makes another list as well)
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        names.each { n ->
+            digest.update(n.getBytes('UTF-8'))
+            digest.update((byte) 0)
+            new File(game, n).withInputStream { s ->
+                byte[] buffer = new byte[65536]
+                int read
+                while ((read = s.read(buffer)) > 0) digest.update(buffer, 0, read)
+            }
+        }
+        new File(game, 'files.txt').text = "version ${version}\ndigest ${digest.digest().encodeHex()}\n" + names.collect { n -> "${n} ${new File(game, n).length()}" }.join('\n') + '\n'
     }
 }
 preBuild.dependsOn 'gameAssets'

@@ -27,12 +27,14 @@
 #define sscanf_s sscanf
 #endif
 #include "toko_game.h"
+#include "../generator/thread_pool.h"
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <system_error>
 #include <thread>
 
 using namespace juraic;
@@ -67,9 +69,12 @@ void play(const Options& opt, const ai::Params side[2], uint64_t firstSeed, doub
     if (opt.threads <= 1) {
         worker();
     } else {
-        std::vector<std::thread> pool;
-        for (int i = 0; i < opt.threads; ++i) pool.emplace_back(worker);
-        for (std::thread& t : pool) t.join();
+        try {
+            runOnThreads(opt.threads, worker, [&] { next = opt.games * 2; });
+        } catch (const std::system_error& e) {
+            std::cerr << "a thread could not be started: " << e.what() << '\n';
+            std::exit(1);
+        }
     }
     int64_t sum[2] = {0, 0};
     for (int j = 0; j < opt.games * 2; ++j) sum[j & 1] += value[size_t(j)];

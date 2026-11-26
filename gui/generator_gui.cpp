@@ -58,6 +58,8 @@ public:
     double firstSeconds=-1, fifthSeconds=-1;
     double completedSeconds=0;
     bool testing=false;
+    int closeAsks=0, closeAnswer=IDNO; // (testing: how often the question of an unsaved board was asked, and the answer it is given)
+    Board closeAnswered{}; // the edited board as it was when the question was answered, the window closed while a search ran
     int uiTicks=0, errors=0;
     std::wstring state=L"設定を確認し、生成開始を押してください。";
     ~App(){cancel=true;if(worker.joinable())worker.join();DeleteObject(font);DeleteObject(titleFont);DeleteObject(pieceFont);DeleteObject(background);}
@@ -223,7 +225,8 @@ public:
         firstSeconds=fifthSeconds=-1;completedSeconds=0;started=std::chrono::steady_clock::now();state=L"探索中";
         {std::lock_guard lock(mutex);progress={};}
         put(OUTPUT_RUN,runDirectory.wstring());updateEnabled();
-        worker=std::thread([this,dir=runDirectory,format,wideRun]{
+        // (if the thread cannot be started, the window leaves the running state again before the error is shown)
+        try{worker=std::thread([this,dir=runDirectory,format,wideRun]{
             try {
                 std::ofstream log(dir/L"generator.log",std::ios::binary);if(!log)throw std::runtime_error("ログを作成できません。");
                 // (a 10 x 18 result has no URL: its board code is in boards_10x18.txt, written by the engine)
@@ -243,7 +246,7 @@ public:
                 };
                 int code=runGenerator(dir/L"config.ini",&hooks,dir);post({Event::Done,{},code});
             }catch(const std::exception& e){post({Event::Done,{},2,e.what()});}
-        });
+        });}catch(const std::system_error&){running=false;resultCode=2;completedSeconds=0;updateEnabled();throw std::runtime_error("生成のスレッドを開始できません。");}
     }
     void select(int n){
         if(n<0 || n>=int(records.size()))return;stopPlay();editing=false;selected=n;frames=timeline(records[n]);frame=0;
@@ -261,7 +264,7 @@ public:
         if(many)SendMessageW(get(RESULTS),WM_SETREDRAW,FALSE,0);
         for(auto& e:pending){
             if(e.kind==Event::Saved){++saved;double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();if(saved==1)firstSeconds=elapsed;if(saved==5)fifthSeconds=elapsed;append(std::move(e.record),false);added=true;}
-            else{running=false;completedSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();resultCode=e.code;if(worker.joinable())worker.join();state=e.code==0?L"目標達成":e.code==1?L"試行上限: 部分成果を保存しました。":e.code==3?L"中断: 部分成果を保存しました。":L"エラー: 今回の保存先のgenerator.logを確認してください。";if(!e.error.empty())state+=L" "+wide(e.error);updateEnabled();if(closing){DestroyWindow(window);return;}}
+            else{running=false;completedSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();resultCode=e.code;if(worker.joinable())worker.join();state=e.code==0?L"目標達成":e.code==1?L"試行上限: 部分成果を保存しました。":e.code==3?L"中断: 部分成果を保存しました。":L"エラー: 今回の保存先のgenerator.logを確認してください。";if(!e.error.empty())state+=L" "+wide(e.error);updateEnabled();if(closing){closing=false;endStroke();if((hasEditor&&editor.board==closeAnswered)||confirmClose()){DestroyWindow(window);return;}}} // (the editor stays usable while the search ends: asked again only when the board was edited since the answer)
         }
         if(many){SendMessageW(get(RESULTS),WM_SETREDRAW,TRUE,0);InvalidateRect(get(RESULTS),nullptr,TRUE);}
         if(added)updateEnabled();
@@ -302,7 +305,7 @@ public:
     void toggleEditor(){if(editing){stopPlay();editing=false;if(selected>=0)select(selected);else{frames.clear();put(DETAIL,L"生成結果を選択してください。");InvalidateRect(board,nullptr,FALSE);updateEnabled();}}else{if(!hasEditor&&!frames.empty())editor.replace(frames[frame].board);editorView();}}
     std::filesystem::path boardFile(bool save){wchar_t path[32768]=L"";OPENFILENAMEW o{sizeof(o)};o.hwndOwner=window;o.lpstrFile=path;o.nMaxFile=32768;o.lpstrFilter=L"編集盤面\0*.jfboard\0\0";o.lpstrDefExt=L"jfboard";o.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROMPT:OFN_FILEMUSTEXIST);if(save?GetSaveFileNameW(&o):GetOpenFileNameW(&o))return path;return {};}
     bool saveEditor(){auto path=boardFile(true);if(path.empty())return false;saveBoard(path,editor.board);savedBoard=editor.board;showFrame();return true;}
-    bool confirmClose(){if(!hasEditor||editor.board==savedBoard)return true;int choice=MessageBoxW(window,L"編集盤面に未保存の変更があります。保存して終了しますか？",L"編集盤面の保存",MB_YESNOCANCEL|MB_ICONQUESTION);return choice==IDNO||(choice==IDYES&&saveEditor());}
+    bool confirmClose(){if(!hasEditor||editor.board==savedBoard)return true;int choice=testing?(++closeAsks,closeAnswer):MessageBoxW(window,L"編集盤面に未保存の変更があります。保存して終了しますか？",L"編集盤面の保存",MB_YESNOCANCEL|MB_ICONQUESTION);return choice==IDNO||(choice==IDYES&&saveEditor());}
     // The board shown: the frame of the result or of the editor, else the editor's board.
     const Board& shownBoard() const{return frames.empty()?editor.board:frames[frame].board;}
     // Where the cells of the shown board are drawn in the board control.
@@ -489,7 +492,9 @@ int selfTest(App& a,const std::filesystem::path& root) {
          SendMessageW(a.get(FIELD_SIZE),CB_SETCURSEL,0,0);SendMessageW(a.window,WM_COMMAND,MAKEWPARAM(FIELD_SIZE,CBN_SELCHANGE),reinterpret_cast<LPARAM>(a.get(FIELD_SIZE)));
          check(text(a.labels[0])==L"連鎖数（1〜19）","back to 6 x 12");a.editor.replace(smallDraft);a.editorView();}
         a.snapshot(root/L"gui-editor.bmp");a.savedBoard=a.editor.board;click(EDIT_MODE);
+        {Board unsaved=a.editor.board;unsaved.cells[0][0]=unsaved.cells[0][0]==Red?Green:Red;a.editor.replace(unsaved);}a.closeAnswer=IDNO;a.closeAsks=0; // (closed unsaved, "do not save": not asked again as the search ends)
         c=defaults();c.targetSuccessCount=10000000;c.restarts=2000000000;a.setSettings(c);click(START);SendMessageW(a.window,WM_CLOSE,0,0);awaitDone(3);check(!IsWindow(a.window),"window close cancels and joins worker");
+        check(a.closeAsks==1,"an unsaved board left so as the window closed is asked about again when the search has ended");
         report<<"ALL GUI TESTS PASSED\n";return 0;
     }catch(const std::exception& e){report<<"ERROR "<<e.what()<<'\n';a.cancel=true;if(a.worker.joinable())a.worker.join();return 1;}
 }
@@ -510,7 +515,7 @@ LRESULT CALLBACK windowProc(HWND h,UINT m,WPARAM w,LPARAM l){
         case PUMP:app->drain();return 0;
         case WM_TIMER:if(w==1){++app->uiTicks;app->drain();}else if(w==2){if(app->frame+1<int(app->frames.size())){++app->frame;app->showFrame();}else app->stopPlay();}return 0;
         case WM_CTLCOLORSTATIC:SetBkMode(reinterpret_cast<HDC>(w),OPAQUE);SetBkColor(reinterpret_cast<HDC>(w),RGB(245,247,250));SetTextColor(reinterpret_cast<HDC>(w),RGB(25,40,59));return reinterpret_cast<LRESULT>(app->background);
-        case WM_CLOSE:app->endStroke();app->stopPlay();if(!app->confirmClose())return 0;if(app->running){app->closing=true;app->cancel=true;app->state=L"終了処理中: 部分成果を保存して閉じます。";app->updateEnabled();}else DestroyWindow(h);return 0;
+        case WM_CLOSE:app->endStroke();app->stopPlay();if(!app->confirmClose())return 0;if(app->running){app->closeAnswered=app->editor.board;app->closing=true;app->cancel=true;app->state=L"終了処理中: 部分成果を保存して閉じます。";app->updateEnabled();}else DestroyWindow(h);return 0;
         case WM_DESTROY:KillTimer(h,1);KillTimer(h,2);PostQuitMessage(0);return 0;
         }
     }catch(const std::exception& e){app->error(e);if(m==WM_CREATE)return -1;}

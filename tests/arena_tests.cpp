@@ -33,15 +33,28 @@ static bool until(const std::function<bool()>& done, int ms, const std::function
     return true;
 }
 
-// A server of this machine: listens at 127.0.0.1 on a port that is free (a few are tried) and takes one caller.
+// The port a socket is bound to (0: none).
+static int portOf(arena::Socket s) {
+    sockaddr_in a{};
+#ifdef _WIN32
+    int n = sizeof a;
+#else
+    socklen_t n = sizeof a;
+#endif
+    return getsockname(s, reinterpret_cast<sockaddr*>(&a), &n) == 0 ? int(ntohs(a.sin_port)) : 0;
+}
+
+// A server of this machine: listens at 127.0.0.1 on a port the system picks as free and takes one caller. (Not a fixed
+// port: two of these tests run at once - the tests of two builds - would listen on the same port, Windows lets them
+// with SO_REUSEADDR, and the callers of one would reach the other.)
 struct LocalServer {
     arena::Socket listener = arena::NO_SOCKET;
     int port = 0;
     arena::Line line;
     LocalServer() {
         ArenaPlay::startSockets();
-        for (int p = 50841; p < 50861 && listener == arena::NO_SOCKET; ++p) listener = arena::listenOn("127.0.0.1", p), port = p;
-        check(listener != arena::NO_SOCKET, "no port of this machine could be listened on (50841 to 50860, at 127.0.0.1)");
+        listener = arena::listenOn("127.0.0.1", 0), port = listener == arena::NO_SOCKET ? 0 : portOf(listener);
+        check(listener != arena::NO_SOCKET && port > 0, "no port of this machine could be listened on (at 127.0.0.1)");
     }
     ~LocalServer() { arena::closeSocket(listener); }
     LocalServer(const LocalServer&) = delete;
@@ -137,6 +150,24 @@ static void testLineBounded() {
     std::cout << "a connection keeps at most " << arena::Line::MOST_IN << " bytes of what has come\n";
 }
 
+// A line sent on a connection that can no longer send (its sending side shut, as when it is broken while nothing has
+// come to tell so): the connection is taken as closed, and the program goes on (on POSIX no SIGPIPE ends it).
+static void testSendAfterClosed() {
+    LocalServer server;
+    arena::Line client;
+    check(arena::connectTo("127.0.0.1", server.port, client), "no connection to the server of this machine");
+    server.accept();
+#ifdef _WIN32
+    shutdown(client.s, SD_SEND);
+#else
+    shutdown(client.s, SHUT_WR);
+#endif
+    client.send("PONG 1");
+    client.pump();
+    check(!client.open(), "a connection that cannot send is taken as open after a line was sent on it");
+    std::cout << "a line sent on a connection that cannot send closes it\n";
+}
+
 static void testHeldBounded() {
     LocalServer server;
     ArenaPlay a;
@@ -174,10 +205,103 @@ static void testFramesBeforeEnd() {
     server.say("B 1 0 0 " + frames(20));
     server.say("B 1 1 0 " + frames(20));
     server.say("END 1 draw left 20 0 0");
-    // (a watcher takes the lines WATCH_LAG_MS after they came: all of them in one frame here)
-    until([&] { return played >= 40; }, int(ArenaPlay::WATCH_LAG_MS) + WAIT_MS, tick);
+    // (a watcher takes the lines WATCH_LAG_MS after they came; then it plays two frames of each seat a frame of the
+    //  game: counted in frames, not in time, which a machine under load stretches)
+    until([&] { return a.match.roundEnded && a.held.empty(); }, int(ArenaPlay::WATCH_LAG_MS) + WAIT_MS, tick);
+    for (int i = 0; i < 1000 && played < 40; ++i) tick();
     check(played == 40, "of 40 frames that came before the end of the round, " + std::to_string(played) + " played");
     std::cout << "the frames that came before the end of a round are played\n";
+}
+
+// The last buttons of the last round, its END and the MATCHEND taken in one frame of a watcher: the frames are played
+// to the end of the round all the same (the end of the match does not drop them).
+static void testFramesBeforeMatchEnd() {
+    LocalServer server;
+    ArenaPlay a;
+    a.watch("127.0.0.1", server.port);
+    server.accept();
+    int played = 0;
+    const auto tick = [&] { a.tick(0, [&](int, const PlayerEvents&) { ++played; }); };
+    check(server.heard(tick) == "WATCH auto", "the watcher did not ask to watch");
+    std::string lines = matchLine(-1) + "\nRULES " + arena::rulesText(arena::ArenaRules{}) + "\nROUND 1 77 c";
+    for (int i = 0; i < 4; ++i) lines += "\nT 1 " + std::to_string(i) + " 12";
+    lines += "\nB 1 0 0 " + frames(20) + "\nB 1 1 0 " + frames(20) + "\nEND 1 draw left 20 0 0\nMATCHEND 0 0 draw";
+    server.say(lines); // (one piece: taken in one frame of the watcher)
+    until([&] { return a.match.matchOver && a.held.empty(); }, int(ArenaPlay::WATCH_LAG_MS) + WAIT_MS, tick);
+    for (int i = 0; i < 1000 && played < 40; ++i) tick(); // (in frames, not in time: as in testFramesBeforeEnd)
+    check(played == 40 && a.match.matchOver && a.match.round.played(0) == 20 && a.match.round.played(1) == 20,
+          "of 40 frames that came before the end of the match, " + std::to_string(played) + " played");
+    std::cout << "the frames that came before the end of a match are played\n";
+}
+
+// One receive batch containing two rounds of a match, then another match, followed by EOF.
+static void testWatchBatchAndEof() {
+    ArenaPlay a;
+    a.stage = ArenaPlay::Watching;
+    a.watcher = true;
+    const auto initial = [](int id) {
+        std::string line = matchLine(-1);
+        line.replace(6, line.find(' ', 6) - 6, std::to_string(id));
+        return line + "\nRULES " + arena::rulesText(arena::ArenaRules{}) + "\n";
+    };
+    const auto batchRound = [](int no, int n) {
+        const auto number = std::to_string(no);
+        std::string lines = "ROUND " + number + " 77 c\n";
+        for (int i = 0; i < 10; ++i) lines += "T " + number + " " + std::to_string(i) + " 12\n";
+        for (int seat = 0; seat < 2; ++seat)
+            lines += "B " + number + " " + std::to_string(seat) + " 0 " + frames(n, juraic::BTN_DROP) + "\n";
+        return lines + "END " + number + " draw left " + std::to_string(n) + " 0 0\n";
+    };
+    a.line.in = initial(1) + batchRound(1, 40) + batchRound(2, 42) + "MATCHEND 0 0 draw\n" +
+                initial(2) + batchRound(1, 44) + "MATCHEND 0 0 draw\n";
+    a.line.closed = true;
+    int played[3][2]{};
+    juraic::GameField boards[3][2]{};
+    const auto step = [&](int64_t now) {
+        a.tick(0, [&](int seat, const PlayerEvents&) {
+            const int i = a.match.id == "2" ? 2 : a.match.roundNo - 1;
+            ++played[i][seat];
+            boards[i][seat] = a.match.round.player(seat).field;
+        }, now);
+    };
+    step(100);
+    step(100 + ArenaPlay::WATCH_LAG_MS - 1);
+    check(a.stage == ArenaPlay::Watching && !a.held.empty() && !a.match.on,
+          "EOF drops received lines before their watch time");
+    for (int i = 0; i < 100 && a.stage != ArenaPlay::Over; ++i) step(100 + ArenaPlay::WATCH_LAG_MS + i);
+    check(a.stage == ArenaPlay::Over && a.held.empty(), "EOF does not end watching after the received lines played");
+    for (int i = 0; i < 3; ++i) {
+        const int n = 40 + i * 2;
+        arena::ArenaRound expected;
+        expected.startPartial(arena::ArenaRules{}.rules, 77, a.match.delay);
+        for (int pair = 0; pair < 10; ++pair)
+            check(expected.addPair(pair, {1, 2}), "the reference pair was not accepted");
+        for (int frame = 0; frame < n; ++frame)
+            for (int seat = 0; seat < 2; ++seat) {
+                PlayerEvents events;
+                check(expected.play(seat, juraic::BTN_DROP, events), "the reference round cannot play");
+            }
+        for (int seat = 0; seat < 2; ++seat)
+            check(played[i][seat] == n && boards[i][seat] == expected.player(seat).field,
+                  "the next round, next match or EOF drops the preceding final frames or board");
+    }
+}
+
+// A line held back for the watcher's lag that ends the watching (a match with a seat of its own, sent to a watcher):
+// taken out of the lines held before it is followed, so the watching ends as told, the lines after it left.
+static void testWatchedLineEnds() {
+    LocalServer server;
+    ArenaPlay a;
+    a.watch("127.0.0.1", server.port);
+    server.accept();
+    const auto tick = [&] { a.tick(0, [](int, const PlayerEvents&) {}); };
+    check(server.heard(tick) == "WATCH auto", "the watcher did not ask to watch");
+    server.say(matchLine(0));
+    server.say("RULES " + arena::rulesText(arena::ArenaRules{}));
+    check(until([&] { return a.held.size() >= 2 || a.stage == ArenaPlay::Over; }, WAIT_MS, tick), "the watcher did not hold the lines back");
+    check(until([&] { return a.stage == ArenaPlay::Over; }, int(ArenaPlay::WATCH_LAG_MS) + WAIT_MS, tick), "a line that ends the watching does not end it");
+    check(a.held.empty() && a.heldBytes == 0 && !a.over.empty(), "the lines held back are kept after the watching ended");
+    std::cout << "a line held back that ends the watching ends it\n";
 }
 
 static void testClosedByServer() {
@@ -212,18 +336,23 @@ static void testCalledAside() {
     check(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(1000) && b.stage == ArenaPlay::Off, "leaving while the server is called waits");
     // No server: the game says so.
     ArenaPlay c;
-    arena::Socket none = arena::listenOn("127.0.0.1", server.port + 1);
-    const int port = server.port + 1;
-    arena::closeSocket(none); // (a port no one listens on)
+    // (a port bound here and not listened on, kept so while it is called: no other program can listen on it meanwhile)
+    arena::Socket none = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in at{};
+    at.sin_family = AF_INET, at.sin_port = 0;
+    inet_pton(AF_INET, "127.0.0.1", &at.sin_addr);
+    check(none != arena::NO_SOCKET && bind(none, reinterpret_cast<sockaddr*>(&at), sizeof at) == 0, "no port of this machine could be bound");
+    const int port = portOf(none);
     c.play("127.0.0.1", port, "someone", "token");
-    check(until([&] { return c.stage == ArenaPlay::Over; }, WAIT_MS + 5000, [&] { c.tick(0, [](int, const PlayerEvents&) {}); }) && !c.over.empty(),
-          "a server that is not there is not told");
+    const bool told = until([&] { return c.stage == ArenaPlay::Over; }, WAIT_MS + 5000, [&] { c.tick(0, [](int, const PlayerEvents&) {}); }) && !c.over.empty();
+    arena::closeSocket(none);
+    check(told, "a server that is not there is not told");
     std::cout << "the server is called on a thread of its own\n";
 }
 
 int main() {
     int failed = 0;
-    for (void (*test)() : {testOutOfRange, testButtonsBounded, testLineBounded, testHeldBounded, testFramesBeforeEnd, testClosedByServer, testCalledAside}) {
+    for (void (*test)() : {testOutOfRange, testButtonsBounded, testLineBounded, testSendAfterClosed, testHeldBounded, testFramesBeforeEnd, testFramesBeforeMatchEnd, testWatchBatchAndEof, testWatchedLineEnds, testClosedByServer, testCalledAside}) {
         try {
             test();
         } catch (const std::exception& e) {

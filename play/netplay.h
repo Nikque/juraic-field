@@ -141,13 +141,17 @@ struct NetPlay {
             if (--timer > 0) return;
             const juraic::Rules& rules = settings.rules;
             const int winner = wins[0] >= rules.winsNeeded ? 0 : wins[1] >= rules.winsNeeded ? 1 : -1;
-            if (winner < 0) beginRound();
-            else if (++sets[winner] >= rules.setsNeeded) stage = MatchEnd, matchEnded = true;
+            // (the next round only once the other end has the buttons of the own seat it needs to end this one)
+            if (winner < 0) {
+                if (peer.roundHeard(link.round.frame)) beginRound();
+                return;
+            }
+            if (++sets[winner] >= rules.setsNeeded) stage = MatchEnd, matchEnded = true;
             else stage = SetEnd, timer = 150;
             return;
         }
         case SetEnd:
-            if (--timer <= 0) wins[0] = wins[1] = 0, beginRound();
+            if (--timer <= 0 && peer.roundHeard(link.round.frame)) wins[0] = wins[1] = 0, beginRound();
             return;
         case MatchEnd:
             if (peer.again && peer.hisAgain) {

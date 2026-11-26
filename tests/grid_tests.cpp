@@ -290,6 +290,21 @@ static void testVerifyAgainstEngine(std::mt19937_64& rng) {
 // ---- 10 x 19 -----------------------------------------------------------------
 using G10 = Grid10x19;
 
+// Three colours search with the plan of G10::ThreeColors: a search that ends with no board to go on with still gives
+// the boards of its last step (tools/grid_bench.cpp shows them), in the geometry of G10.
+static void testThreeColourDeadEnd() {
+    int failed = 0;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        Rng rng(20261017, uint64_t(attempt));
+        std::vector<grid_detail::Node<G10>> dead;
+        if (gridGenerateOne<G10>(3, 46, 8, 2, 0, 0, rng, nullptr, nullptr, nullptr, &dead)) continue;
+        ++failed;
+        check(!dead.empty(), "three colours: the boards where the search ended");
+        for (const auto& n : dead) check(n.field.count() > 0 && n.trigger.count() == 4, "three colours: a board where the search ended");
+    }
+    check(failed > 0, "three colours: no search ended without a board");
+}
+
 static void testWideRules() {
     check(maxPieces<Grid6x13>() == 78 && maxChain<Grid6x13>() == 19, "6 x 13 capacity");
     check(maxPieces<G10>() == 188 && maxChain<G10>() == 47, "10 x 19 capacity: 47 chains");
@@ -412,6 +427,7 @@ int main() {
         step("verification against the engine", [&] { testVerifyAgainstEngine(rng); });
         step("search against generator.cpp", [&] { testGeneratorAgainstEngine(); });
         step("10 x 19 rules", [&] { testWideRules(); });
+        step("10 x 19 three colours, dead end", [&] { testThreeColourDeadEnd(); });
         step("10 x 19 generation", [&] { testWideGeneration(); });
         std::cout << "grid tests passed\n";
         return 0;

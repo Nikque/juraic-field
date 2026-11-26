@@ -62,6 +62,9 @@ struct InputConfig {
                 if (bind[layout][a] == bind[layout][b]) return true;
         return false;
     }
+    // Can `code` be bound in a layout: a virtual key code (0 to 255) on a keyboard, a bit of Pads::raw (0 to 63) on a
+    // controller.
+    static constexpr bool fits(int layout, int code) { return code >= 0 && code < (layout < LAYOUT_XBOX ? 256 : 64); }
     // Device of each player: 0 keyboard 1, 1 keyboard 2, 2 + n = controller n. -1 = choose automatically.
     int device[2] = {-1, -1};
 };
@@ -102,6 +105,9 @@ inline std::wstring codeName(int layout, int code) {
     return L"キー " + std::to_wstring(code);
 }
 
+// Is the button of bit `bit` held in a word of Pads::raw (false for a bit beyond its 64).
+inline bool padHeld(uint64_t raw, int bit) { return bit >= 0 && bit < 64 && (raw >> bit & 1) != 0; }
+
 // The actions held on a device in this frame, as a bit per Action.
 inline unsigned actionsOf(int device, const InputConfig& config, const Pads& pads, bool focused) {
     unsigned held = 0;
@@ -113,7 +119,7 @@ inline unsigned actionsOf(int device, const InputConfig& config, const Pads& pad
     } else {
         const uint64_t raw = pads.raw(device - 2);
         for (int a = 0; a < ACT_COUNT; ++a)
-            if (raw >> bind[a] & 1) held |= 1u << a;
+            if (padHeld(raw, bind[a])) held |= 1u << a;
     }
     return held;
 }
@@ -144,18 +150,28 @@ struct HeldAtStart {
     void watch(uint8_t buttons) { waiting &= buttons; }
 };
 
-// Devices for the two players when none was chosen: controllers first.
-inline void chooseDevices(const InputConfig& config, const Pads& pads, int players, int device[2]) {
-    int nextPad = 0;
-    bool keys1Used = false;
+// Devices for the two players when none was chosen: controllers first. The devices the players have chosen are
+// theirs first; a player who has chosen none gets the first controller nobody has chosen, else keyboard 1 if nobody
+// has it, else keyboard 2.
+inline void chooseDevices(const InputConfig& config, int padCount, int players, int device[2]) {
     for (int i = 0; i < players; ++i) {
         device[i] = config.device[i];
-        if (device[i] >= 2 && device[i] - 2 >= pads.count()) device[i] = -1; // that controller is gone
+        if (device[i] >= 2 && device[i] - 2 >= padCount) device[i] = -1; // that controller is gone
+    }
+    const auto taken = [&](int d) {
+        for (int i = 0; i < players; ++i)
+            if (device[i] == d) return true;
+        return false;
+    };
+    for (int i = 0; i < players; ++i) {
         if (device[i] >= 0) continue;
-        if (nextPad < pads.count()) device[i] = 2 + nextPad++;
-        else device[i] = keys1Used ? 1 : 0, keys1Used = true;
+        int d = -1;
+        for (int n = 0; n < padCount && d < 0; ++n)
+            if (!taken(2 + n)) d = 2 + n;
+        device[i] = d >= 0 ? d : taken(0) ? 1 : 0;
     }
     if (players == 2 && device[0] == device[1]) device[1] = device[0] == 0 ? 1 : 0;
 }
+inline void chooseDevices(const InputConfig& config, const Pads& pads, int players, int device[2]) { chooseDevices(config, pads.count(), players, device); }
 
 } // namespace play
