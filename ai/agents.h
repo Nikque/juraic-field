@@ -42,7 +42,9 @@ inline bool quietOf(const std::string& name) { return name == "x3q" || (levelOf(
 // steps of hands, sight and search, and nothing was measured.)
 inline Params namedDefaults(const std::string& name) {
     Params p;
-    if (levelOf(name) == 38) {
+    const int level = levelOf(name);
+    p.x3PokeNet = defaultPokeNet(level);
+    if (level == 38) {
         p.lv38FastSoft = p.lv38FastBusy = p.lv38TakeSmall = p.lv38TwoWaveReselect = 1;
         p.lv38FastStates = 4000;
         if (explicitLv38Ex(name)) {

@@ -3082,7 +3082,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassW(&wc);
     RECT rc{0, 0, 1280, 720};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    a.window = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Juraic Field 0.9.9", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+    a.window = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"Juraic Field 0.9.9.1", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, instance, nullptr);
     if (!a.window || !a.createTarget()) return 1;
     a.audio.init();

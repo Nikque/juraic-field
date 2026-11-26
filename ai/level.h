@@ -77,8 +77,11 @@ inline constexpr int LEVEL_PARENT_PERMILLE[LEVELS - 1] = {591, 595, 602, 608, 60
 constexpr int LEVEL_GROUPS = 6;
 constexpr int levelGroup(int level) { return level <= 9 ? 0 : level <= 20 ? 1 : level <= 25 ? 2 : level <= 30 ? 3 : level < LEVELS ? 4 : 5; }
 
+constexpr int defaultPokeNet(int level) { return level == 37 || level == 38 ? 3 : 0; }
+
 // `p` with the settings of a level. Level LEVELS, and any number that is no level, leaves p as it is.
 inline Params levelParams(Params p, int level) {
+    if (p.x3PokeNet == -1) p.x3PokeNet = defaultPokeNet(level);
     p.lv38Midgame = level == DEVELOPMENT_LEVEL;
     if (p.lv38Midgame && p.lv38Plan5 < 0) p.lv38Plan5 = 1;
     if (p.lv38Midgame && p.lv38ReadyCover < 0) p.lv38ReadyCover = 0;

@@ -26,6 +26,7 @@ namespace juraic::ai {
 class X3Pace : public PlacementAgent {
 public:
     explicit X3Pace(const Params& params) : p(params) {
+        if (p.x3PokeNet == -1) p.x3PokeNet = 0; // A directly constructed X3 has no level name.
         choicePairLimit = std::clamp(params.knownPairs, 3, MAX_KNOWN);
         ahead = params.thinkAhead, pathCheck = params.x3PathCheck != 0, againLate = params.thinkLate, holdSecond = params.thinkHold != 0;
         equivalentSetupRoute = params.equivalentSetupRoute;

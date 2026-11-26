@@ -2,7 +2,7 @@
 
 [English README](README.en.md)
 
-[v0.9.7 から v0.9.9 までの修正事項一覧](docs/changes-since-0.9.7.md)
+[v0.9.7 から v0.9.9.1 までの修正事項一覧](docs/changes-since-0.9.7.md)
 
 Juraic Field は、落ちものパズルの対戦・練習ソフトです。1 人で連鎖を組む「とこ」、同じ PC での 2 人対戦、対戦 AI「Juraic」との対戦、AI どうしの観戦、ネット対戦（人 対 人）、リプレイの保存と再生、連鎖の盤面を作るジェネレーターが入っています。Windows 10 / 11（64 ビット）用、Linux（x86-64）用、macOS（Apple シリコン）用、Android（arm64）用があります。
 

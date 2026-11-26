@@ -1600,7 +1600,7 @@ static void testQuietPoke() {
     small.beamWidth = 30, small.beamDepth = 8, small.beamQueues = 3;
     ai::Params quiet = small;
     quiet.evFireHeight = 300, quiet.x3PokeGain = 75, quiet.xWildChance = 0, quiet.xWildEvery = 2, quiet.x3PokeNet = 0, quiet.x3PokeFrom = 0, quiet.x3KeepMain = 85, quiet.x3Crowd = 1000;
-    const ai::Params made = ai::quietPoke(small), standard;
+    const ai::Params made = ai::quietPoke(small), standard = ai::agentParams("x3", {});
     check(made.evFireHeight == 300 && made.x3PokeGain == 75 && made.xWildChance == 0 && made.xWildEvery == 2 && made.x3PokeNet == 0 && made.x3PokeFrom == 0 &&
               made.x3KeepMain == 85 && made.x3Crowd == 1000 && made.beamWidth == small.beamWidth,
           "quietPoke does not set its eight settings and leave the rest");
@@ -1702,7 +1702,7 @@ static void testKnownSearchPairs() {
 }
 
 static void testLevelTable() {
-    const ai::Params standard;
+    const auto standard = ai::namedDefaults("x3");
     check(ai::levelOf("lv37") == 37 && !ai::makeAgent("lv37q") &&
           ai::agentParams("lv37", standard).knownPairs == ai::MAX_KNOWN &&
           ai::agentParams("lv36", standard).knownPairs == 3 && ai::agentParams("x3", standard).knownPairs == 3,
@@ -5964,6 +5964,30 @@ static void testKnownPokeReserve() {
         return ai::known_poke::prefer(o, legal, 70, 1, params, own, enemy, poke, room, false, 0, [] { return false; });
     };
     check(select(3) == 7, "Lv37 holds a visible 14-chain when every known exchange is at least as good");
+    for (const char* name : {"lv36", "lv36q", "lv37", "lv38", "lv38ex"}) {
+        const bool upper = ai::levelOf(name) >= 37;
+        for (bool cancel : {false, true}) {
+            if (ai::explicitLv38Ex(name) && !cancel) continue;
+            o.rules.cancel = cancel;
+            const auto named = ai::agentParams(name, {});
+            const auto choose = [&](const ai::Params& p) {
+                return ai::known_poke::prefer(o, legal, 70, 1, p, own, enemy, poke, 3, false, 0, [] { return false; });
+            };
+            check(named.x3PokeNet == (upper ? 3 : 0) && choose(named) == (upper ? 7 : -1),
+                  "the named level has its measured reserve choice");
+            if (upper) {
+                auto given = ai::namedDefaults(name);
+                for (int mode : {0, 1, 2, 3}) {
+                    given.x3PokeNet = mode;
+                    check(ai::agentParams(name, given).x3PokeNet == mode &&
+                          ai::configuredParams(name, given).x3PokeNet == mode &&
+                          choose(ai::configuredParams(name, given)) == (mode == 3 ? 7 : -1),
+                          "an explicitly supplied poke mode takes precedence");
+                }
+            }
+        }
+    }
+    o.rules.cancel = false;
     check(select(2) < 0, "the reserve rule leaves a cramped poke unchanged");
     own.pair[3] = {1, 1};
     own.knownCount = 4;
@@ -7066,6 +7090,13 @@ static void testR4Changes() {
 int main(int argc, char** argv) {
     std::cout << std::unitbuf; // (every line out at once: a run that is stopped still tells how far it came)
     try {
+        if (argc == 2 && std::string(argv[1]) == "reserve") {
+            testLevelTable();
+            testKnownPokeReserve();
+            testKnownPokeHandoff();
+            std::cout << "level defaults, reserve choice and handoff passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "picture37") {
             testLv38TakeSmallNoDeath();
             const auto raw = ai::agentParams("lv38ex", {});

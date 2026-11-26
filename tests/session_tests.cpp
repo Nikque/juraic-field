@@ -53,6 +53,25 @@ static void testSeatBudget() {
     check(budgetOf(read, true) > 0, "aiLead 1 read from the settings file leaves the choice without a clock");
 }
 
+static void testSeatPokeNet() {
+    for (const char* name : {"lv36", "lv36q", "lv37", "lv38"}) {
+        for (bool ex : {false, true}) {
+            Settings settings;
+            settings.rules.cancel = settings.aiEx = settings.aiEx1 = ex;
+            Versus versus;
+            int observed[2] = {-1, -1};
+            versus.adjust = [&](int seat, juraic::ai::Params& p) { observed[seat] = p.x3PokeNet; };
+            for (int seat : {0, 1}) {
+                versus.seat(seat, name, settings);
+                const bool upper = juraic::ai::levelOf(name) >= 37;
+                check(observed[seat] == (upper ? 3 : 0), "live seat poke setting");
+                const bool namedEx = ex && std::string(name) == "lv38";
+                check(versus.seatLog[seat].name == (namedEx ? "lv38ex" : name), "live seat level selection");
+            }
+        }
+    }
+}
+
 static void testSettingsFile() {
     Settings settings;
     SettingsTable table(settings);
@@ -111,6 +130,7 @@ static void testResultWritten() {
 int main() {
     try {
         testSeatBudget();
+        testSeatPokeNet();
         testSettingsFile();
         testResultWritten();
         std::cout << "session tests passed\n";

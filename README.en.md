@@ -2,7 +2,7 @@
 
 [日本語 README](README.md)
 
-[Changes from v0.9.7 to v0.9.9 (Japanese)](docs/changes-since-0.9.7.md)
+[Changes from v0.9.7 to v0.9.9.1 (Japanese)](docs/changes-since-0.9.7.md)
 
 Juraic Field is a falling-block puzzle program for versus and solo play. It has solo chain building ("toko"), two players on one PC, matches against the versus AI "Juraic", AI-versus-AI matches to watch, network matches between two people, saving and playing back replays, and a generator of chain boards. It runs on Windows 10 / 11 (64-bit), Linux (x86-64), macOS (Apple silicon) and Android (arm64). The screens are in Japanese.
 
