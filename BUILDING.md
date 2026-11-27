@@ -102,4 +102,4 @@ python tests/verify_output.py generator.log --allow-extra
 | `tests/` | テスト。`tests/reference/v030_engine.h` は照合用に残した v0.3.0 のエンジン |
 | `tools/` | AI どうしの対戦（`ai_match`）、1 人での探索の測定と調整（`ai_toko`・`ai_tune`）、ベンチマーク、到達規則の比較、配布版の作成 |
 | `examples/`・`benchmarks/` | 盤面ジェネレーターの例と、その速度の測定の記録 |
-| `licenses/` | Ama のライセンスと、AI のうち Ama に倣っている所の一覧。Linux 版に入るもの（SDL 3・stb・dr_libs・BIZ UDPゴシック。SDL 3 は Windows 版にも）と、Windows 版に入る ViGEmClient のライセンス |
+| `licenses/` | 対戦 AI で使っているコードのライセンスと著作権表示。Linux 版に入るもの（SDL 3・stb・dr_libs・BIZ UDPゴシック。SDL 3 は Windows 版にも）と、Windows 版に入る ViGEmClient のライセンス |

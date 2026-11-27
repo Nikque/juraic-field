@@ -55,7 +55,7 @@ inline uint64_t pdep64(uint64_t v, uint64_t m) { return _pdep_u64(v, m); }
 __attribute__((target("bmi2"))) inline uint64_t pext64(uint64_t v, uint64_t m) { return _pext_u64(v, m); }
 __attribute__((target("bmi2"))) inline uint64_t pdep64(uint64_t v, uint64_t m) { return _pdep_u64(v, m); }
 #endif
-inline bool fastPext = detectFastPext(); // tests switch it off to cover the portable path
+inline bool fastPext = detectFastPext();
 #else
 inline bool fastPext = false;
 inline uint64_t pext64(uint64_t, uint64_t) { return 0; }
@@ -169,15 +169,36 @@ struct BitField {
     }
     // Gravity: every column is compacted towards the floor (holes disappear).
     // False when no cell had to move.
-    bool drop() {
-        const FieldBits occ = occupied();
+    bool drop() { return dropRemaining(occupied()); }
+
+    // PEXT ignores the bits outside the remaining occupancy. A non-falling
+    // field still needs explicit erasure, as does the portable gravity path.
+    bool eraseDrop(FieldBits erased, FieldBits before) {
+#if JURAIC_SSE
+        if (detail::fastPext) {
+            return dropRemaining<true>(before.without(erased), erased);
+        }
+#endif
+        erase(erased);
+        return drop();
+    }
+    bool eraseDrop(FieldBits erased) {
+        return eraseDrop(erased, occupied());
+    }
+
+private:
+    template<bool EraseAtRest = false>
+    bool dropRemaining(FieldBits occ, FieldBits erased = {}) {
         // Each occupied cell above the floor must be supported by the cell below.
-        if (occ.down().subsetOf(occ)) return false;
+        if (occ.down().subsetOf(occ)) {
+            if constexpr (EraseAtRest) erase(erased);
+            return false;
+        }
         const uint64_t keep[2] = {occ.low(), occ.high()};
         // Where the cells of each column come to rest: as many cells as it holds, from the floor up
         // (FieldBits::settled: all columns at once, in the register).
         const FieldBits rest = occ.settled();
-        if (detail::fastPext) {
+        if (EraseAtRest || detail::fastPext) {
             const uint64_t to[2] = {rest.low(), rest.high()};
             for (auto& p : plane)
                 p = FieldBits::fromHalves(detail::pdep64(detail::pext64(p.low(), keep[0]), to[0]),
@@ -195,6 +216,8 @@ struct BitField {
         }
         return true;
     }
+
+public:
     // Opens `count` empty cells at row `slot` of column x and fills them.
     void insert(int x, int slot, int count, Cell code) {
         const unsigned below = (1u << slot) - 1, added = ((1u << count) - 1) << slot;
@@ -254,6 +277,7 @@ inline int waveScore(const Wave& w, int chain) {
 
 // Finds what the next wave clears without changing the field.
 // With details=false only `cleared`, `garbage` and `pieces` are filled in.
+template<bool Garbage = true>
 inline bool findWave(const BitField& f, Wave& w, bool details = true) {
     const Links k = f.links();
     const BitField::Seeds s = BitField::seeds(k);
@@ -261,7 +285,7 @@ inline bool findWave(const BitField& f, Wave& w, bool details = true) {
     const FieldBits seed = s.three | s.pairU | s.pairU.up() | s.pairR | s.pairR.right();
     w = {};
     w.cleared = seed | (seed & k.u).up() | (seed & k.d).down() | (seed & k.r).right() | (seed & k.l).left();
-    w.garbage = f.garbageNextTo(w.cleared);
+    if constexpr (Garbage) w.garbage = f.garbageNextTo(w.cleared);
     w.pieces = BitField::cells(w.cleared);
     if (!details) return true;
     if (w.pieces < 8) {
@@ -270,12 +294,15 @@ inline bool findWave(const BitField& f, Wave& w, bool details = true) {
         w.groupBonus = groupBonus(w.pieces);
         return true;
     }
+    FieldBits remaining = w.cleared;
     for (Cell color = 1; color <= MAX_COLORS; ++color) {
-        FieldBits rest = w.cleared & f.colorMask(color);
+        if (remaining.empty()) break;
+        FieldBits rest = remaining & f.colorMask(color);
+        remaining = remaining.without(rest);
         if (rest.empty()) continue;
         ++w.colors;
         // (fewer than eight cells of a colour are one group: two groups of four or more have eight)
-        const int cells = rest.count();
+        const int cells = BitField::cells(rest);
         if (cells < 8) {
             ++w.groups;
             w.groupBonus += groupBonus(cells);
@@ -288,7 +315,7 @@ inline bool findWave(const BitField& f, Wave& w, bool details = true) {
             while (!c[x]) ++x;
             const FieldBits g = BitField::group(FieldBits::cell(x, std::countr_zero(unsigned(c[x]))), k);
             ++w.groups;
-            w.groupBonus += groupBonus(g.count());
+            w.groupBonus += groupBonus(BitField::cells(g));
             rest = rest.without(g);
         }
     }

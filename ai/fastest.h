@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdlib>
 // The buttons with which the turn of a pair is over soonest at a placement, looked for among the buttons of every frame.
 //
 // What is made short is not the frame of the lock but the end of the landing animation after it: the animation runs
@@ -40,11 +41,34 @@
 #include "../game/control.h"
 #include <algorithm>
 #include <atomic>
-#include <queue>
-#include <unordered_map>
+#include <functional>
 #include <vector>
+#ifdef JURAIC_DECISION_METRICS
+#include "decision_metrics.h"
+#include <optional>
+#endif
 
 namespace juraic::ai {
+
+#ifdef JURAIC_DECISION_METRICS
+// fastestEnd also instruments its outer cache lookup. Count and time a
+// nested FastestSearch as part of that same request.
+class FastestRequestMetrics {
+public:
+    FastestRequestMetrics() {
+        if (!outer && metrics::active()) {
+            scope.emplace(metrics::Part::ExSearch);
+            outer = true;
+            metrics::add(metrics::Part::ExCalls);
+        }
+    }
+    ~FastestRequestMetrics() { if (scope) outer = false; }
+
+private:
+    static inline thread_local bool outer = false;
+    std::optional<metrics::Scope> scope;
+};
+#endif
 
 class FastestSearch {
 public:
@@ -61,9 +85,11 @@ public:
     // lock: what it counts on at least for the frames to the lock.
     int estimate(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent,
                  int* lock = nullptr) {
+        haveLevelLoss = false;
         setUp(field, target, timing, speedPercent);
-        if (lock) *lock = least(from);
-        return ahead(from);
+        const int frames = least(from);
+        if (lock) *lock = frames;
+        return ahead(from, frames);
     }
 
     // The frames from `from` to the end of the landing animation of the pair that `buttons` lock (0: they lock none).
@@ -84,36 +110,54 @@ public:
                              [](const std::vector<uint8_t>&) { return true; });
     }
 
-    template<bool picture, class Accept>
+    bool findSooner(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent,
+                    int currentEnd, std::vector<uint8_t>& buttons, int& softDropRows, int& end) {
+        return search<false, true>(field, from, target, timing, speedPercent, currentEnd - 1, buttons, softDropRows, end, 0, false,
+                                   [](const std::vector<uint8_t>&) { return true; });
+    }
+
+    template<bool picture, bool precheck = false, class Accept>
     bool search(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, int limit,
                 std::vector<uint8_t>& buttons, int& softDropRows, int& end, uint8_t firstChanged, bool downAtTarget, Accept accept) {
+#ifdef JURAIC_DECISION_METRICS
+        FastestRequestMetrics requestMetrics;
+#endif
         states = 0;
         gaveUp = false;
         if (from.locked || limit <= 0) return false;
+        haveLevelLoss = false;
         setUp(field, target, timing, speedPercent);
+        if constexpr (precheck) {
+            if (ahead(from, least(from)) > limit) return false;
+        }
+        prepareLevelLoss();
         const detail::Cells cells(field);
-        nodes.clear(), best.clear();
-        std::priority_queue<uint64_t, std::vector<uint64_t>, std::greater<uint64_t>> open;
+        nodes.clear();
+        best.clear();
+        open.clear();
         const auto stateKey = [&](const PairControl& p, uint8_t changed) {
             Key k = key(p);
             if constexpr (picture) k.b |= uint64_t(changed) << 48;
             return k;
         };
         const auto push = [&](const PairControl& p, int parent, int frames, int taps, uint8_t held, bool goal, uint8_t changed) {
-            const int total = frames + (goal ? after(p, timing) : ahead(p));
-            if (total > limit) return;
             // (the frame of the lock: that of a way found, else what the state needs at least)
-            const int lock = goal ? frames : frames + least(p);
+            const int lockLeft = goal ? 0 : least(p);
+            const int total = frames + (goal ? after(p, timing) : ahead(p, lockLeft));
+            if (total > limit) return;
+            const int lock = frames + lockLeft;
             if (!goal) {
-                const auto [at, fresh] = best.try_emplace(stateKey(p, changed), int(nodes.size()));
-                if (!fresh) {
-                    const Node& old = nodes[size_t(at->second)];
+                int& at = best.node(stateKey(p, changed));
+                if (at >= 0) {
+                    Node& old = nodes[size_t(at)];
                     if (old.frames < frames || (old.frames == frames && old.taps <= taps)) return;
-                    at->second = int(nodes.size());
+                    old.stale = true;
                 }
+                at = int(nodes.size());
             }
             nodes.push_back({p, parent, uint16_t(frames), uint16_t(taps), held, goal, changed});
-            open.push(uint64_t(total & 0xfff) << 50 | uint64_t(lock & 0x3ff) << 40 | uint64_t(taps & 0xff) << 32 | uint64_t(nodes.size() - 1));
+            open.push_back(uint64_t(total & 0xfff) << 50 | uint64_t(lock & 0x3ff) << 40 | uint64_t(taps & 0xff) << 32 | uint64_t(nodes.size() - 1));
+            std::push_heap(open.begin(), open.end(), std::greater<uint64_t>{});
         };
         const auto readButtons = [&](int n) {
             buttons.resize(nodes[size_t(n)].frames);
@@ -121,10 +165,14 @@ public:
                 buttons[size_t(nodes[size_t(n)].frames) - 1] = nodes[size_t(n)].held;
         };
         push(from, -1, 0, 0, 0, false, firstChanged);
+#ifdef JURAIC_DECISION_METRICS
+        if (!open.empty()) metrics::add(metrics::Part::ExActual);
+#endif
         int found = -1;
         while (!open.empty()) {
-            const int n = int(open.top() & 0xffffffffu);
-            open.pop();
+            std::pop_heap(open.begin(), open.end(), std::greater<uint64_t>{});
+            const int n = int(open.back() & 0xffffffffu);
+            open.pop_back();
             const Node node = nodes[size_t(n)]; // (a copy: the nodes grow below)
             if (node.goal) {
                 if constexpr (picture) {
@@ -134,7 +182,7 @@ public:
                 found = n;
                 break;
             }
-            if (best.find(stateKey(node.p, node.changed))->second != n) continue;
+            if (node.stale) continue;
             if (++states > maxStates) return gaveUp = true, false;
             if (stop && (states & 127) == 0 && stop->load(std::memory_order_relaxed)) return gaveUp = true, false;
             for (const uint8_t side : SIDES) {
@@ -194,16 +242,64 @@ private:
         uint8_t held; // the buttons of the frame that led here
         bool goal;    // locked at the target
         uint8_t changed; // tap edges in the preceding frame, for two-frame controls
+        bool stale = false; // another node reached the same state sooner or with fewer presses
     };
     std::vector<Node> nodes;
+    std::vector<uint64_t> open;
     struct Key {
         uint64_t a, b;
         bool operator==(const Key& o) const { return a == o.a && b == o.b; }
     };
-    struct KeyHash {
-        size_t operator()(const Key& k) const { return size_t((k.a ^ (k.b + 0x9E3779B97F4A7C15ull)) * 0x9E3779B97F4A7C15ull >> 16); }
+    class BestNodes {
+    public:
+        void clear() {
+            used = 0;
+            if (++stamp == 0) {
+                for (auto& slot : slots) slot.stamp = 0;
+                ++stamp;
+            }
+        }
+
+        int& node(Key key) {
+            if (slots.empty()) slots.resize(1024);
+            Slot& slot = lookup(key);
+            if (slot.stamp == stamp) return slot.node;
+            if (used >= slots.size() / 2) {
+                auto old = std::move(slots);
+                slots.resize(old.size() * 2);
+                for (const auto& entry : old)
+                    if (entry.stamp == stamp) lookup(entry.key) = entry;
+                return insert(lookup(key), key);
+            }
+            return insert(slot, key);
+        }
+
+    private:
+        struct Slot {
+            Key key{};
+            uint32_t stamp = 0;
+            int node = -1;
+        };
+        std::vector<Slot> slots;
+        uint32_t stamp = 0;
+        size_t used = 0;
+
+        size_t position(Key key) const {
+            const uint64_t hash = (key.a ^ (key.b + 0x9E3779B97F4A7C15ull)) * 0x9E3779B97F4A7C15ull;
+            const size_t mask = slots.size() - 1;
+            size_t i = size_t(hash ^ (hash >> 32)) & mask;
+            while (slots[i].stamp == stamp && !(slots[i].key == key)) i = (i + 1) & mask;
+            return i;
+        }
+
+        Slot& lookup(Key key) { return slots[position(key)]; }
+        int& insert(Slot& slot, Key key) {
+            ++used;
+            slot = {key, stamp, -1};
+            return slot.node;
+        }
     };
-    std::unordered_map<Key, int, KeyHash> best; // a state's node of the fewest frames (then presses) so far
+    BestNodes best; // a state's node of the fewest frames (then presses) so far
     int goalX = 0, restY = 0, sunk = 0, natural = 0, landFrames = 0, lockWait = 0;
     bool groundCount = false; // Timing::fallOnGround: the fall goes on being counted while the pair lies
     bool turnClears = false;  // Timing::quickFirstEndsTurn at the target: the wait of a turn can end at once there
@@ -225,7 +321,7 @@ private:
     int ownTop[W] = {};     // the highest the axis can lie over its own column in each column, in half steps from the floor (quick turns counted)
     bool nearby[W] = {};      // ... from where the ground steps down to the target, so that a clock begun there can run on to the lock
     bool run[W] = {};         // `level`: the columns of the axis from which the pair, turned as at the target, slides to it on level ground
-    bool pushed[2][W] = {}; // [to the right][column]: a turn can push the pair a column that way from the column
+    int moveLoss[W][W] = {}; // [from][to]: frames lost to moves that cannot be made by turning
 
     // The frames of the landing animation left when `p` has locked (game/player.h).
     static int after(const PairControl& p, const Timing& timing) { return std::max(timing.landFrames - restedFrames(p, timing), timing.lockWait); }
@@ -263,7 +359,12 @@ private:
         // (Timing::readyOnGround: a pair moved off a ledge steps in the frame of the move)
         moveLost = timing.readyOnGround ? 1 : 2;
         const auto wall = [&](int c, int over) { return c < 0 || c >= W || h[c] > over || field.row14[size_t(c)]; };
-        for (int c = 0; c < W; ++c) pushed[1][c] = wall(c - 1, h[c]), pushed[0][c] = wall(c + 1, h[c]);
+        for (int c = 0; c < W; ++c) {
+            for (int k = c + 1; k < W; ++k)
+                moveLoss[c][k] = moveLoss[c][k - 1] + (wall(k - 2, h[k - 1]) ? 0 : moveLost);
+            for (int k = c - 1; k >= 0; --k)
+                moveLoss[c][k] = moveLoss[c][k + 1] + (wall(k + 2, h[k + 1]) ? 0 : moveLost);
+        }
         // (Timing::quickFirstEndsTurn: an upright pair with both sides of its axis closed ends the wait of its last turn
         //  with the first press of a quick turn. A pair that can lock upright at the target only between columns that close
         //  both sides of the row its axis rests in - and so of every row above it - may do so there.)
@@ -327,9 +428,7 @@ private:
 
     // The frames `p` still needs at least before it locks at the target.
     int least(const PairControl& p) const {
-        int lost = p.moveWait; // frames without the down button: of the move going on, and of the moves to come
-        for (int c = p.x; c != goalX; c += c < goalX ? 1 : -1)
-            if (!pushed[c < goalX][c]) lost += moveLost;
+        const int lost = p.moveWait + moveLoss[p.x][goalX];
         const int gain = gainOf(p);
         const int byItself = std::min(lost, (gain + natural * lost) / HALF_STEP); // (half steps of the fall in those frames)
         const int level = 2 * p.y + (p.upper ? 1 : 0), raw = level - 2 * restY;
@@ -365,9 +464,7 @@ private:
         const int level = 2 * p.y + (p.upper ? 1 : 0);
         for (int c = 0; c < W; ++c) {
             if (!nearby[c]) continue;
-            int lost = 0;
-            for (int k = p.x; k != c; k += k < c ? 1 : -1)
-                if (!pushed[k < c][k]) lost += moveLost;
+            int lost = moveLoss[p.x][c];
             if (lost > 0) --lost; // (as in soonestLevel: a pair moved onto a ledge in the frame it comes level with it lies in that frame)
             lost += p.moveWait;
             const int byItself = std::min(lost, (gainOf(p) + natural * lost) / HALF_STEP);
@@ -379,13 +476,40 @@ private:
     // `level`: the frames `p` still needs at least before it lies in the row it rests in at the target, in a column it
     // can slide to the target from on level ground. A move in the air costs two frames without the down button, the last
     // one before it lies one (a pair moved onto a ledge in the frame it comes level with it lies in that frame).
+    int levelMoveLoss[W]{};
+    bool haveLevelLoss = false;
+
+    void prepareLevelLoss() {
+        if (!level || splits || natural < 0 || natural > HALF_STEP) return;
+        for (int from = 0; from < W; ++from) {
+            int best = 1 << 20;
+            for (int to = 0; to < W; ++to) {
+                if (!run[to]) continue;
+                    const int lost = moveLoss[from][to];
+                best = std::min(best, lost);
+            }
+            levelMoveLoss[from] = best;
+        }
+        haveLevelLoss = true;
+    }
+
     int soonestLevel(const PairControl& p) const {
+        const int gain = gainOf(p);
+        if (haveLevelLoss && gain >= 0) {
+            const int move = levelMoveLoss[p.x];
+            const int lost = p.moveWait + move - (move > 0);
+            const int byItself = std::min(lost, (gain + natural * lost) / HALF_STEP);
+            const int quick = std::max(1, lost + std::max(0, above(p) - byItself));
+            return quick;
+        }
+        return soonestLevelByColumn(p);
+    }
+
+    int soonestLevelByColumn(const PairControl& p) const {
         int best = 1 << 20;
         for (int c = 0; c < W; ++c) {
             if (!run[c]) continue;
-            int lost = 0;
-            for (int k = p.x; k != c; k += k < c ? 1 : -1)
-                if (!pushed[k < c][k]) lost += moveLost;
+            int lost = moveLoss[p.x][c];
             if (lost > 0) --lost;
             lost += p.moveWait;
             const int byItself = std::min(lost, (gainOf(p) + natural * lost) / HALF_STEP);
@@ -395,7 +519,7 @@ private:
     }
 
     // The frames `p` still needs at least before its landing animation at the target is over.
-    int ahead(const PairControl& p) const {
+    int ahead(const PairControl& p, int lock) const {
         // The landing animation: running already, what is left of it; else all of it from the landing it runs from,
         // which is still to come (a pair that lies a frame before it locks has one frame more of it behind it).
         int landing;
@@ -406,7 +530,7 @@ private:
             //  Running there already, what is left of it; else all of it from a lying still to come.)
             // (what after() gives at such a lock: no clock behind it - restedFrames counts the frame of the lock with
             //  Timing::floorKickLimit -; the fall that follows is the same for every way and left out)
-            if (splits) return least(p) + std::max(landFrames - (floorLimited ? 1 : 0), lockWait);
+            if (splits) return lock + std::max(landFrames - (floorLimited ? 1 : 0), lockWait);
             landing = p.owned && above(p) <= 0 && run[p.x] ? landFrames - int(p.ownFrames) : landFrames - 1 + soonestLevel(p);
             // (the clock of Timing::firstOwnLanding can run on over a step down of one row, as below: a pair that touched
             //  the column beside the target one row higher and slid down from it keeps it. What it counts on is the less of
@@ -423,7 +547,7 @@ private:
             const bool lies = p.grounded && !p.upper && p.y == restY;
             landing = lies ? landFrames - int(p.groundFrames) : landFrames - 1 + std::max(1, above(p));
         }
-        return std::max(least(p) + lockWait, landing);
+        return std::max(lock + lockWait, landing);
     }
 };
 

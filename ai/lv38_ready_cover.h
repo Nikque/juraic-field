@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 #include "preparation.h"
 
 namespace juraic::ai::lv38_ready_cover {
@@ -20,6 +21,7 @@ inline bool visibleFire(const Plan& plan, const PlanSet& shown) {
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int ordinary,
            unsigned choices, const Params& p, uint64_t seed, Stop stop) {
+    metrics::Scope scope(metrics::Part::ReadyCover);
     if (!p.lv38Midgame || !p.lv38ReadyCover || o.players != 2 || p.handWait || ordinary < 0 || mine.knownCount < 2 ||
         !theirs.knownCount || o.busyLeft[o.me] || chainRunning(o, o.me) || chainRunning(o, 1 - o.me) ||
         o.self().incoming.total() || o.opponent().incoming.total() ||

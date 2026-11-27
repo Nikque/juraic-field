@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 #include "exchange.h"
 #include "lv38_tail.h"
 #include "lv38_head.h"
@@ -14,12 +15,13 @@ struct Note {
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, unsigned legal, int arriving,
            const Params& p, uint64_t seed, Stop stop, Note& note) {
+    metrics::Scope scope(metrics::Part::TailAnswer);
     const int me = o.me, him = 1 - me;
     if (arriving <= 0 || arriving >= 30 || !mine.pairCount || p.handWait || o.busyLeft[me] ||
         o.self().scoring.allClear || o.opponent().scoring.allClear ||
         !lv38_tail::inWindow(o.self().field.f.normal().count()) || stop()) return -1;
     KeyPlan main;
-    buildValue(o.self().field, o.rules, o.timing, p, nullptr, &main);
+    readMainChain(o.self().field, o.rules, o.timing, p, nullptr, &main);
     const FieldBits support = p.lv38Plan5 > 0 ? lv38_tail::supportOf(o.self().field, main, o.rules, o.timing) : FieldBits{};
     const auto head = p.lv38Plan12 > 0 || p.lv38HeadCut > 0
         ? lv38_head::shape(o.self().field, main, o.rules, o.timing) : lv38_head::Shape{};
@@ -107,7 +109,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, uns
         const bool usesHead = lv38_tail::keepsMain(reserve.points, main);
         if (usesHead) {
             int keyedReserve = 0;
-            buildValue(own.field, o.rules, o.timing, p, &keyedReserve);
+            readMainChain(own.field, o.rules, o.timing, p, &keyedReserve);
             preserved = std::max({preserved, keyedReserve, reserve.points});
         }
         if (!lv38_tail::keepsMain(preserved, main) ||

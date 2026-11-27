@@ -4099,12 +4099,18 @@ static void testSpareFrame() {
 // (Shown as pieces landing in their next frame, the field with the pieces let fall, the AI that weighs its moves against
 // the other side's chain saw none of it: in rounds drawn of X3 against X3, 2P through the screen and a pad of lag 5 won
 // 17 of 120, 33 shown the chain so; X3 by itself, 36 of 60.)
-static void testOpponentChainShown() {
-    const Layout l = sampleLayout();
+static void testOpponentChainShown(bool fullyHidden = false) {
+    Layout l = sampleLayout();
+    if (fullyHidden)
+        for (SideLayout& side : l.side) side.shownRows = 12;
     const Rules rules;
     ai::Params narrow;
     narrow.beamWidth = 30, narrow.beamDepth = 8, narrow.beamQueues = 3;
     long wave = 0, shownWave = 0, chainsRight = 0, fieldRight = 0;
+    long nextChainFrames = 0, nextChainMatches = 0;
+    bool sawLanding = false;
+    Placement landing{};
+    Cell hidden = EMPTY;
     for (const uint64_t seed : {120, 121, 122}) {
         Round r;
         r.start(rules, seed, 2);
@@ -4118,21 +4124,43 @@ static void testOpponentChainShown() {
             draw(canvas, l, r, true, noise);
             follow.step(read(canvas.picture(), l), clock);
         }
+        const long firstWave = wave, firstRight = fieldRight;
         PlayerEvents e[2];
         for (int f = 0; f < 4000 && r.state == RoundState::Playing; ++f, ++clock) {
             draw(canvas, l, r, false, noise);
             follow.step(read(canvas.picture(), l), clock);
+            const SideModel& opponent = follow.model[0];
+            if (fullyHidden && seed == 121 && r.player[0].moves == 36 && opponent.followed == 35) {
+                sawLanding = true;
+                landing = opponent.placed;
+                hidden = opponent.core.field.f.get(5, 12);
+            }
             if (r.player[0].phase == Phase::Wave) {
                 ai::Observation o;
                 follow.observeAt(1, rules, r.player[1], clock, o);
                 ++wave;
                 shownWave += o.player[0].phase == Phase::Wave;
                 chainsRight += o.player[0].chain.chains == r.player[0].chain.chains;
-                fieldRight += Follower::shown(o.player[0].field) == Follower::shown(r.player[0].field);
+                const bool fieldMatches = Follower::shown(o.player[0].field) == Follower::shown(r.player[0].field);
+                fieldRight += fieldMatches;
+                if (seed == 121 && r.player[0].moves == 37) ++nextChainFrames, nextChainMatches += fieldMatches;
             }
             const uint8_t both[2] = {a->frame(ai::observe(r, 0)), b->frame(ai::observe(r, 1))};
             r.step(both, e);
         }
+        std::cout << "opponent chain, rows " << l.side[0].shownRows << ", seed " << seed
+                  << ": " << fieldRight - firstRight << '/' << wave - firstWave << " twelve-row matches\n";
+    }
+    if (fullyHidden) {
+        std::cout << "seed 121 chain after pair 36: " << nextChainMatches << '/' << nextChainFrames
+                  << " twelve-row matches\n";
+        std::cout << "seed 121 pair 36: placement " << (sawLanding ? placementId(landing) : -1)
+                  << ", row 13 column 6 = " << int(hidden) << std::endl;
+        check(sawLanding && landing.x == 5 && landing.dir == LEFT && hidden == EMPTY,
+              "seed 121 pair 36 leaves its hidden child in the wrong column");
+        check(nextChainFrames >= 100 && nextChainMatches * 10 >= nextChainFrames * 9,
+              "the twelve rows of the chain after seed 121 pair 36 are read incorrectly");
+        return;
     }
     const std::string counts = std::to_string(wave) + " frames of chains of 1P: shown running " + std::to_string(shownWave) + ", the chain so far right " +
                                std::to_string(chainsRight) + ", the twelve rows right " + std::to_string(fieldRight);
@@ -7648,6 +7676,11 @@ int main(int argc, char** argv) {
         check(motion.locks>=40 && motion.hits*100>=motion.locks*95,"current-pose input path misses too many placements");
         return 0;
 #endif
+        if (argc == 2 && std::string(argv[1]) == "--opponent-chain") {
+            testOpponentChainShown();
+            testOpponentChainShown(true);
+            return 0;
+        }
         testTableText();
         testOneColour();
         testPointRules();
@@ -7751,6 +7784,7 @@ int main(int argc, char** argv) {
         testImageTail();
         testWaitWithFrameToSpare();
         testOpponentChainShown();
+        testOpponentChainShown(true);
         testOpponentSplitShown();
         testTurnApartFromMove();
         testLateHoldsNothingAway();

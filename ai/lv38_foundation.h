@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 #include "preparation.h"
 
 namespace juraic::ai::lv38_foundation {
@@ -40,6 +41,7 @@ inline bool sameSetup(const Plan& a, const Plan& b) {
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const PlanSet& rival, const BuildResult& beam,
            int ordinary, unsigned allowed, const Params& p, uint64_t seed, Stop stop) {
+    metrics::Scope scope(metrics::Part::Foundation);
     if (ordinary < 0 || mine.pairCount < 2 || beam.cut || o.rules.clearCount != 4 ||
         (o.self().phase != Phase::Control && (o.self().phase != Phase::Next || o.busyLeft[o.me])) ||
         o.self().incoming.total() || o.opponent().incoming.total()) return ordinary;
@@ -122,7 +124,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& rival, cons
             std::abs(sent - plan.sent) > 1 || std::abs(points - plan.points) > (H + 2) * plan.count) return false;
         if (plan.mainAfter <= 0) return true;
         int remains = 0;
-        buildValue(ours.field, o.rules, o.timing, p, &remains);
+        readMainChain(ours.field, o.rules, o.timing, p, &remains);
         return remains >= plan.mainAfter;
     };
     for (int tries = 0; choices && tries < 3 && !stop(); ++tries) {

@@ -2,6 +2,7 @@
 
 #include "exchange.h"
 #include <array>
+#include <map>
 #include <optional>
 #include <tuple>
 
@@ -55,6 +56,84 @@ struct Endpoint {
     int burden() const { return pending + confirmed + fallen; }
 };
 
+// One observation, its two plan sets, and its simulation parameters stay
+// fixed across the legacy, main-cover and restricted selections.
+// lv38TwoWaveMainCover changes the interpretation, not playOut.
+class ReplayCache {
+    struct Held {
+        std::optional<SpawnInput> input[2];
+        bool matches(const Held& current, const Held& after) const {
+            for (int who = 0; who < 2; ++who) {
+                if (!input[who] && !current.input[who]) continue;
+                if (!current.input[who]) return false;
+                const auto& expected = input[who] ? input[who] : after.input[who];
+                const auto& got = *current.input[who];
+                if (!expected || std::tie(expected->frames, expected->soft, expected->rested) !=
+                                 std::tie(got.frames, got.soft, got.rested)) return false;
+            }
+            return true;
+        }
+    };
+    using Key = std::tuple<uint64_t, unsigned, unsigned, bool>;
+    struct Reading {
+        Held before, after;
+        Duel duel;
+        DuelExchangeTrace trace;
+        int64_t ignition;
+    };
+    std::multimap<Key, Reading> readings;
+
+    static unsigned placements(const Plan* path) {
+        unsigned key = 0;
+        for (int k = 0; path && k < path->count; ++k) key = (key << 5) | unsigned(path->id[k] + 1);
+        return key;
+    }
+
+public:
+    Duel run(const Observation& o, const PlanSet& mine, const Plan* path, const PlanSet& theirs,
+             const Plan* reply, const Params& p, uint64_t seed, KnownReplay& replay,
+             DuelExchangeTrace* trace = nullptr, int64_t* ignition = nullptr) {
+        const Key key{seed, placements(path), placements(reply), trace != nullptr};
+        int targets[2] = {-1, -1};
+        if (path) targets[mine.who] = path->id[0];
+        if (reply) targets[theirs.who] = reply->id[0];
+        const auto held = [&] {
+            Held state;
+            for (int who = 0; who < 2; ++who)
+                if (targets[who] >= 0 && (replay.tried[who] >> targets[who] & 1u))
+                    state.input[who] = replay.held[who][targets[who]];
+            return state;
+        };
+        const Held before = held();
+        const auto [first, last] = readings.equal_range(key);
+        if (!replay.stop()) {
+            for (auto it = first; it != last; ++it) {
+                const auto& prior = it->second;
+                // A hit must warm the current selection's held paths exactly
+                // as a replay would. A different prior input requires a replay.
+                if (!prior.before.matches(before, prior.after)) continue;
+                for (int who = 0; who < 2; ++who) {
+                    if (!prior.after.input[who]) continue;
+                    replay.held[who][targets[who]] = *prior.after.input[who];
+                    replay.tried[who] |= 1u << targets[who];
+                }
+                if (trace) *trace = prior.trace;
+                if (ignition) *ignition = prior.ignition;
+                return prior.duel;
+            }
+        }
+        int64_t check = -1;
+        replay.trace = trace;
+        auto duel = playOut(o, mine, path, theirs, reply, p, seed, true, &check, &replay);
+        replay.trace = nullptr;
+        duel.exchangeTrace = nullptr;
+        if (ignition) *ignition = check;
+        if (!replay.stop())
+            readings.emplace(key, Reading{before, held(), duel, trace ? *trace : DuelExchangeTrace{}, check});
+        return duel;
+    }
+};
+
 inline int boardMain(const Observation& o, const GameField& field) {
     if (field.dead()) return 0;
     Trials trials;
@@ -74,13 +153,15 @@ inline bool validPlan(const Plan& plan, const PlanSet& set, int limit) {
 
 inline std::optional<Endpoint> read(const Observation& o, const PlanSet& mine, const Plan& path,
                                     const PlanSet& theirs, const Plan* reply, const Params& p,
-                                    uint64_t seed, KnownReplay& replay, bool audit = false) {
+                                    uint64_t seed, KnownReplay& replay, ReplayCache* cache, bool audit) {
     const int me = o.me, him = 1 - me;
     DuelExchangeTrace trace;
     trace.initialMoves[me] = o.self().moves;
     trace.initialMoves[him] = o.opponent().moves;
-    replay.trace = p.lv38TwoWaveMainCover || audit ? &trace : nullptr;
-    const auto d = playOut(o, mine, &path, theirs, reply, p, seed, true, nullptr, &replay);
+    auto* recorded = p.lv38TwoWaveMainCover || audit ? &trace : nullptr;
+    replay.trace = recorded;
+    const auto d = cache ? cache->run(o, mine, &path, theirs, reply, p, seed, replay, recorded)
+                         : playOut(o, mine, &path, theirs, reply, p, seed, true, nullptr, &replay);
     replay.trace = nullptr;
     if (replay.stop()) return {};
     const auto& us = d.player[me];
@@ -211,7 +292,8 @@ inline bool protects(const Reading& base, const Reading& option, int count, int 
 
 template<class Stop>
 int select(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int ordinary,
-           unsigned legal, const Params& p, uint64_t seed, Stop stop, Note& note, const Plan* retained, bool audit) {
+           unsigned legal, const Params& p, uint64_t seed, Stop stop, Note& note, const Plan* retained,
+           bool audit, ReplayCache* cache) {
     note = {};
     note.ordinary = note.selected = ordinary;
     note.rivalKnown = theirs.knownCount;
@@ -228,7 +310,11 @@ int select(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int
     KnownReplay replay{stop};
     replay.acceptPlacement = [](const Duel&, int, Placement, Pair, int64_t, int64_t lock) { return lock >= 0; };
     const int me = o.me, him = 1 - me;
-    const auto initial = playOut(o, mine, nullptr, theirs, nullptr, p, seed, true, nullptr, &replay);
+    const auto run = [&](const Plan* reply, int64_t* ignition = nullptr) {
+        return cache ? cache->run(o, mine, nullptr, theirs, reply, p, seed, replay, nullptr, ignition)
+                     : playOut(o, mine, nullptr, theirs, reply, p, seed, true, ignition, &replay);
+    };
+    const auto initial = run(nullptr);
     if (stop()) { note.status = 4; return ordinary; }
     const int firstBurden = initial.player[me].fallen + initial.player[me].incoming.total();
     if (firstBurden > o.rules.maxGarbagePerDrop || (theirChain && initial.player[him].chain.chains > 4)) return ordinary;
@@ -254,7 +340,7 @@ int select(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int
                 })) continue;
             inspected.push_back(&path);
             int64_t ignition = -1;
-            const auto d = playOut(o, mine, nullptr, theirs, &path, p, seed, true, &ignition, &replay);
+            const auto d = run(&path, &ignition);
             const auto& q = d.player[him];
             const auto& a = d.player[me];
             if (q.moves != o.opponent().moves + path.count || q.chain.chains != path.chains ||
@@ -274,7 +360,7 @@ int select(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int
         if (!path) continue;
         if (stop()) { note.status = 4; return ordinary; }
         int64_t ignition = -1;
-        const auto d = playOut(o, mine, nullptr, theirs, path, p, seed, true, &ignition, &replay);
+        const auto d = run(path, &ignition);
         const auto& q = d.player[him];
         if (q.moves != o.opponent().moves + path->count || q.chain.chains != path->chains ||
             q.phase != DuelPhase::Control || ignition < o.frame) continue;
@@ -298,7 +384,7 @@ int select(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int
         Reading r;
         r.path = path;
         for (int k = 0; k < count; ++k) {
-            const auto end = read(o, mine, path, theirs, replies[k], p, sampled, replay, audit);
+            const auto end = read(o, mine, path, theirs, replies[k], p, sampled, replay, cache, audit);
             if (!end) return {};
             r.result[k] = *end;
             r.points += value(*end, rate);
@@ -423,13 +509,17 @@ int select(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int
 
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int ordinary,
-           unsigned legal, const Params& p, uint64_t seed, Stop stop, Note& note, const Plan* retained = nullptr) {
+           unsigned legal, const Params& p, uint64_t seed, Stop stop, Note& note, const Plan* retained = nullptr,
+           ReplayCache* cache = nullptr) {
+    if (p.thinkBudget > 0) cache = nullptr;
     if (!p.lv38TwoWaveMainCover)
-        return select(o, mine, theirs, ordinary, legal, p, seed, stop, note, retained, false);
+        return select(o, mine, theirs, ordinary, legal, p, seed, stop, note, retained, false, cache);
 
+    ReplayCache local;
+    if (!cache && p.thinkBudget <= 0) cache = &local;
     Params legacy = p;
     legacy.lv38TwoWaveMainCover = 0;
-    const int before = select(o, mine, theirs, ordinary, legal, legacy, seed, stop, note, retained, true);
+    const int before = select(o, mine, theirs, ordinary, legal, legacy, seed, stop, note, retained, true, cache);
     note.beforeMainReview = before;
     if (note.status != 3 || note.route.count < 1) return before;
     bool spends = false;
@@ -444,7 +534,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int
         return before;
     }
     Note reviewed;
-    const int after = select(o, mine, theirs, ordinary, legal, p, seed, stop, reviewed, retained, false);
+    const int after = select(o, mine, theirs, ordinary, legal, p, seed, stop, reviewed, retained, false, cache);
     if (reviewed.status < 2 || reviewed.status >= 4 || stop()) {
         note.mainReviewIncomplete = true;
         return before;

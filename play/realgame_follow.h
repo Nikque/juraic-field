@@ -53,6 +53,8 @@ struct SideModel {
     juraic::GameField with;   // ... and it put there
     int sends = 0;            // the garbage its chain would send
     int inAir = 0;            // clear readings in a row with one piece more at rest and a piece of a colour in the air
+    int hiddenSplit = -1;     // a possible split after both pieces went above a twelve-row layout
+    int64_t hiddenSplitSeenAt = -1; // the last pictured pose of that pair
     uint8_t unsure = 0;       // columns read twelve high whose 13th row is a guess (garbage that may have fallen there)
     // The pieces the notice of this side went down by in its last fall since its last pair appeared (garbage fallen, or
     // offset by a chain): `falling` while it goes down, `fell` once it has risen again.
@@ -469,6 +471,23 @@ private:
         SideModel& m = model[s];
         // (one piece more when the other went into the 13th or 14th row, which the screen does not show)
         const int more = t.resting.f.count() - t.under.f.count();
+        // A pair last pictured with its axis above its child can turn and
+        // cross a stack of twelve with both pieces hidden. A newly visible axis
+        // just beyond the stack favors a split over a second turn into an
+        // upright landing. Keep the hint through noise from the split animation.
+        if (!t.inHand && !t.pair.seen && t.lastSeen.axisHidden && t.lastSeen.at.dir == juraic::DOWN &&
+            at - t.lastSeenAt <= 2 * tracker.timing.moveFrames + 2) {
+            const SideRead& read = tracker.last.side[s];
+            const int from = t.lastSeen.at.x;
+            for (const int dx : {-1, 1}) {
+                const int x = from + 2 * dx, bridge = from + dx;
+                if (x < 0 || x >= juraic::W || read.point[x][24] != HIDDEN || read.point[bridge][24] != HIDDEN ||
+                    t.under.f.get(bridge, 11) == juraic::EMPTY || t.under.f.get(x, 10) == juraic::EMPTY ||
+                    t.under.f.get(x, 11) != juraic::EMPTY || t.resting.f.get(x, 11) != t.colors.axis) continue;
+                const juraic::Placement p{uint8_t(x), dx > 0 ? juraic::LEFT : juraic::RIGHT};
+                m.hiddenSplit = juraic::placementId(p), m.hiddenSplitSeenAt = t.lastSeenAt;
+            }
+        }
         // The pair seen whole in the twelve rows, one piece of it at rest - or a piece of a colour shown in the air above
         // the pieces at rest: the other is in the air over a lower column (turned on the ground, to split as it locks),
         // not in the 13th row. A pair lying is taken out of it when two readings in a row show so (a light beginning over
@@ -478,7 +497,17 @@ private:
         // pair into the air, and another, turned out of the 13th row, lay 28 frames before it locked.)
         const bool whole = t.inHand && t.pair.seen && !t.pair.childHidden && !t.pair.axisHidden;
         const bool coming = seen[s].movedForNext(tracker.pairGap);
-        m.inAir = more == 1 && contains(t.resting, t.under) && (whole || (!coming && colouredAbove(tracker.last.side[s], t.resting) > 0)) ? m.inAir + 1 : 0;
+        // If the last seen upright pair has come to rest at the very top, its
+        // child remains hidden. Colours elsewhere in the landing animation
+        // are not evidence of a second piece of that pair still in the air.
+        const int lastAxis = t.lastSeen.at.x;
+        const bool uprightAtTop = more == 1 && !t.inHand && t.lastSeen.seen && t.lastSeen.childHidden &&
+            t.lastSeen.at.dir == juraic::UP && t.lastSeen.at.y == 11 && at - t.lastSeenAt <= 3 &&
+            tracker.last.side[s].point[lastAxis][24] == HIDDEN &&
+            t.under.f.get(lastAxis, 10) != juraic::EMPTY && t.under.f.get(lastAxis, 11) == juraic::EMPTY &&
+            t.resting.f.get(lastAxis, 11) == t.colors.axis;
+        m.inAir = more == 1 && contains(t.resting, t.under) &&
+            (whole || (!uprightAtTop && !coming && colouredAbove(tracker.last.side[s], t.resting) > 0)) ? m.inAir + 1 : 0;
         if ((more == 2 || more == 1) && contains(t.resting, t.under)) {
             const bool was = m.lying && m.index == t.pairs - 1;
             const bool lain = was && t.resting == m.with;
@@ -567,6 +596,11 @@ private:
                         break;
                     }
                 }
+            }
+            if (found >= 0 && toldId < 0 && more == 1 && m.hiddenSplit >= 0 &&
+                m.hiddenSplitSeenAt == t.lastSeenAt && juraic::placement(found).dir == juraic::UP &&
+                showsSeen(base, m.hiddenSplit, foundColors, on)) {
+                found = m.hiddenSplit, foundOn = on;
             }
             if (found >= 0) take(s, foundOn, found, foundColors, was, at);
             else notLying(m);

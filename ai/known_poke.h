@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 #include "preparation.h"
 
 namespace juraic::ai::known_poke {
@@ -112,6 +113,7 @@ template<class Stop>
 int prefer(const Observation& o, unsigned legal, int rate, uint64_t seed, const Params& p,
            const PlanSet& own, const PlanSet& enemy, const Plan& original, int room, bool discounted, int enemyMain,
            Stop outOfTime) {
+    metrics::Scope scope(metrics::Part::KnownPoke);
     bool expired = false;
     const auto stop = [&] { return expired = expired || outOfTime(); };
     if (!p.readMidgame || !p.checkKnownExchange || p.handWait || p.x3PokeNet != 3 || p.x3PokeRead || p.x3PokeUnanswered ||
@@ -180,17 +182,30 @@ int prefer(const Observation& o, unsigned legal, int rate, uint64_t seed, const 
             return Result{complete, a.fallen, a.incoming.total(), b.fallen, b.incoming.confirmed,
                           int64_t(a.scoring.score) - o.self().scoring.score + reserve};
         };
+        // The attack and the reply start from the same observation for every hold.
+        // Keep only completed comparisons, local to this choice and this seed.
+        struct CachedAttack { size_t reply, attack; Result result; };
+        std::array<std::optional<CachedAttack>, 64> attackResults;
+        const auto attackAgainst = [&](size_t r, size_t a) {
+            if (holds.size() == 1) return measure(pressure[a], reachable[r]);
+            auto& entry = attackResults[(r * 31 + a) % attackResults.size()];
+            if (entry && entry->reply == r && entry->attack == a) return entry->result;
+            const Result result = measure(pressure[a], reachable[r]);
+            if (result.complete) entry = CachedAttack{r, a, result};
+            return result;
+        };
         if (reachable.size() > 1) for (const Plan* hold : holds) {
             if (stop()) return -1;
             if (hold->points < int64_t(p.x3ChokeMin) * rate ||
                 int64_t(original.mainAfter) * 100 >= int64_t(hold->points) * p.x3PokeKeep ||
                 !opensQuiet(hold->id[0])) continue;
             bool dominates = true, improves = false;
-            for (const Plan* reply : reachable) {
+            for (size_t r = 0; r < reachable.size(); ++r) {
+                const Plan* reply = reachable[r];
                 const Result kept = measure(hold, reply);
-                for (const Plan* attack : pressure) {
+                for (size_t a = 0; a < pressure.size(); ++a) {
                     if (stop()) return -1;
-                    const Result poked = measure(attack, reply);
+                    const Result poked = attackAgainst(r, a);
                     if (!noWorse(kept, poked)) { dominates = false; break; }
                     improves |= !noWorse(poked, kept);
                 }

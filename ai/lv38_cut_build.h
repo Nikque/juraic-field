@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 
 #include "lv38_tail_build.h"
 
@@ -39,7 +40,7 @@ struct Holdings {
 inline Holdings measure(const GameField& board, const Rules& rules, const Timing& timing, const Params& p) {
     Holdings result;
     KeyPlan main;
-    buildValue(board, rules, timing, p, &result.main, &main);
+    readMainChain(board, rules, timing, p, &result.main, &main);
     if (result.main <= 0) return result;
     Trials trials;
     detect(board, rules, timing, 2, trials, nullptr, false);
@@ -84,6 +85,7 @@ inline std::pair<int, int> queueRank(const BuildResult& beam, int id, int limit)
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const BuildResult& beam, int ordinary, unsigned allowed,
            const Params& p, bool timedSum, Stop expired, Note& note) {
+    metrics::Scope scope(metrics::Part::CutBuild);
     if (!p.lv38Midgame || !quiet(o, p) || ordinary < 0 || !mine.knownCount || beam.cut || expired() ||
         !lv38_tail::inWindow(o.self().field.f.normal().count(), p.lv38CutFrom)) return ordinary;
     const unsigned legal = quietSetupChoices(o, mine, allowed & beam.alive);
@@ -108,15 +110,25 @@ int prefer(const Observation& o, const PlanSet& mine, const BuildResult& beam, i
         return next;
     };
     if (p.lv38CutAhead > 0) {
+        metrics::Scope cutAheadScope(metrics::Part::CutAhead);
         countComponent(CountedComponent::CutAhead);
-        const bool held = inspect(o.self().field, o, p).count() != 0;
+        // Different quiet routes can produce the same complete board. Within this
+        // decision the rules and parameters are fixed. A collision only evicts an entry.
+        struct Entry { GameField board; BuildCuts cuts; };
+        std::array<std::optional<Entry>, 128> evaluated;
+        const auto evaluate = [&](const GameField& field) {
+            auto& entry = evaluated[fieldKey(field) % evaluated.size()];
+            if (!entry || !(entry->board == field)) entry = Entry{field, inspect(field, o, p)};
+            return entry->cuts;
+        };
+        const bool held = evaluate(o.self().field).count() != 0;
         const GameField original = board(ordinary);
         const int limit = std::min(std::clamp(p.lv38CutAhead, 1, 2) + 1, mine.knownCount);
         for (int depth = 1; depth <= limit && !expired(); ++depth) {
             int main = -1;
             std::vector<BuildCuts> originalCuts;
             auto reference = [&](const GameField& field) {
-                const auto cut = inspect(field, o, p);
+                const auto cut = evaluate(field);
                 main = std::max(main, cut.main);
                 if (cut.count()) originalCuts.push_back(cut);
             };
@@ -134,7 +146,7 @@ int prefer(const Observation& o, const PlanSet& mine, const BuildResult& beam, i
             for (unsigned rest = nearBestChoices & ~(1u << ordinary); rest && !expired(); rest &= rest - 1) {
                 const int id = std::countr_zero(rest);
                 auto compare = [&](const GameField& field) {
-                    const auto cut = inspect(field, o, p);
+                    const auto cut = evaluate(field);
                     if (fits(cut) && shapeRank(cut) > shapeRank(shape)) {
                         selected = id;
                         shape = cut;
@@ -150,6 +162,7 @@ int prefer(const Observation& o, const PlanSet& mine, const BuildResult& beam, i
     }
     const int depth = std::min({p.lv38CutQueues, beam.depth, HORIZONS});
     if (depth <= 0 || expired()) return ordinary;
+    metrics::Scope cutQueuesScope(metrics::Part::CutQueues);
     const auto defaultRank = queueRank(beam, ordinary, depth);
     auto rank = std::tuple(defaultRank.first, defaultRank.second, score[ordinary]);
     int selected = ordinary;

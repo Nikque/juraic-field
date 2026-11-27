@@ -67,6 +67,7 @@ inline bool lv37PartEnabled(int setting, [[maybe_unused]] Lv37Part part) {
 }
 
 struct Params {
+    bool operator==(const Params&) const = default;
     // The explicit Lv 37 profile can use a longer known prefix in the beam.
     int knownPairs = 3;
     int checkKnownExchange = 0;

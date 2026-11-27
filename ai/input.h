@@ -353,16 +353,17 @@ public:
     // A frame of `way` from `from` in which a tap begins, taking the buttons of the frame before instead, leaves the
     // pair no way to `target` (locks it elsewhere, or no way leads there from where it is then).
     bool lostBySkip(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speedPercent, const InputPath& way) {
+        const detail::Cells cells(field);
         PairControl p = from;
         InputPath rest;
         for (size_t i = 0; i < way.buttons.size() && !p.locked; ++i) {
             const uint8_t before = i ? way.buttons[i - 1] : from.held;
             if (way.buttons[i] & ~before & TAP_BUTTONS) {
                 PairControl skipped = p;
-                stepPair(skipped, field, before, timing, speedPercent);
+                stepPair(skipped, cells, before, timing, speedPercent);
                 if (skipped.locked ? skipped.x != target.x || skipped.dir != target.dir : !plan(field, skipped, target, timing, speedPercent, rest)) return true;
             }
-            stepPair(p, field, way.buttons[i], timing, speedPercent);
+            stepPair(p, cells, way.buttons[i], timing, speedPercent);
         }
         return false;
     }
@@ -490,17 +491,32 @@ public:
 private:
     static bool reachesAfterMissedInput(const GameField& field, const PairControl& from, Placement target,
                                         const Timing& timing, int speedPercent, const std::vector<uint8_t>& buttons) {
-        PairControl current = from;
-        for (size_t i = 0; i < buttons.size(); ++i) {
-            if (buttons[i] != current.held) {
-                PairControl delayed = current;
-                stepPair(delayed, field, current.held, timing, speedPercent);
-                for (size_t j = i + 1; j < buttons.size() && !delayed.locked; ++j)
-                    stepPair(delayed, field, buttons[j], timing, speedPercent);
-                if (!delayed.locked) stepPair(delayed, field, 0, timing, speedPercent);
-                if (!delayed.locked || delayed.x != target.x || delayed.dir != target.dir) return false;
+        const detail::Cells cells(field);
+        const auto finishes = [&](PairControl state, size_t frame) {
+            for (; frame < buttons.size() && !state.locked; ++frame)
+                stepPair(state, cells, buttons[frame], timing, speedPercent);
+            if (!state.locked) stepPair(state, cells, 0, timing, speedPercent);
+            return state.locked && state.x == target.x && state.dir == target.dir;
+        };
+        PairControl ordinary = from;
+        std::optional<bool> ordinaryFinishes;
+        for (size_t i = 0; i < buttons.size() && !ordinary.locked; ++i) {
+            const PairControl before = ordinary;
+            stepPair(ordinary, cells, buttons[i], timing, speedPercent);
+            if (buttons[i] == before.held) continue;
+            PairControl delayed = before;
+            stepPair(delayed, cells, before.held, timing, speedPercent);
+            PairControl reference = ordinary;
+            size_t frame = i + 1;
+            if (!(delayed == reference) && !delayed.locked && frame < buttons.size()) {
+                stepPair(delayed, cells, buttons[frame], timing, speedPercent);
+                stepPair(reference, cells, buttons[frame++], timing, speedPercent);
             }
-            stepPair(current, field, buttons[i], timing, speedPercent);
+            // Equal full control states at the same frame have exactly the same suffix.
+            if (delayed == reference) {
+                if (!ordinaryFinishes.has_value()) ordinaryFinishes = finishes(reference, frame);
+                if (!*ordinaryFinishes) return false;
+            } else if (!finishes(delayed, frame)) return false;
         }
         return true;
     }
@@ -511,10 +527,11 @@ private:
     };
     static PathTiming pathTiming(const GameField& field, PairControl control, Placement target, const PlaceResult& drop,
                                  const Timing& timing, int speedPercent, const InputPath& path) {
+        const detail::Cells cells(field);
         int soft = 0;
         for (const uint8_t b : path.buttons) {
             if (control.locked) return {};
-            soft += stepPair(control, field, b, timing, speedPercent).dropBonus;
+            soft += stepPair(control, cells, b, timing, speedPercent).dropBonus;
         }
         if (!control.locked || control.x != target.x || control.dir != target.dir) return {};
         const int split = timing.splitFrames(drop.split, target.x, drop.lockY);

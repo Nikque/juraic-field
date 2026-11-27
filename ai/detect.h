@@ -13,6 +13,8 @@
 // The plain way stays for every other field, and the tests compare the two.
 #include "../game/field.h"
 #include "../game/timing.h"
+#include <cstring>
+#include <type_traits>
 
 namespace juraic::ai {
 
@@ -48,6 +50,27 @@ struct Trials {
 struct FirstWaves {
     BitField field[W * MAX_COLORS]; // the field after it
     uint8_t size[W * MAX_COLORS];   // the pieces it clears
+    // Wave 2 already has its board above. The last board and totals are the
+    // ordinary trial result; only intermediate boards for waves 3–12 are saved.
+    struct Checkpoint {
+        std::byte board[sizeof(BitField)];
+        int points, cleared;
+    };
+    static constexpr int savedWaves = 12;
+    Checkpoint prefix[W * MAX_COLORS][savedWaves - 2];
+    struct KeyIncrease {
+        int chains, points, cleared;
+    };
+    struct KeyTrials {
+        int count;
+        int8_t column[3 * W];
+        Cell color[3 * W];
+        unsigned known;
+        KeyIncrease increase[3 * W];
+    };
+    uint8_t representative[W * MAX_COLORS];
+    unsigned duplicates; // representatives with at least two equivalent trials
+    KeyTrials keys[W * MAX_COLORS];
 };
 
 inline bool quickTrials = true; // tests switch it off: every field then goes the plain way
@@ -83,20 +106,43 @@ inline bool anyClear(const BitField& f, const Rules& rules) {
 
 // Runs the chain of a field in which something may clear. Returns the number of waves.
 // timed = false: the frames are not counted (Trial::frames stays as it is).
-inline int runTrialChain(BitField& f, const Rules& rules, const Timing& timing, Trial& t, bool timed = true) {
+template<bool Garbage
+         , bool SavePrefix = false
+         >
+inline int trialChain(BitField& f, const Rules& rules, const Timing& timing, Trial& t, bool timed
+                      , FirstWaves::Checkpoint* prefix = nullptr
+                      ) {
     Wave w;
-    while (findWaveFor(f, w, rules.clearCount)) {
-        if (rules.clearTopGarbage) addTopGarbage(f, w);
+    while (Garbage ? findWaveFor(f, w, rules.clearCount) : findWave<false>(f, w)) {
+        if constexpr (SavePrefix) {
+            if (t.chains >= 2 && t.chains < FirstWaves::savedWaves) {
+                static_assert(std::is_trivially_copyable_v<BitField>);
+                auto& saved = prefix[t.chains - 2];
+                std::memcpy(saved.board, &f, sizeof(f));
+                saved.points = t.points;
+                saved.cleared = t.cleared;
+            }
+        }
+        if constexpr (Garbage) if (rules.clearTopGarbage) addTopGarbage(f, w);
         ++t.chains;
         const FieldBits erased = w.cleared | w.garbage;
         if (timed) t.frames += timing.waveFrames(longestFall(f, erased));
         t.points += gameWaveScore(w, t.chains);
         t.cleared += w.pieces;
-        f.erase(erased);
-        // (when nothing falls, what is left stands where it stood: no further group has formed)
-        if (!f.drop()) break;
+        // When nothing falls, no further group has formed.
+        if (!f.eraseDrop(erased)) break;
     }
     return t.chains;
+}
+
+inline int runTrialChain(BitField& f, const Rules& rules, const Timing& timing, Trial& t, bool timed = true) {
+    if (rules.clearCount == 4 && f.garbage().empty()) return trialChain<false>(f, rules, timing, t, timed);
+    return trialChain<true>(f, rules, timing, t, timed);
+}
+
+// The child builder needs the wave scores even on the blind last layer.
+inline void resolveBuildChild(BitField& field, const Rules& rules, const Timing& timing, Trial& chain) {
+        runTrialChain(field, rules, timing, chain, false);
 }
 
 // The plain way of detect: every piece is put on a copy of the field, and the field is looked at.
@@ -156,10 +202,10 @@ inline int detect(const GameField& g, const Rules& rules, const Timing& timing, 
                   FirstWaves* first = nullptr, const Links* fieldLinks = nullptr, const int* heights = nullptr) {
     if (!quickTrials || rules.clearCount != 4 || maxAdd >= 4 || maxAdd < 1) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
     const Links k = fieldLinks ? *fieldLinks : g.f.links();
-    const BitField::Seeds seed = BitField::seeds(k);
     const FieldBits occ = g.f.occupied(), floor = FieldBits::fill(1);
-    // (a group of four stands, or a piece hangs in the air: the plain way)
-    if ((seed.three | seed.pairU | seed.pairR).any() || !occ.subsetOf(occ.up() | floor)) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
+    const BitField::Seeds seed = BitField::seeds(k);
+    if ((seed.three | seed.pairU | seed.pairR).any()) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
+    if (!occ.subsetOf(occ.up() | floor)) return detectPlain(g, rules, timing, maxAdd, out, after, timed);
     const int colors = rules.colorsInPlay();
     FieldBits ofColor[MAX_COLORS], known;
     for (int c = 0; c < colors; ++c) {
@@ -196,6 +242,12 @@ inline int detect(const GameField& g, const Rules& rules, const Timing& timing, 
         heights = localHeights;
     }
     for (int x = 0; x < W; ++x) out.alone[x] = 0;
+    const FieldBits garbage = g.f.garbage();
+    const bool hasGarbage = garbage.any();
+    const bool share = !timed && first && after;
+    FieldBits originalErased[W * MAX_COLORS];
+    unsigned byColor[MAX_COLORS]{};
+    if (first) first->duplicates = 0;
     // (by column, and by colour on a column, as the plain way finds them)
     for (uint64_t left = needs[0] | needs[1] | needs[2]; left; left &= left - 1) {
         const int at = std::countr_zero(left), x = at >> 3, c = at & 7;
@@ -211,20 +263,53 @@ inline int detect(const GameField& g, const Rules& rules, const Timing& timing, 
         t = Trial{int8_t(x), color, int8_t(n), int8_t(heights[x])};
         Wave w;
         w.cleared = group, w.pieces = size, w.colors = w.groups = 1, w.groupBonus = groupBonus(size);
-        w.garbage = g.f.garbageNextTo(group);
-        if (rules.clearTopGarbage) addTopGarbage(g.f, w);
+        if (hasGarbage) {
+            w.garbage = garbage & (group.up() | group.down() | group.left() | group.right()) & MASK_12;
+            if (rules.clearTopGarbage) w.garbage |= (group.up() & garbage).without(MASK_12);
+        }
         const FieldBits erased = group | w.garbage;
         t.chains = 1;
         if (timed) t.frames = timing.waveFrames(longestFall(g.f, erased)); // (the added pieces lie on top: nothing falls because of them)
         t.points = gameWaveScore(w, 1);
         t.cleared = size;
-        BitField f = g.f;
-        f.erase(erased);
-        const bool falls = f.drop();
-        if (first) first->field[out.count] = f, first->size[out.count] = uint8_t(size);
-        if (falls) runTrialChain(f, rules, timing, t, timed);
-        if (after) after[out.count] = f;
-        ++out.count;
+        const int index = out.count++;
+        if (first) first->size[index] = uint8_t(size);
+        if (first) first->representative[index] = uint8_t(index);
+        if (share) {
+            const FieldBits gone = erased & occ;
+            int previous = -1;
+            for (unsigned candidates = byColor[c]; candidates; candidates &= candidates - 1) {
+                const int at = std::countr_zero(candidates);
+                if (gone == originalErased[at]) { previous = at; break; }
+            }
+            if (previous >= 0) {
+                first->representative[index] = uint8_t(previous);
+                first->duplicates |= 1u << previous;
+                const Trial& reused = out.item[previous];
+                const int originalSize = first->size[previous];
+                t.chains = reused.chains;
+                t.points += reused.points - 10 * originalSize * std::max(1, groupBonus(originalSize));
+                t.cleared += reused.cleared - originalSize;
+                after[index] = after[previous];
+                continue;
+            }
+            originalErased[index] = gone;
+            byColor[c] |= 1u << index;
+            first->keys[index].count = -1;
+        }
+        BitField local;
+        BitField& f = after ? after[index] : local;
+        f = g.f;
+        const bool falls = f.eraseDrop(erased, occ);
+        if (first) first->field[index] = f;
+        if (falls) {
+            if (!timed && first) {
+                if (!hasGarbage) trialChain<false, true>(f, rules, timing, t, false, first->prefix[index]);
+                else
+                    trialChain<true, true>(f, rules, timing, t, false, first->prefix[index]);
+            } else
+                runTrialChain(f, rules, timing, t, timed);
+        }
     }
     return out.count;
 }
@@ -339,6 +424,69 @@ inline int stallKeysQuiet(const BitField& stall, int8_t keyX[], Cell keyColor[],
     return count;
 }
 
+inline FieldBits keyGroup(const BitField& field, int column, int y, Cell color) {
+    const FieldBits key = FieldBits::cell(column, y);
+    const FieldBits same = field.colorMask(color) & MASK_12;
+    if (around(key).disjoint(same)) return key;
+    const FieldBits inside = same | key;
+    FieldBits group = key;
+    for (int step = 0; step < 3; ++step) group = around(group) & inside;
+    return group;
+}
+
+// Advance a key past unaffected waves. All scores remain in the numbering of
+// the original chain, including the first wave of this particular trigger.
+inline void runQuietKey(const FirstWaves& first, int index, int representative, const BitField& stalled,
+                        const Rules& rules, const Timing& timing, const Trial& original, int kx, Cell color,
+                        BitField& after, Trial& t) {
+    const int firstSize = first.size[index];
+    t.chains = 1;
+    t.points = 10 * firstSize * std::max(1, groupBonus(firstSize));
+    t.cleared = firstSize;
+    after = first.field[representative];
+    bool stopped = original.chains == 1;
+    if (original.chains >= 2 && original.chains <= FirstWaves::savedWaves) {
+        while (BitField::cells(keyGroup(after, kx, detail::countBits(after.occupied().column(kx)), color)) < 4) {
+            if (t.chains + 1 == original.chains) {
+                after = stalled;
+                t.chains = original.chains;
+                t.points = original.points;
+                t.cleared = original.cleared;
+                stopped = true;
+                break;
+            }
+            const auto& saved = first.prefix[representative][t.chains - 1];
+            const int representativeSize = first.size[representative];
+            std::memcpy(&after, saved.board, sizeof(after));
+            ++t.chains;
+            t.points = saved.points + 10 * (firstSize * std::max(1, groupBonus(firstSize)) -
+                                            representativeSize * std::max(1, groupBonus(representativeSize)));
+            t.cleared = saved.cleared + firstSize - representativeSize;
+        }
+    }
+    const int y = detail::countBits(after.occupied().column(kx));
+    if (stopped) {
+        // The quiet board has no existing group of four. All pieces in any
+        // new group are within three steps of the piece just added.
+        const FieldBits group = keyGroup(after, kx, y, color);
+        const int size = BitField::cells(group);
+        if (size < 4) return;
+        Wave wave;
+        wave.cleared = group;
+        wave.pieces = size;
+        wave.colors = wave.groups = 1;
+        wave.groupBonus = groupBonus(size);
+        wave.garbage = after.garbageNextTo(group);
+        if (rules.clearTopGarbage) addTopGarbage(after, wave);
+        t.points += gameWaveScore(wave, ++t.chains);
+        t.cleared += size;
+        // The added piece is in the erased group and need never be written.
+        if (!after.eraseDrop(group | wave.garbage)) return;
+    } else
+        after.set(kx, y, color);
+    runTrialChain(after, rules, timing, t, false);
+}
+
 // Carries the plan `cur` (a trial drop, without a key piece), whose chain left the field `stall`,
 // on with one key piece. `best` receives the longest chain there is with one (more points on
 // equal waves); when there is none it stays a plan without a key piece.
@@ -352,12 +500,31 @@ inline int stallKeysQuiet(const BitField& stall, int8_t keyX[], Cell keyColor[],
 // to rest on top of its column of the field after that wave, and the chain is run from there.
 // (Only without the frames: the fall of the key piece may be the longest of that wave.)
 inline void addKey(const BitField& field, const int heights[W], const Rules& rules, const Timing& timing, const KeyPlan& cur, const BitField& stall,
-                   int& runs, KeyPlan& best, const Trials* known = nullptr, bool timed = true, const FirstWaves* first = nullptr,
+                   int& runs, KeyPlan& best, const Trials* known = nullptr, bool timed = true, FirstWaves* first = nullptr,
                    int index = -1, bool countTrialsOnly = false) {
     const bool quick = known && known->quiet && rules.clearCount == 4 && quickTrials;
-    int8_t keyX[3 * W];
-    Cell keyColor[3 * W];
-    const int n = quick ? stallKeysQuiet(stall, keyX, keyColor, 3 * W) : stallKeys(stall, rules, keyX, keyColor, 3 * W);
+    int8_t localX[3 * W];
+    Cell localColor[3 * W];
+    const int8_t* keyX = localX;
+    const Cell* keyColor = localColor;
+    int representative = index;
+    int n;
+    FirstWaves::KeyTrials* shared = nullptr;
+    if (quick && first && !timed) {
+        representative = first->representative[index];
+        if (first->duplicates >> representative & 1u) {
+            shared = &first->keys[representative];
+            if (shared->count < 0) {
+                shared->count = stallKeysQuiet(stall, shared->column, shared->color, 3 * W);
+                shared->known = 0;
+            }
+            keyX = shared->column;
+            keyColor = shared->color;
+        }
+    }
+    if (shared) n = shared->count;
+    else
+        n = quick ? stallKeysQuiet(stall, localX, localColor, 3 * W) : stallKeys(stall, rules, localX, localColor, 3 * W);
     const int x = cur.t.x;
     for (int i = 0; i < n && runs > 0; ++i) {
         KeyPlan next = cur;
@@ -375,11 +542,20 @@ inline void addKey(const BitField& field, const int heights[W], const Rules& rul
             if (countTrialsOnly) --runs;
             t = Trial{cur.t.x, cur.t.color, cur.t.added, cur.t.y};
             if (first && !timed && kx != x && color != cur.t.color) {
-                after = first->field[index];
-                after.set(kx, detail::countBits(after.occupied().column(kx)), color);
-                const int size = first->size[index], bonus = groupBonus(size);
-                t.chains = 1, t.points = 10 * size * (bonus < 1 ? 1 : bonus), t.cleared = size;
-                runTrialChain(after, rules, timing, t, false);
+                if (shared && (shared->known >> i & 1u)) {
+                    const auto& saved = shared->increase[i];
+                    const int size = first->size[index];
+                    t.chains = saved.chains;
+                    t.points = saved.points + 10 * size * std::max(1, groupBonus(size));
+                    t.cleared = saved.cleared + size;
+                } else {
+                    runQuietKey(*first, index, representative, stall, rules, timing, cur.t, kx, color, after, t);
+                    if (shared) {
+                        const int size = first->size[index];
+                        shared->increase[i] = {t.chains, t.points - 10 * size * std::max(1, groupBonus(size)), t.cleared - size};
+                        shared->known |= 1u << i;
+                    }
+                }
             } else {
                 BitField f = field;
                 if (kx != x) f.set(kx, heights[kx], color);

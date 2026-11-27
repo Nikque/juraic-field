@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 
 #include "exchange.h"
 #include "receive.h"
@@ -12,6 +13,7 @@ enum class Survival { Unknown, Dangerous, Safe };
 template<class Stop>
 int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, const PlanSet& theirs,
            int ordinary, unsigned legal, int arriving, const Params& p, uint64_t seed, Stop stop) {
+    metrics::Scope scope(metrics::Part::Lifeline);
     const int me = o.me, him = 1 - me;
     const bool pending = chainShown(o.opponent()) && !o.self().incoming.confirmed &&
         o.self().incoming.pending && afterChain.player[him].phase == DuelPhase::Control &&
@@ -130,6 +132,7 @@ int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, co
 template<class Stop>
 int preferUnannouncedWave(const Observation& o, const Duel& afterChain, const PlanSet& mine, const PlanSet& theirs,
                           int ordinary, unsigned legal, int arriving, const Params& p, uint64_t seed, Stop stop) {
+    metrics::Scope scope(metrics::Part::UnannouncedWave);
     const int me = o.me, him = 1 - me;
     if (!p.lv38Midgame || o.players != 2 || p.handWait || o.busyLeft[me] ||
         o.self().incoming.total() || !chainShown(o.opponent()) || o.self().scoring.allClear ||

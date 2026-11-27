@@ -57,9 +57,7 @@ constexpr int placementId(Placement p) {
 //  - with the child below, the column must be 11 high or lower.
 // This is the move list for the AI; the frame-by-frame controller is what
 // decides for a human player, and the tests compare the two.
-inline unsigned legalPlacements(const GameField& g) {
-    int h[W];
-    g.heights(h);
+inline unsigned legalPlacements(const GameField& g, const int (&h)[W]) {
     const unsigned pairs = reachablePairs(h);
     unsigned result = 0;
     for (int x = 0; x < W; ++x) {
@@ -69,6 +67,12 @@ inline unsigned legalPlacements(const GameField& g) {
     for (int x = 0; x + 1 < W; ++x)
         if (pairs >> (W + x) & 1) result |= 1u << (6 + x) | 1u << (17 + x);
     return result;
+}
+
+inline unsigned legalPlacements(const GameField& g) {
+    int h[W];
+    g.heights(h);
+    return legalPlacements(g, h);
 }
 
 struct PlaceResult {
@@ -90,10 +94,8 @@ inline void putCell(GameField& g, int x, int y, Cell code) {
 } // namespace detail
 
 // Puts the pair on a settled field. The placement must be legal.
-inline PlaceResult place(GameField& g, Placement p, Pair pair) {
-    const FieldBits occ = g.f.occupied();
+inline PlaceResult placeAtHeights(GameField& g, Placement p, Pair pair, int ha, int hc) {
     const int ax = p.x, cx = p.childX();
-    const int ha = detail::countBits(occ.column(ax)), hc = detail::countBits(occ.column(cx));
     PlaceResult r;
     if (p.dir == UP) {
         r.axisY = r.lockY = ha, r.childY = ha + 1;
@@ -107,6 +109,11 @@ inline PlaceResult place(GameField& g, Placement p, Pair pair) {
     detail::putCell(g, ax, r.axisY, pair.axis);
     detail::putCell(g, cx, r.childY, pair.child);
     return r;
+}
+
+inline PlaceResult place(GameField& g, Placement p, Pair pair) {
+    const FieldBits occ = g.f.occupied();
+    return placeAtHeights(g, p, pair, detail::countBits(occ.column(p.x)), detail::countBits(occ.column(p.childX())));
 }
 
 // ---- waves with any clear count -----------------------------------------------

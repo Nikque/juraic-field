@@ -168,7 +168,7 @@ private:
             GameField after = field;
             after.f = remaining[k];
             int main = 0;
-            buildValue(after, o.rules, o.timing, p, &main);
+            readMainChain(after, o.rules, o.timing, p, &main);
             const bool kept = main > t.points;
             if ((kept || reshaped) && (kept > best.keepsMain || (kept == best.keepsMain && t.points > best.points)))
                 best = {t.points, kept};

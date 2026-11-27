@@ -14,6 +14,7 @@
 //
 // The measuring tools run without a clock (thinkBudget 0): there a search runs to its depth, and what this class
 // does is to call the tactics in the frame the choice is due.
+#include "decision_metrics.h"
 #include "agent.h"
 #include "build.h"
 #include <array>
@@ -497,6 +498,7 @@ protected:
     // A beam search that is to end when `percent` of the time of the choice are over.
     BuildResult search(Builder& b, const GameField& field, const Pair* known, int count, const Observation& o, Params q, uint64_t seed, int percent,
                        bool fit, bool cutBuild = false) {
+        metrics::Scope beamTimer(&b == &builder ? metrics::Part::SelfBeam : metrics::Part::RivalBeam);
         // (the values of the last layer are read only by the two ways of choosing by them, and those of
         // a search that the clock stopped, which never has a last layer)
         if (!valuesWanted()) q.beamLastValues = 0;
@@ -540,7 +542,8 @@ protected:
                 if (early.width < q.beamWidth) ++narrowSearches;
                 ownWidth = early.width;
                 if (Note* n = note()) n->widths.push_back(early.width), n->cut += r.cut;
-                cutSearches += dropped ? 0 : r.cut;
+                if (!dropped && r.cut) beamTimer.cut();
+        cutSearches += dropped ? 0 : r.cut;
                 if (r.cut) poor = true, againCut += choosingAgain && !dropped; // (as a search made here: the clock stopped it)
                 return r;
             }
@@ -563,6 +566,7 @@ protected:
             unitNs += unitNs / 2; // (stopped at once: slower than was thought)
             if (unitNs > slowNs) slowNs = unitNs;
         }
+        if (!dropped && r.cut) beamTimer.cut();
         cutSearches += dropped ? 0 : r.cut;
         if (r.cut) poor = true, againCut += choosingAgain && !dropped;
         if (Note* n = note()) n->cut += r.cut;

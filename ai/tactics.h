@@ -1,4 +1,8 @@
 #pragma once
+#ifdef JURAIC_DECISION_METRICS
+#include "decision_trace.h"
+#endif
+#include "decision_metrics.h"
 #include "win_fire.h"
 #include "ready_build.h"
 // X3: moves by kind. What a strong player does in the middle game is made of a
@@ -57,6 +61,17 @@ namespace juraic::ai {
 // The tactics of X3: which placement, given the plans of both players and the searches. When a choice is made, how
 // long it may take and what the opponent is seen as is X3Pace's (pace.h).
 class X3Agent : public X3Pace {
+#ifdef JURAIC_DECISION_METRICS
+public:
+    bool recordDecisionMetrics = false;
+private:
+#endif
+    template<metrics::Part part, class Action>
+    static decltype(auto) measurePart(Action action) {
+        metrics::Scope scope(part);
+        return action();
+    }
+
 public:
     explicit X3Agent(const Params& params = Params{}) : X3Pace(params) {}
     bool namedLv38Ex = false;
@@ -209,16 +224,99 @@ protected:
     }
 
     int choose(const Observation& o, Pair pair, unsigned legal) override {
+#ifdef JURAIC_DECISION_METRICS
+        if (recordDecisionMetrics) {
+            const auto& files = decision_trace::files();
+            if (!files.profile.empty() || !files.positions.empty())
+                return chooseRecorded(o, pair, legal, !files.profile.empty(), !files.positions.empty());
+        }
+#endif
         if (!cutDecisions) return X3Pace::choose(o, pair, legal);
         const auto started = Builder::Clock::now();
         const int selected = X3Pace::choose(o, pair, legal);
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Builder::Clock::now() - started).count();
-        const bool quiet = lv38_cut_build::quiet(o, p);
-        int colours = o.self().field.f.normal().count();
-        for (Cell cell : o.self().field.row14) colours += cell >= 1 && cell <= MAX_COLORS;
-        cutDecisions->push_back({o.frame, ns, o.self().moves + 1, colours, quiet, o.self().field});
+        cutDecisions->push_back({o.frame, ns, o.self().moves + 1, normalColours(o), lv38_cut_build::quiet(o, p), o.self().field});
         return selected;
     }
+
+    static int normalColours(const Observation& o) {
+        int colours = o.self().field.f.normal().count();
+        for (Cell cell : o.self().field.row14) colours += cell >= 1 && cell <= MAX_COLORS;
+        return colours;
+    }
+
+#ifdef JURAIC_DECISION_METRICS
+    decision_position::Context decisionContext() const {
+        using namespace decision_position;
+        Context c;
+        const auto snapshotCarry = [](const TwoWaveCarry& v) { return Carry{v.moves, v.field, v.pairs, v.suffix}; };
+        c.roundSeed = roundSeed;
+        c.random = choosingAgain ? drawn : rng;
+        c.choosingAgain = choosingAgain;
+        c.setupPicked = setupPicked;
+        c.namedLv38Ex = namedLv38Ex;
+        c.lastChoice = lastChoice;
+        c.firstWidth = firstWidth;
+        c.unitNs = unitNs;
+        c.slowNs = slowNs;
+        c.plansNs = plansNs;
+        c.againBudget = againBudget;
+        c.input = {tailInput.hold, {tailInput.held[0], tailInput.held[1]}, tailInput.spare,
+                   tailInput.waitQuick, tailInput.downAtTarget, tailInput.uncertain};
+        c.twoWaveTurn = twoWaveTurn;
+        c.carry = snapshotCarry(twoWaveCarry);
+        c.next = snapshotCarry(twoWaveNext);
+        c.sideReady = sideReady;
+        c.held.depth = held.depth;
+        if (held.depth) {
+            c.held.field = held.field;
+            std::copy_n(held.pair, held.pairs, c.held.pair);
+            c.held.pairs = held.pairs;
+            c.held.seed = held.seed;
+            c.held.built = held.built;
+        }
+        return c;
+    }
+
+    int chooseRecorded(const Observation& o, Pair pair, unsigned legal, bool profile, bool savePosition) {
+        std::optional<decision_position::Record> snapshot;
+        const bool localNote = savePosition && !noting;
+        const auto noteCount = notes.size();
+        if (savePosition) {
+            snapshot.emplace();
+            snapshot->observation = o;
+            snapshot->pair = pair;
+            snapshot->legal = legal;
+            snapshot->context = decisionContext();
+            noting = true;
+        }
+        const int64_t previousShortPlans = shortPlans, previousCuts = cutSearches;
+        metrics::Decision decision(profile, profile && p.thinkBudget <= 0);
+        const auto started = Builder::Clock::now();
+        const int selected = X3Pace::choose(o, pair, legal);
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Builder::Clock::now() - started).count();
+        if (profile) finishEvalRepeats();
+        if (snapshot) {
+            snapshot->selected = selected;
+            snapshot->kind = kind;
+            if (notes.size() > noteCount) {
+                const auto& last = notes.back();
+                snapshot->trace = {last.pairs, last.cut, last.widths};
+                if (localNote) notes.pop_back();
+            }
+            if (localNote) noting = false;
+        }
+        const bool quiet = lv38_cut_build::quiet(o, p);
+        const int colours = normalColours(o);
+        const bool twoWaveIncomplete = twoWaveFrame == o.frame && twoWaveNote.status == 4;
+        decision_trace::append({roundSeed, o.me, o.frame, o.self().moves + 1, choosingAgain, selected,
+                                kind, int(o.self().phase), legal, quiet, colours, ns,
+                                shortPlans - previousShortPlans, cutSearches - previousCuts, twoWaveIncomplete},
+                               snapshot ? &*snapshot : nullptr);
+        if (cutDecisions) cutDecisions->push_back({o.frame, ns, o.self().moves + 1, colours, quiet, o.self().field});
+        return selected;
+    }
+#endif
 
     struct TwoWaveCarry {
         int moves = -1;
@@ -230,6 +328,14 @@ protected:
     Gaze gaze;
     PlanSet mine, theirs;
     side_response::Ready sideReady;
+    struct ContinuationSearch {
+        GameField field;
+        std::array<Pair, MAX_KNOWN> remaining{};
+        int count, depth;
+        uint64_t seed;
+        BuildResult result;
+    };
+    std::vector<ContinuationSearch> continuationSearches;
 
     // The beam search for the own field. depth 0 = the usual depth.
     // percent: of the time of the choice, when it is to end (Params::thinkBudget).
@@ -251,7 +357,28 @@ protected:
         Params q = p;
         q.beamDepth = depth;
         q.beamThirdMax = thirdLimit(field); // (as searchBuild: the third column kept low, of the field searched on)
-        return search(builder, field, mine.pair + placed, mine.knownCount - placed, o, q, seed, 75, p.thinkFit >= 1);
+        const Pair* remaining = mine.pair + placed;
+        const int count = mine.knownCount - placed;
+        const bool fit = p.thinkFit >= 1;
+        // The clock can change the width and cut a search. A recorded
+        // decision can also consume a different width on its next search.
+        if (p.thinkBudget > 0 || (fit && scripted))
+            return search(builder, field, remaining, count, o, q, seed, 75, fit);
+        for (const auto& previous : continuationSearches) {
+            if (previous.seed != seed || previous.depth != depth || previous.count != count || previous.field != field ||
+                !std::equal(remaining, remaining + count, previous.remaining.begin(), [](Pair a, Pair b) {
+                    return a.axis == b.axis && a.child == b.child;
+                })) continue;
+            ownWidth = q.beamWidth;
+            metrics::reused();
+            return previous.result;
+        }
+        const auto result = search(builder, field, remaining, count, o, q, seed, 75, fit);
+        if (!result.cut) {
+            auto& saved = continuationSearches.emplace_back(ContinuationSearch{field, {}, count, depth, seed, result});
+            std::copy_n(remaining, count, saved.remaining.begin());
+        }
+        return result;
     }
     // The largest mean over the queues of the chains a search found below a first placement that lives: within `depth`
     // placements (BuildResult::sumBy), or 0: within the depth of the search.
@@ -404,8 +531,11 @@ protected:
         bool unanswered = false; // the last outlasts: he holds no pair in time to answer the chain (no answer searched)
     };
     bool exchangeOutOfTime(int percent = 100) const {
-        return p.thinkBudget > 0 && (stale.load() ||
-            (budgetNow > 0 && Builder::Clock::now() >= began + std::chrono::microseconds(int64_t(budgetNow) * 10 * percent)));
+        if (p.thinkBudget <= 0) return false;
+        if (stale.load()) { metrics::add(metrics::Part::StalePoll); return true; }
+        const bool expired = budgetNow > 0 && Builder::Clock::now() >= began + std::chrono::microseconds(int64_t(budgetNow) * 10 * percent);
+        if (expired) metrics::markCut();
+        return expired;
     }
 
     // MidgameBeam::extend made every layer of theirs.tactical in this decision (false: the clock cut it, the deeper
@@ -659,7 +789,7 @@ protected:
     bool heHoldsLittle(const Observation& o, int rate, int points) const {
         if (p.x3ChokeHis <= 0) return true;
         int now = 0;
-        buildValue(o.opponent().field, o.rules, o.timing, p, &now);
+        readMainChain(o.opponent().field, o.rules, o.timing, p, &now);
         int64_t his = now;
         for (const Plan& x : theirs.plans)
             if (x.fireDepth && int64_t(x.sent) * rate > his) his = int64_t(x.sent) * rate;
@@ -760,7 +890,7 @@ protected:
             GameField left = his;
             left.f = after[i];
             int main = 0;
-            buildValue(left, o.rules, o.timing, p, &main);
+            readMainChain(left, o.rules, o.timing, p, &main);
             all.push_back({t.points, t.frames, t.added, atLeastPercent(main, p.x3CrushKeep, hisKeyed)});
         }
         return all;
@@ -778,6 +908,7 @@ protected:
     // way, when no plan of the pair in hand has passed - those of the second pair before those of the third: the first
     // placement of the plan is made (kind CrushBuild), and the next choice reads again.
     int crush(const Observation& o, unsigned legal, int rate, uint64_t seed) {
+        metrics::Scope scope(metrics::Part::Crush);
         const int me = o.me;
         if (theirs.pairCount == 0 || o.opponent().phase == Phase::Dead) return -1;
         ++crushCounts.asked;
@@ -795,17 +926,20 @@ protected:
             both(mine, [&](const Plan& s) { return s.fireDepth >= 1 && s.fireDepth <= pairs && s.sent >= p.x3Crush && (legal >> s.id[0] & 1); });
         if (chains.empty()) return ++crushCounts.none, -1;
         int mainKeyed = 0, hisKeyed = 0;
-        buildValue(o.self().field, o.rules, o.timing, p, &mainKeyed);
+        readMainChain(o.self().field, o.rules, o.timing, p, &mainKeyed);
         std::erase_if(chains, [&](const Plan* s) { return !keepsMain(*s, mainKeyed); });
         if (chains.empty()) return ++crushCounts.spends, -1;
-        buildValue(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
+        readMainChain(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
         const int waiting = aboveOther(o, me, p);
         struct Candidate {
             const Plan* plan;
             int64_t score;
             int left;
+            size_t afterIndex;
         };
         std::vector<Candidate> passed;
+        std::vector<GameField> afterFields;
+        const bool reuseQuiet = p.thinkBudget <= 0;
         // His replies that keep his main chain: standing still, his chains by what they send, the largest first (the
         // answer that stops a crush is mostly found by the first reading), and the plans that only build.
         std::vector<const Plan*> keep{nullptr};
@@ -820,26 +954,32 @@ protected:
         bool anyPassed = false;
         for (int depth = 1; depth <= pairs; ++depth) {
             passed.clear();
+            afterFields.clear();
             for (const Plan* own : chains) {
                 const Plan& s = *own;
                 if (s.fireDepth != depth) continue;
                 int least = s.sent - ready / rate; // (a reply after which he has lost leaves him all of it)
                 bool safe = true;
+                GameField after;
                 for (size_t r = 0; r < keep.size() && safe && least >= p.x3Crush; ++r) {
                     const Plan* x = keep[r];
                     const Duel d = playOut(o, mine, &s, theirs, x, p, seed);
+                    if (reuseQuiet && r == 0) after = d.player[me].field;
                     const DuelPlayer& he = d.player[1 - me];
                     if (d.player[me].phase == DuelPhase::Dead) safe = false;
                     else if (he.phase != DuelPhase::Dead) least = std::min(least, he.fallen + he.incoming.total() - waiting);
                 }
-                if (safe && least >= p.x3Crush)
-                    passed.push_back({&s, int64_t(p.x3Surplus) * least + int64_t(p.x3Main) * (s.mainAfter / rate) - int64_t(p.x3Used) * s.used, least});
+                if (safe && least >= p.x3Crush) {
+                    passed.push_back({&s, int64_t(p.x3Surplus) * least + int64_t(p.x3Main) * (s.mainAfter / rate) - int64_t(p.x3Used) * s.used,
+                                      least, afterFields.size()});
+                    if (reuseQuiet) afterFields.push_back(after);
+                }
             }
             if (passed.empty()) continue;
             anyPassed = true;
             std::stable_sort(passed.begin(), passed.end(), [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
             for (const Candidate& c : passed)
-                if (secondOffsets(o, *c.plan, hisKeyed, stands, rate, seed)) {
+                if (secondOffsets(o, *c.plan, reuseQuiet ? &afterFields[c.afterIndex] : nullptr, hisKeyed, stands, rate, seed)) {
                     crushNote = {c.plan->sent, c.left, mainKeyed, hisKeyed, c.plan->id[0], c.plan->chains};
                     ++(depth == 1 ? crushCounts.fired : crushCounts.built);
                     return kind = depth == 1 ? Crush : CrushBuild, c.plan->id[0];
@@ -860,8 +1000,8 @@ protected:
     // of what is to be offset (100 at least: of the answers built against a running chain those of 90 to 110 percent of
     // it won every second round, the larger ones nine of ten). A search the clock stopped short of those moves has not
     // seen what can be built in them: not offset.
-    bool secondOffsets(const Observation& o, const Plan& s, int hisKeyed, const std::vector<Standing>& stands, int rate, uint64_t seed) {
-        const int me = o.me;
+    bool secondOffsets(const Observation& o, const Plan& s, const GameField* settled, int hisKeyed,
+                       const std::vector<Standing>& stands, int rate, uint64_t seed) {
         struct Fired {
             int64_t over;   // the points of his chain beyond those of the crush
             int64_t frames; // from the frame the own pair after the crush appears to the end of his chain
@@ -884,9 +1024,14 @@ protected:
         const int64_t row = int64_t(W) * rate;
         if (std::any_of(fired.begin(), fired.end(), [&](const Fired& f) { return f.frames <= 0 && f.over >= row; })) return false;
         if (longest <= 0) return true;
-        const Duel d = playOut(o, mine, &s, theirs, nullptr, p, seed);
-        if (d.player[me].phase == DuelPhase::Dead) return false;
-        const GameField& after = d.player[me].field;
+        GameField replayed;
+        if (!settled) {
+            const Duel d = playOut(o, mine, &s, theirs, nullptr, p, seed);
+            if (d.player[o.me].phase == DuelPhase::Dead) return false;
+            replayed = d.player[o.me].field;
+            settled = &replayed;
+        }
+        const GameField& after = *settled;
         const auto movesFor = [&](int64_t frames) { return movesUpTo(frames, after.f.count(), handWait, p.depth()); };
         BuildResult b;
         const bool searched = mine.knownCount > s.count;
@@ -1019,6 +1164,7 @@ protected:
     }
 
     int midgamePressure(const Observation& o, unsigned legal, uint64_t seed) {
+        metrics::Scope scope(metrics::Part::MidgamePressure);
         const int him = 1 - o.me;
         // A minimum hit must take the opponent to the crowded part of the field.
         // (every response of his is read below: not when the midgame beam made his replies in part)
@@ -1209,6 +1355,7 @@ protected:
 
     // A harmless single can free a main chain for the next visible pair.
     int splitMainAttack(const Observation& o, unsigned legal, uint64_t seed) {
+        metrics::Scope scope(metrics::Part::SplitMain);
         if (!maySplitMain(o) || exchangeOutOfTime(75)) return -1;
         for (const Plan& attack : splitCandidates(o, legal, seed)) {
             if (exchangeOutOfTime(75)) return -1;
@@ -1269,6 +1416,7 @@ protected:
     };
 
     SmallTakeResult smallTake(const Observation& o, int ordinary, unsigned legal, bool measure) {
+        metrics::Scope scope(metrics::Part::TakeSmall);
         SmallTakeResult result;
         const auto& self = o.self();
         const int incoming = self.incoming.total();
@@ -1343,7 +1491,7 @@ protected:
                     if (placedHeights[DEATH_X] + drop.amount / W + 1 > DEATH_Y) continue;
                 }
                 int main = 0;
-                buildValue(drop.field, o.rules, o.timing, p, &main);
+                readMainChain(drop.field, o.rules, o.timing, p, &main);
                 int afterHeights[W];
                 drop.field.heights(afterHeights);
                 const int height = afterHeights[DEATH_X];
@@ -1389,6 +1537,7 @@ protected:
     }
 
     int decideOrdinary(const Observation& o, unsigned legal) {
+        continuationSearches.clear();
         lv38BuildNote = {};
         lv38TailAnswerNote = {};
         lv38AnswerBuildNote = {};
@@ -1400,17 +1549,29 @@ protected:
         int pairs = beginChoice(o, secondChoice); // (the clock of the choice, or the notes of a round played again: pace.h)
         const bool timedThird = p.readMidgame && p.thinkPlans > 0 && budgetNow > 0 && p.thinkBudget > 0 && pairs >= 3;
         const int firstDepth = timedThird ? 2 : pairs;
-        gaze.plans(o, me, true, firstDepth, p, seed, mine);
-        gaze.plans(o, 1 - me, false, firstDepth, p, seed, theirs);
-        if (timedThird && (mine.knownCount >= 3 || theirs.knownCount >= 3)) {
-            const auto deadline = began + std::chrono::microseconds(int64_t(budgetNow) * 10 * std::min(p.thinkPlans, 100));
-            if (!gaze.tryThirdPair(o, p, seed, mine, theirs, deadline)) {
-                pairs = 2;
-                ++shortPlans;
-                if (noting) notes.back().pairs = pairs;
+        {
+            metrics::Scope candidateTimer(metrics::Part::Candidates);
+            Gaze::ThirdPair third;
+            auto* continuation = timedThird ? &third : nullptr;
+            gaze.plans(o, me, true, firstDepth, p, seed, mine, continuation);
+            gaze.plans(o, 1 - me, false, firstDepth, p, seed, theirs, continuation);
+            if (timedThird && (mine.knownCount >= 3 || theirs.knownCount >= 3)) {
+                const auto deadline = began + std::chrono::microseconds(int64_t(budgetNow) * 10 * std::min(p.thinkPlans, 100));
+                metrics::Scope thirdTimer(metrics::Part::ThirdPair);
+                if (!gaze.tryThirdPair(o, p, seed, mine, theirs, deadline, continuation)) {
+                    thirdTimer.cut();
+                    pairs = 2;
+                    ++shortPlans;
+                    if (noting) notes.back().pairs = pairs;
+                }
             }
         }
         plansMade(pairs, secondChoice, mine.pairCount >= 3 && theirs.pairCount >= 3);
+        return decideWithPlans(o, legal, seed, rate);
+    }
+
+    int decideWithPlans(const Observation& o, unsigned legal, uint64_t seed, int rate) {
+        const int me = o.me;
         kind = None, guardedNow = false;
         exchangeNote.chosen = false;
         const bool twoWave = p.lv38Midgame && lv38PartEnabled(p.lv38TwoWave, Lv38Part::TwoWave) && !p.handWait;
@@ -1434,12 +1595,15 @@ protected:
         }
         const auto checkTwoWave = [&](int ordinary, int arriving) {
             if (!twoWave || guardedNow) return ordinary;
+            metrics::Scope scope(metrics::Part::TwoWave);
             traceLv38Part(Lv38Part::TwoWave);
             countComponent(CountedComponent::TwoWave);
             const auto stop = [&] { return exchangeOutOfTime(96); };
+            lv38_two_wave::ReplayCache replays;
+            auto* cache = p.thinkBudget <= 0 && (p.lv38TwoWaveMainCover || p.lv38TwoWaveReselect > 0) ? &replays : nullptr;
             twoWaveRetained = retained != nullptr;
             int selected = lv38_two_wave::prefer(o, mine, theirs, ordinary, legal, p, seed, stop,
-                                                twoWaveNote, retained);
+                                                twoWaveNote, retained, cache);
             int blockedMain = -1;
             const auto keepOrdinary = [&] {
                 twoWaveNext = {};
@@ -1450,6 +1614,7 @@ protected:
                 lv38PartChains(o, selected) >= 5 && lv38PartChains(o, ordinary) < 5) {
                 blockedMain = selected;
                 if (p.lv38TwoWaveReselect <= 0 || stop()) return keepOrdinary();
+                metrics::Scope reselectScope(metrics::Part::Reselect);
 
                 unsigned quietOrShort = legal;
                 for (unsigned bits = legal; bits; bits &= bits - 1) {
@@ -1462,7 +1627,7 @@ protected:
                 twoWaveNext = {};
                 countComponent(CountedComponent::Reselect);
                 selected = lv38_two_wave::prefer(o, mine, theirs, ordinary, quietOrShort, p, seed, stop,
-                                                twoWaveNote, carry);
+                                                twoWaveNote, carry, cache);
                 if (selected == ordinary || stop()) return keepOrdinary();
             }
             const char* part = blockedMain >= 0 ? "two_wave_reselect" : "two_wave";
@@ -1520,7 +1685,10 @@ protected:
         Rival sharedRival;
         std::vector<Plan> splitReady;
         if (splitEarly) {
-            MidgameBeam::extend(o, p, seed, mine, outOfTime);
+            metrics::Scope scope(metrics::Part::SplitMain);
+            measurePart<metrics::Part::SelfPlanExtend>([&] {
+                return MidgameBeam::extend(o, p, seed, mine, outOfTime);
+            });
             const auto candidates = splitCandidates(o, legal, seed);
             for (const Plan& attack : candidates)
                 if (splitAnswers(o, attack, seed)) splitReady.push_back(attack);
@@ -1534,6 +1702,7 @@ protected:
         int id = win(o, legal, rate, seed, sharedRival.prepared ? &sharedRival : nullptr);
         bool readRival = false;
         if (id >= 0 && p.readMidgame && p.checkKnownExchange && p.handWait == 0 && !outOfTime()) {
+            metrics::Scope scope(metrics::Part::WinRecheck);
             unsigned remaining = legal;
             const bool recheck = p.lv38Midgame && lv38PartEnabled(p.lv38WinRecheck, Lv38Part::WinRecheck);
             bool retaken = false; // (id is a candidate taken again after a refuted one)
@@ -1552,7 +1721,9 @@ protected:
                 // fourth pair or an initial small clear can open a real counter.
                 const size_t firstNew = readRival ? 0 : theirs.tactical.size();
                 if (!readRival) {
-                    rivalBeamWhole = MidgameBeam::extend(o, p, seed, theirs, outOfTime);
+                    rivalBeamWhole = measurePart<metrics::Part::RivalPlanExtend>([&] {
+                        return MidgameBeam::extend(o, p, seed, theirs, outOfTime);
+                    });
                     readRival = true;
                 }
                 const Refutation read = withBeam(refutation(o, *fire, firstNew, seed, [&] { return exchangeOutOfTime(75); }),
@@ -1597,8 +1768,14 @@ protected:
             return survive == id ? id : (kind = Answer, survive);
         }
         if (p.readMidgame && o.self().field.f.count() >= 24) {
-            if (!splitEarly) MidgameBeam::extend(o, p, seed, mine, outOfTime);
-            if (!readRival) rivalBeamWhole = MidgameBeam::extend(o, p, seed, theirs, outOfTime);
+            if (!splitEarly)
+                measurePart<metrics::Part::SelfPlanExtend>([&] {
+                    return MidgameBeam::extend(o, p, seed, mine, outOfTime);
+                });
+            if (!readRival)
+                rivalBeamWhole = measurePart<metrics::Part::RivalPlanExtend>([&] {
+                    return MidgameBeam::extend(o, p, seed, theirs, outOfTime);
+                });
         }
         if (arriving > 0) {
             if (p.lv38Midgame && (p.lv38Plan5 > 0 || p.lv38Plan12 > 0 || p.lv38HeadCut > 0) &&
@@ -1631,8 +1808,10 @@ protected:
                     }
                 }
                 if (fire && lv37PartEnabled(p.lv37SmallReceive, Lv37Part::SmallReceive)) {
-                    const int receive = smallReceive(o, mine, theirs, *fire, legal, arriving, p, seed,
+                    const int receive = measurePart<metrics::Part::SmallReceive>([&] {
+                        return smallReceive(o, mine, theirs, *fire, legal, arriving, p, seed,
                                                      [&] { return exchangeOutOfTime(85); }, preferred);
+                    });
                     if (receive >= 0 && receive != id) {
                         id = recordLv37Part(o, "small_receive", id, receive, arriving, Answer);
                         kind = Answer;
@@ -1641,20 +1820,26 @@ protected:
             }
             if (p.checkKnownExchange && p.readMidgame && id >= 0 && kind == Answer && arriving < W) {
                 if (lv37PartEnabled(p.lv37ReceiveCompare, Lv37Part::ReceiveCompare)) {
-                    const int immediate = receive_compare::prefer(o, mine, theirs, id, legal, arriving, p, seed,
+                    const int immediate = measurePart<metrics::Part::ReceiveCompare>([&] {
+                        return receive_compare::prefer(o, mine, theirs, id, legal, arriving, p, seed,
                                                                   [&] { return exchangeOutOfTime(85); });
+                    });
                     if (immediate >= 0) id = recordLv37Part(o, "receive_compare", id, immediate, arriving, kind);
                 }
                 if (lv37PartEnabled(p.lv37CommittedAnswer, Lv37Part::CommittedAnswer)) {
-                    const int committed = preferCommittedAnswer(o, mine, theirs, id, legal, arriving, p, seed,
+                    const int committed = measurePart<metrics::Part::CommittedAnswer>([&] {
+                        return preferCommittedAnswer(o, mine, theirs, id, legal, arriving, p, seed,
                                                                 [&] { return exchangeOutOfTime(85); });
+                    });
                     id = recordLv37Part(o, "committed_answer", id, committed, arriving, kind);
                 }
             }
             if (p.checkKnownExchange && p.readMidgame && id >= 0 && (kind == Answer || kind == AnswerBuild) &&
                 lv37PartEnabled(p.lv37SideResponse, Lv37Part::SideResponse)) {
-                const int side = side_response::prefer(o, afterChain, mine, theirs, id, legal, arriving, p, seed, sideReady,
-                                                       [&] { return exchangeOutOfTime(85); });
+                const int side = measurePart<metrics::Part::SideResponse>([&] {
+                    return side_response::prefer(o, afterChain, mine, theirs, id, legal, arriving, p, seed, sideReady,
+                                                 [&] { return exchangeOutOfTime(85); });
+                });
                 id = recordLv37Part(o, "side_response", id, side, arriving, kind);
             }
             if (p.lv38Midgame && chainRuns && arriving >= W && id >= 0 && (kind == Answer || kind == AnswerBuild) &&
@@ -1703,6 +1888,7 @@ protected:
                     recordPart(legacyPokeLog, o, "legacy_poke", -1, id, 0, kind, mine.knownCount ? mine.pair[0] : Pair{});
             }
             if (id < 0 && splitEarly && !stale.load()) {
+                metrics::Scope scope(metrics::Part::SplitMain);
                 // If ordinary wins needed the shared result early, the same
                 // search can still finish in the extra attack's own window.
                 if (!splitReady.empty() && sharedRival.prefetched) {
@@ -1768,6 +1954,7 @@ protected:
     // Win: against every reply some plan below the same first placement wins (the opponent's side of every
     // exchange: standing still, and answering with pairs not on the screen, then each of his plans). -1: none.
     int earlierWinFire(const Observation& o, int baseline, unsigned winning, int rate, uint64_t seed, Rival& rival) {
+        metrics::Scope scope(metrics::Part::EarlierWinFire);
         const auto stop = [&] { return exchangeOutOfTime(85); };
         const auto shown = [&](int who) {
             const auto& player = o.player[who];
@@ -1812,6 +1999,7 @@ protected:
     }
 
     int win(const Observation& o, unsigned legal, int rate, uint64_t seed, Rival* shared = nullptr) {
+        metrics::Scope scope(metrics::Part::Win);
         const int me = o.me;
         Rival local;
         Rival& rival = shared ? *shared : local;
@@ -1922,7 +2110,7 @@ protected:
         const int surplus = d.player[1 - me].fallen + d.player[1 - me].incoming.total() - base.aboveHim;
         main = s.mainAfter;
         if (mineAfter.fallen > 0) // the garbage may have buried it
-            buildValue(mineAfter.field, o.rules, o.timing, p.x3RowStrict && mineAfter.fallen >= W ? base.strict : p, &main);
+            readMainChain(mineAfter.field, o.rules, o.timing, p.x3RowStrict && mineAfter.fallen >= W ? base.strict : p, &main);
         if (p.evKeyed && main > base.mainKeyed) main = base.mainKeyed;
         int heights[W];
         mineAfter.field.heights(heights);
@@ -1957,6 +2145,7 @@ protected:
     // (Seen: a chain of fifteen that the pair in hand fired, on 66 to 71 cells with four garbage
     // pieces on their way, kept through four moves for small clears; then no pair fired it.) -1: not fired.
     int fireAnswer(const Observation& o, unsigned legal, int rate, uint64_t seed) {
+        metrics::Scope scope(metrics::Part::FireAnswer);
         int most = 0;
         const Plan* now = nullptr;
         for (const Plan& s : mine.plans) {
@@ -1977,6 +2166,7 @@ protected:
     unsigned fullOffsetChoices(const Observation& o, const Duel& afterChain, const BuildResult& b,
                                unsigned legal, unsigned ordinary, int arriving, int rate, int64_t surplusGoal,
                                 uint64_t seed) {
+        metrics::Scope scope(metrics::Part::FullOffsetNext);
         const int me = o.me, him = 1 - me;
         const auto& after = afterChain.player[me];
         const auto& rival = afterChain.player[him];
@@ -2043,6 +2233,7 @@ protected:
     // chain, when chainRuns says that one runs). The plans are played with the opponent's chain going on and no
     // more from him. -1: every plan closes the field.
     int answer(const Observation& o, unsigned legal, int rate, uint64_t seed, const Duel& afterChain, bool chainRuns, int arriving) {
+        metrics::Scope scope(metrics::Part::Answer);
         const int me = o.me;
         const Plan* best = nullptr;
         int64_t bestScore = 0;
@@ -2068,6 +2259,7 @@ protected:
                 auditBranches |= AuditLegal;
 #endif
                 if (p.lv38Midgame && lv38PartEnabled(p.lv38AnswerLegal, Lv38Part::AnswerLegal)) {
+                    metrics::Scope answerLegalScope(metrics::Part::AnswerLegal);
                     traceLv38Part(Lv38Part::AnswerLegal);
                     continue;
                 }
@@ -2174,7 +2366,9 @@ protected:
                     if (p.checkKnownExchange && !clean && bestCost > 0 && !best->allClear && !fullOffsetRankChanged &&
                         lv37PartEnabled(p.lv37KnownPrefix, Lv37Part::KnownPrefix)) {
                         const auto expired = [&] { return exchangeOutOfTime(75); };
-                        const int corrected = correctKnownPrefix(o, afterChain, b, legal, id, arriving, rate, seed, expired);
+                        const int corrected = measurePart<metrics::Part::KnownPrefix>([&] {
+                            return correctKnownPrefix(o, afterChain, b, legal, id, arriving, rate, seed, expired);
+                        });
                         if (corrected >= 0) {
                             recordLv37Part(o, "known_prefix", id, corrected, arriving, AnswerBuild);
                             return kind = AnswerBuild, checkHold(corrected);
@@ -2202,8 +2396,10 @@ protected:
                 lv37PartEnabled(p.lv37AnswerWindow, Lv37Part::AnswerWindow)) {
                 std::optional<PictureRoutes> routes;
                 tailInput.configure(routes);
-                const int alternative = answer_window::prefer(o, mine, theirs, *best, clean, afterChain, legal, arriving, p, seed,
-                    [&] { return exchangeOutOfTime(85); }, routes ? &*routes : nullptr);
+                const int alternative = measurePart<metrics::Part::AnswerWindow>([&] {
+                    return answer_window::prefer(o, mine, theirs, *best, clean, afterChain, legal, arriving, p, seed,
+                                                 [&] { return exchangeOutOfTime(85); }, routes ? &*routes : nullptr);
+                });
                 if (alternative >= 0) return kind = Answer, recordLv37Part(o, "answer_window", held, alternative, arriving, kind);
             }
             return kind = Answer, held;
@@ -2214,6 +2410,7 @@ protected:
     // Verify the chosen hold and the alternative against the attack already in progress.
     // For a partial random row with no observed order we cannot know the next field.
     int protectAnswer(const Observation& o, int hold, unsigned legal, uint64_t seed, const Plan& fire) const {
+        metrics::Scope scope(metrics::Part::ProtectAnswer);
         const int me = o.me;
         if (hold < 0 || fire.id[0] == hold || !(legal >> fire.id[0] & 1) || mine.pairCount < 2 || p.handWait > 0 ||
             !((o.self().phase == Phase::Next && o.busyLeft[me] == 0) || o.self().phase == Phase::Control)) return hold;
@@ -2261,6 +2458,7 @@ protected:
     // Poke: a chain that leaves the main chain whole and gains against his best answer. Nothing is on its way.
     // -1: none.
     int poke(const Observation& o, unsigned legal, int rate, uint64_t seed) {
+        metrics::Scope scope(metrics::Part::LegacyPoke);
         const int me = o.me;
         // (x3PokeFrom: no poke yet on a field of fewer cells. Nothing of what follows is needed then - the own field and
         // the position valued, his field searched - unless x3PokeAt may fire one whatever the own field holds.)
@@ -2269,7 +2467,7 @@ protected:
         // as buildValue sees them, a key piece that is still missing counted in; hisDirect is what he can fire as
         // his field stands - a trial drop without a key piece, or one of his pairs on the screen.
         int mainKeyed = 0;
-        buildValue(o.self().field, o.rules, o.timing, p, &mainKeyed);
+        readMainChain(o.self().field, o.rules, o.timing, p, &mainKeyed);
         const int now = positionValue(o.self(), o.opponent(), o.rules, o.timing, p, rate, seed);
         if (p.x3PokeAt > 0 && o.opponent().field.f.count() >= p.x3PokeAt) {
             // x3PokeAt: his field is nearly full. Whatever he could answer with, he has no room to take it.
@@ -2302,7 +2500,7 @@ protected:
         int hisKeyed = 0;
         int ownCells = 0;
         if (p.x3PokeUnanswered || p.x3PokeNet == 3) {
-            buildValue(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
+            readMainChain(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
             ownCells = o.self().field.f.count();
             for (const Plan& x : theirs.plans) // (his main chain as his pairs can fire it, when a trial drop does not show it)
                 if (x.fireDepth && int64_t(x.sent) * rate > hisDirect) hisDirect = x.sent * rate, hisFrames = int(x.endFrame - x.lockFrame);
@@ -2428,12 +2626,13 @@ protected:
     //  (3) he takes it: his field holds pokeExchangeRoom cells or more with what lands.
     // A chain of a later pair on the screen (pokeExchangeDepth) is built towards by the first placement of its plan.
     int exchangePoke(const Observation& o, unsigned legal, int rate, uint64_t seed) {
+        metrics::Scope scope(metrics::Part::ExchangePoke);
         const int me = o.me, him = 1 - me;
         if (!p.pokeExchange || !rivalBeamWhole || p.handWait != 0 || !theirs.pairCount || o.self().incoming.total() || o.opponent().incoming.total() ||
             chainRunning(o, him) || o.self().scoring.allClear || o.opponent().scoring.allClear || exchangeOutOfTime(75)) return -1;
         ++exchangeCounts.asked;
         int mainKeyed = 0;
-        buildValue(o.self().field, o.rules, o.timing, p, &mainKeyed);
+        readMainChain(o.self().field, o.rules, o.timing, p, &mainKeyed);
         const int depthMost = std::clamp(p.pokeExchangeDepth, 1, 3);
         // (a plan whose chain a later pair fires: the pairs before it must clear nothing)
         const auto clearsBefore = [&](const Plan& s) {
@@ -2465,7 +2664,7 @@ protected:
         Replies standing;
         repliesOf(field, o.rules, o.timing, p, standing);
         int hisKeyed = 0;
-        buildValue(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
+        readMainChain(o.opponent().field, o.rules, o.timing, p, &hisKeyed);
         // His main chain as he can fire it (points) and how long it runs: a trial drop, or a plan of his on the screen.
         int64_t his = 0, hisFrames = 0, hisEnd = -1; // (hisEnd: Plan::endFrame of his plan on the screen; -1: a trial drop)
         Trials trials;
@@ -2516,6 +2715,7 @@ protected:
             // actual result forces a loss, not because some garbage remains.
             for (const Plan* x : partials) {
                 if (offset) break;
+                metrics::Scope partialVetoScope(metrics::Part::PartialVeto);
                 traceLv38Part(Lv38Part::PartialVeto);
                 if (exchangeOutOfTime(75)) return ++exchangeCounts.late, -1;
                 const Duel d = playOut(o, mine, s, theirs, x, p, seed, true, nullptr, &replay);
@@ -2586,6 +2786,7 @@ protected:
     unsigned restrictBuildToShelter(int setup, unsigned choices, const MidgameShelter& shelter) const {
         if (!(shelter.safe >> setup & 1u) ||
             !lv38PartEnabled(p.lv38ShelterNarrow, Lv38Part::ShelterNarrow)) return choices;
+        metrics::Scope scope(metrics::Part::ShelterNarrow);
         if (choices & ~shelter.safe) traceLv38Part(Lv38Part::ShelterNarrow);
         return choices & shelter.safe;
     }
@@ -2612,8 +2813,9 @@ protected:
         const int ownRoom = p.x3ChokeRoom > 0 ? roomPairs(o.self().field) : 0;
         const bool choking = p.x3ChokeRoom > 0 && arriving == 0 && ownRoom <= mine.pairCount + p.x3ChokeRoom;
         if (choking) {
+            metrics::Scope scope(metrics::Part::Choke);
             int mainKeyed = 0;
-            buildValue(o.self().field, o.rules, o.timing, p, &mainKeyed);
+            readMainChain(o.self().field, o.rules, o.timing, p, &mainKeyed);
             const Plan* poke = nullptr;
             for (const Plan& s : mine.plans) {
                 if (s.fireDepth != 1 || s.sent < p.x3MinPoke || !atLeastPercent(s.mainAfter, p.x3PokeKeep, mainKeyed) || !(legal >> s.id[0] & 1)) continue;
@@ -2623,6 +2825,7 @@ protected:
         }
         const bool outwaited = choking && roomPairs(o.opponent().field) > ownRoom + p.x3ChokeRoom;
         if ((p.x3ChokeFrom > 0 && arriving == 0 && o.self().field.f.count() >= p.x3ChokeFrom) || outwaited) {
+            metrics::Scope scope(metrics::Part::Choke);
             int most = 0, later = 0, under[PLACEMENTS]{};
             const Plan* now = nullptr;
             for (const Plan& s : mine.plans) {
@@ -2684,7 +2887,9 @@ protected:
             }
         }
         const MidgameShelter shelter = p.readMidgame && arriving == 0 && lv37PartEnabled(p.lv37Shelter, Lv37Part::Shelter)
-            ? findMidgameShelter(o, mine, theirs, open, p, seed, [&] { return exchangeOutOfTime(70); }, ahead) : MidgameShelter{};
+            ? measurePart<metrics::Part::Shelter>([&] {
+                return findMidgameShelter(o, mine, theirs, open, p, seed, [&] { return exchangeOutOfTime(70); }, ahead);
+            }) : MidgameShelter{};
         const bool tailBuild = p.lv38Midgame && (p.lv38Plan5 > 0 || p.lv38HeadCut > 0) && !arriving && (!chainRuns || quietRivalLanding) &&
             tailInput.supported();
         int buildPercent = 100;
@@ -2734,14 +2939,18 @@ protected:
             if (p.readMidgame && p.checkKnownExchange && id >= 0 && sheltered == id && !arriving && !b.cut && !guardedNow) {
                 const unsigned allowed = (shelter.safe >> id & 1) ? choices & shelter.safe : choices;
                 if (lv37PartEnabled(p.lv37ReadyBuild, Lv37Part::ReadyBuild)) {
-                    const int retained = preserveReadyBuild(o, mine, theirs, id, b.alive & allowed & ~shelter.buried, p, seed,
+                    const int retained = measurePart<metrics::Part::ReadyBuild>([&] {
+                        return preserveReadyBuild(o, mine, theirs, id, b.alive & allowed & ~shelter.buried, p, seed,
                                                            [&] { return exchangeOutOfTime(75); });
+                    });
                     if (retained != id) return recordLv37Part(o, "preserve_ready_build", id, retained, arriving, kind);
                 }
                 if (!chainRuns && roomPairs(o.self().field) < mine.pairCount &&
                     lv37PartEnabled(p.lv37PartialBuild, Lv37Part::PartialBuild)) {
-                    const int partial = preferKnownPartialBuild(o, mine, theirs, b, id, b.alive & allowed & ~shelter.buried,
+                    const int partial = measurePart<metrics::Part::PartialBuild>([&] {
+                        return preferKnownPartialBuild(o, mine, theirs, b, id, b.alive & allowed & ~shelter.buried,
                                                                 p, seed, rate, [&] { return exchangeOutOfTime(); });
+                    });
                     if (partial != id) return recordLv37Part(o, "partial_build", id, partial, arriving, kind);
                 }
             }
@@ -2758,23 +2967,30 @@ protected:
                 if (!lv37PartEnabled(p.lv37SetupSpeed, Lv37Part::SetupSpeed)) return id;
                 std::optional<PictureRoutes> routes;
                 tailInput.configure(routes);
-                const int selected = preferOpenSetup(o, mine, b, id, allowed, roomPairs(o.self().field), p, stop, routes ? &*routes : nullptr);
+                const int selected = measurePart<metrics::Part::SetupSpeed>([&] {
+                    return preferOpenSetup(o, mine, b, id, allowed, roomPairs(o.self().field), p, stop, routes ? &*routes : nullptr);
+                });
                 return recordLv37Part(o, "setup_speed", id, selected, arriving, kind);
             };
             if (o.opponent().incoming.total()) return openSetup(setup);
             if (p.setupSideNear > 0 && o.self().field.f.count() >= 24 &&
                 lv37PartEnabled(p.lv37Preparation, Lv37Part::Preparation)) {
+                metrics::Scope scope(metrics::Part::Preparation);
                 setup = preparationChoices(o, mine, theirs, b, id, setup, p, seed, stop, ahead);
                 if (!setup || stop()) return id;
             }
             if (!(setup >> id & 1)) {
-                const int prepared = pickBuild(o, b, setup, true);
+                const int prepared = measurePart<metrics::Part::Preparation>([&] { return pickBuild(o, b, setup, true); });
                 return prepared < 0 || stop() ? id : recordLv37Part(o, "preparation", id, prepared, arriving, kind);
             }
             if (!lv37PartEnabled(p.lv37SetupSpeed, Lv37Part::SetupSpeed)) return id;
-            const int chosen = pickFasterSetup(o, mine, b, id, setup, p, stop, namedLv38Ex);
+            const int chosen = measurePart<metrics::Part::SetupSpeed>([&] {
+                return pickFasterSetup(o, mine, b, id, setup, p, stop, namedLv38Ex);
+            });
             if (chosen == id) return openSetup(setup);
-            const int kept = stop() ? id : keepSetupAnswer(o, mine, theirs, id, chosen, p, seed, stop);
+            const int kept = stop() ? id : measurePart<metrics::Part::SetupSpeed>([&] {
+                return keepSetupAnswer(o, mine, theirs, id, chosen, p, seed, stop);
+            });
             return recordLv37Part(o, "setup_speed", id, kept, arriving, kind);
         };
         const auto rankTail = [&](int id, unsigned choices) {

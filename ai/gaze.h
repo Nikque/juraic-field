@@ -1,4 +1,6 @@
 #pragma once
+#include <type_traits>
+#include <cstdlib>
 // What a player can do with the pairs on the screen: every sequence of
 // placements is played in the Duel with the other player standing still, and
 // the ones worth reading further are kept as plans.
@@ -138,21 +140,41 @@ inline int aboveOther(const Observation& o, int who, const Params& p) {
 
 class Gaze {
 public:
+    // Scoped to the two shallow readings of a single decision.
+    class ThirdPair {
+        friend class Gaze;
+        struct Entry {
+            Plan plan;
+            int finalLoss;
+            int next = -1;
+        };
+        struct Seat {
+            std::vector<Entry> order;
+            std::vector<Duel> next;
+            int base = 0, baseScore = 0, baseColoured = 0;
+        } seat[2];
+    };
+
     // Fills `set` with the plans of player `who`. byFirst: keep the plans apart
     // by their first placement (for the player who is deciding now).
-    void plans(const Observation& o, int who, bool byFirst, int depthLimit, const Params& p, uint64_t seed, PlanSet& set) {
-        collect(o, who, byFirst, depthLimit, p, seed, set, nullptr);
+    void plans(const Observation& o, int who, bool byFirst, int depthLimit, const Params& p, uint64_t seed,
+               PlanSet& set, ThirdPair* third = nullptr) {
+        collect(o, who, byFirst, depthLimit, p, seed, set, nullptr, third ? &third->seat[who] : nullptr);
     }
 
     // Keep both complete readings on a timeout. An incomplete set of enemy replies
     // must never be used as evidence that our attack cannot be answered.
     bool tryThirdPair(const Observation& o, const Params& p, uint64_t seed, PlanSet& mine, PlanSet& theirs,
-                      Builder::Clock::time_point deadline) {
+                      Builder::Clock::time_point deadline, const ThirdPair* third = nullptr) {
         if (Builder::Clock::now() >= deadline) return false;
         PlanSet own, other;
         const bool extendOwn = mine.knownCount >= 3, extendOther = theirs.knownCount >= 3;
-        if (extendOwn && !collect(o, mine.who, true, 3, p, seed, own, &deadline)) return false;
-        if (extendOther && !collect(o, theirs.who, false, 3, p, seed, other, &deadline)) return false;
+        const auto extend = [&](const PlanSet& shallow, bool byFirst, PlanSet& full) {
+            return third ? resume(o, p, shallow, byFirst, third->seat[shallow.who], full, deadline)
+                         : collect(o, shallow.who, byFirst, 3, p, seed, full, &deadline);
+        };
+        if (extendOwn && !extend(mine, true, own)) return false;
+        if (extendOther && !extend(theirs, false, other)) return false;
         if (Builder::Clock::now() >= deadline) return false;
         if (extendOwn) std::swap(mine, own);
         if (extendOther) std::swap(theirs, other);
@@ -160,8 +182,34 @@ public:
     }
 
 private:
+    bool resume(const Observation& o, const Params& p, const PlanSet& shallow, bool byFirst,
+                const ThirdPair::Seat& third, PlanSet& full, Builder::Clock::time_point deadline) {
+        full = shallow;
+        full.plans.clear();
+        full.keeping.clear();
+        full.tactical.clear();
+        full.pairCount = 3;
+        limit = o.frame + 6000;
+        base = third.base;
+        baseScore = third.baseScore;
+        baseColoured = third.baseColoured;
+        retainOffset = p.readMidgame && p.checkKnownExchange && full.who == o.me && chainShown(o.opponent());
+        beginPlans(p, byFirst);
+        for (const auto& entry : third.order) {
+            if (Builder::Clock::now() >= deadline) return false;
+            if (entry.next < 0) {
+                keep(p, full, entry.plan, entry.finalLoss);
+            } else {
+                Plan plan = entry.plan;
+                if (!walk(o, p, full, third.next[size_t(entry.next)], 2, plan, &deadline)) return false;
+            }
+        }
+        finishPlans(p, full);
+        return true;
+    }
+
     bool collect(const Observation& o, int who, bool byFirst, int depthLimit, const Params& p, uint64_t seed, PlanSet& set,
-                 const Builder::Clock::time_point* deadline) {
+                 const Builder::Clock::time_point* deadline, ThirdPair::Seat* third = nullptr) {
         const Player& player = o.player[who];
         set.who = who;
         set.plans.clear();
@@ -176,6 +224,7 @@ private:
         const int planLimit = std::max(set.midAir ? 1 : 0, std::min(3, depthLimit));
         set.knownCount = copySearchPairs(o, who, true, set.pair, std::max(planLimit, p.searchKnownLimit(depthLimit)));
         set.pairCount = std::min(set.knownCount, planLimit);
+        if (set.pairCount != 2 || set.knownCount < 3) third = nullptr;
         if (!set.pairCount || player.phase == Phase::Dead) return true;
         Duel d(o, seed);
         if (air) {
@@ -223,6 +272,21 @@ private:
         baseColoured = colouredPieces(d.player[who].field);
         retainOffset = p.readMidgame && p.checkKnownExchange && who == o.me && chainShown(o.opponent());
         if (!set.midAir && !toPairOf(d, who, limit)) return true;
+        if (third) {
+            third->order.reserve(PLACEMENTS * PLACEMENTS);
+            third->next.reserve(PLACEMENTS * PLACEMENTS);
+            third->base = base;
+            third->baseScore = baseScore;
+            third->baseColoured = baseColoured;
+        }
+        beginPlans(p, byFirst);
+        Plan plan;
+        if (!walk(o, p, set, d, 0, plan, deadline, third)) return false;
+        finishPlans(p, set);
+        return true;
+    }
+
+    void beginPlans(const Params& p, bool byFirst) {
         for (int& k : kept) k = -1;
         for (int& k : keptToo) k = -1;
         for (int& k : keptMain) k = -1;
@@ -230,8 +294,9 @@ private:
             for (auto& byRole : keptTactical) std::fill(std::begin(byRole), std::end(byRole), -1);
         spare.clear();
         firsts = byFirst ? PLACEMENTS : 1;
-        Plan plan;
-        if (!walk(o, p, set, d, 0, plan, deadline)) return false;
+    }
+
+    void finishPlans(const Params& p, PlanSet& set) {
         // x3KeepFall 2: the plans that let the least fall, after those kept as before, where they are others.
         if (p.x3KeepFall == 2)
             for (size_t slot = 0; slot < std::size(keptToo); ++slot) {
@@ -246,13 +311,25 @@ private:
             };
             std::sort(set.tactical.begin(), set.tactical.end(), byPlacement);
             set.tactical.erase(std::unique(set.tactical.begin(), set.tactical.end(), samePlacements), set.tactical.end());
-            std::vector<Plan> regular = set.plans;
-            std::sort(regular.begin(), regular.end(), byPlacement);
-            std::erase_if(set.tactical, [&](const Plan& x) {
-                return std::binary_search(regular.begin(), regular.end(), x, byPlacement);
+            if (set.tactical.empty()) return;
+            static_assert(PLACEMENTS <= 32 && std::extent_v<decltype(Plan::id)> <= 6);
+            // Leading one encodes the length. Only the initialized IDs of a
+            // legal candidate are read. Membership does not need lexical order.
+            const auto key = [](const Plan& plan) {
+                uint32_t value = 1;
+                for (int i = 0; i < plan.count; ++i)
+                    value = (value << 5) | unsigned(plan.id[i]);
+                return value;
+            };
+            std::vector<uint32_t> regular;
+            regular.reserve(set.plans.size());
+            for (const Plan& plan : set.plans) regular.push_back(key(plan));
+            std::sort(regular.begin(), regular.end());
+            std::erase_if(set.tactical, [&](const Plan& plan) {
+                const bool found = std::binary_search(regular.begin(), regular.end(), key(plan));
+                return found;
             });
         }
-        return true;
     }
 
     InputPlanner planner;
@@ -273,7 +350,7 @@ private:
     int keptOffsetLoss[PLACEMENTS * 4 * (FINE_SIZES + 1)];
 
     bool walk(const Observation& o, const Params& p, PlanSet& set, const Duel& d, int k, Plan& plan,
-              const Builder::Clock::time_point* deadline) {
+              const Builder::Clock::time_point* deadline, ThirdPair::Seat* third = nullptr) {
         const int who = set.who;
         const unsigned legal = knownPlacements(d.player[who].field, set, k, p);
         for (int id = 0; id < PLACEMENTS; ++id) {
@@ -289,7 +366,7 @@ private:
             if (mine.phase == DuelPhase::Dead) continue;
             const bool fired = mine.chain.chains > 0;
             if (!fired && again && k + 1 < set.pairCount) {
-                if (!walk(o, p, set, c, k + 1, plan, deadline)) return false;
+                if (!walk(o, p, set, c, k + 1, plan, deadline, third)) return false;
                 plan.count = int8_t(k + 1);
                 continue;
             }
@@ -315,6 +392,16 @@ private:
                 if ((phase != DuelPhase::Check && phase != DuelPhase::Settle) || toPairOf(exchange, rival, limit)) {
                     const auto& self = exchange.player[who];
                     finalLoss = self.fallen + self.incoming.total();
+                }
+            }
+            if (third) {
+                // Replace each extendable two-placement leaf by its children
+                // at the same point in the original depth-first traversal.
+                if (again && !fired && k == 1) {
+                    third->order.push_back({plan, finalLoss, int(third->next.size())});
+                    third->next.push_back(c);
+                } else {
+                    third->order.push_back({plan, finalLoss});
                 }
             }
             keep(p, set, plan, finalLoss);

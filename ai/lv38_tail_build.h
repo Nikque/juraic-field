@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 #include "preparation.h"
 #include "lv38_tail.h"
 #include <cstdlib>
@@ -28,6 +29,7 @@ inline int64_t score(const BuildResult& beam, const Params& p, unsigned quiet, b
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const BuildResult& beam, int ordinary, unsigned allowed,
            const Params& p, bool timedSum, Stop stop, Note& note) {
+    metrics::Scope scope(metrics::Part::TailRank);
     if (ordinary < 0 || !mine.pairCount || o.players != 2 || p.handWait ||
         o.self().incoming.total() || o.opponent().incoming.total() || o.self().scoring.allClear ||
         o.opponent().scoring.allClear || o.busyLeft[o.me] || o.busyChain[1 - o.me] ||
@@ -51,15 +53,19 @@ int prefer(const Observation& o, const PlanSet& mine, const BuildResult& beam, i
         ranked[count++] = id;
         values[id] = score(beam, p, quiet, timedSum, id);
     }
+    note.ordinaryValue = note.selectedValue = values[ordinary];
+    note.eligibleRoots = count;
+    if (!lv38_tail::inWindow(note.ownCells + 2, p.lv38CutFrom)) {
+        note.bestValue = values[ordinary];
+        for (int i = 0; i < count; ++i) note.bestValue = std::max(note.bestValue, values[ranked[i]]);
+        return ordinary;
+    }
     std::sort(ranked.begin(), ranked.begin() + count, [&](int a, int b) {
         if (values[a] != values[b]) return values[a] > values[b];
         if ((a == ordinary) != (b == ordinary)) return a == ordinary;
         return a < b;
     });
-    note.ordinaryValue = note.selectedValue = values[ordinary];
     note.bestValue = values[ranked[0]];
-    note.eligibleRoots = count;
-    if (!lv38_tail::inWindow(note.ownCells + 2, p.lv38CutFrom)) return ordinary;
     const auto nearBest = [&](int id) {
         return (note.bestValue - values[id]) * 1000 <= std::abs(note.bestValue) * p.lv38CutNear;
     };
@@ -72,7 +78,7 @@ int prefer(const Observation& o, const PlanSet& mine, const BuildResult& beam, i
             const Trial& t = trials.item[i];
             if (!lv38_tail::eligible(t.chains, t.points, p.lv38TailMin)) continue;
             KeyPlan main;
-            buildValue(field, o.rules, o.timing, p, nullptr, &main);
+            readMainChain(field, o.rules, o.timing, p, nullptr, &main);
             return lv38_tail::bestShape(field, trials, main, o.rules, o.timing, &retained,
                                         p.lv38TailMin, p.lv38TailOfMain > 0);
         }

@@ -116,4 +116,4 @@ python tests/verify_output.py generator.log --allow-extra
 | `tests/` | the tests; `tests/reference/v030_engine.h` is the v0.3.0 engine kept for comparison |
 | `tools/` | matches between AIs (`ai_match`), measuring and tuning solo search (`ai_toko`, `ai_tune`), benchmarks, the reach rule comparison, making the release packages |
 | `examples/`, `benchmarks/` | examples of the generator and the record of its speed measurements |
-| `licenses/` | Ama's licence and the list of what the AI takes from Ama; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic; SDL 3 also in the Windows version) and of ViGEmClient in the Windows version |
+| `licenses/` | licences and notices for code used by the versus AI; the licences of what the Linux version contains (SDL 3, stb, dr_libs, BIZ UDPGothic; SDL 3 also in the Windows version) and of ViGEmClient in the Windows version |

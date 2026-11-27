@@ -417,8 +417,19 @@ static void testThreadStart() {
     check(ran == 4, "every thread runs once");
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string(argv[1]) == "eval-focus") {
+            std::mt19937_64 rng(42);
+            testWaves(rng);
+            if (detail::fastPext) {
+                detail::fastPext = false;
+                std::mt19937_64 portable(42);
+                testWaves(portable);
+            }
+            std::cout << "findWave and runChain passed (including portable gravity).\n";
+            return 0;
+        }
         for (int pass = 0; pass < 2; ++pass) {
             // Second pass: the gravity code path without PEXT/PDEP.
             if (pass == 1) {

@@ -169,7 +169,7 @@ static void testReading() {
     std::filesystem::remove_all(folder, ignored);
 }
 
-int main(int argc, char** argv) {
+static int testPad(int argc, char** argv) {
     testReading();
     if (argc == 2 && std::string(argv[1]) == "--reading-only") return failures ? 1 : 0;
     const char* wanted = std::getenv("JURAIC_TEST_VIRTUAL_PAD");
@@ -265,4 +265,11 @@ int main(int argc, char** argv) {
     check(!m.pad.running() && !m.pressing(), "the mode opened, no pad is plugged in before one is asked for");
     std::printf(failures ? "%d FAILED\n" : "realgame pad tests passed\n", failures);
     return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+    const int result = testPad(argc, argv);
+    winrt::uninit_apartment();
+    return result;
 }

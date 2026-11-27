@@ -48,7 +48,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, con
     if (expired() || !completes(standing, ordinary) || !noLoss(standing)) return -1;
     const auto reserve = [&](const Duel& d) {
         int main = 0;
-        buildValue(d.player[me].field, o.rules, o.timing, p, &main);
+        readMainChain(d.player[me].field, o.rules, o.timing, p, &main);
         return main;
     };
     const int minimumReserve = reserve(standing);

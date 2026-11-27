@@ -161,14 +161,10 @@ During a match, the number won is shown between the two fields: up to five as a 
   - Lv 31 to 35: advanced to expert
   - Levels 36 through 38 are for experts
 - The lower the level, the slower it places pairs, the later it sees the opponent's field, and the less it reads ahead.
-- Adjacent levels through Lv 36 were set by matches of 催促（小） against itself, so that the higher level wins about six rounds in ten.
 - Settings and the arrows after a local match use the same level list. After Lv35 the choices are Lv36催促小, Lv36催促極小, Lv36Ex, Lv37, Lv37Ex, Lv38 and Lv38Ex. Choosing Ex enables cancels for the next match.
 - In matches against the AI and in AI-versus-AI matches, you can change the AI level using a single selector on the screen shown after the match. The change applies from the next match. Holding the button down on a level keeps changing it.
 - It uses up to 24 CPU threads: two fewer than the logical cores of the PC, or one fewer on PCs with fewer than eight logical cores.
 - Each decision is kept within 180 ms; on a slow PC the search is made narrower. After a round in which the AI was short of time, the top of the screen shows 処理落ち: AI が弱くなった可能性 ("slowdown: the AI may have played weaker").
-- A measurement: against the public AI [Ama](https://github.com/citrus610/ama), made to play the same moves every time, 催促（小） at Lv 36 won 1,093 of 1,440 rounds. This was the version of 2026-10-14, with the search size used for measuring.
-- The tools of that measurement are not in this repository: the program that seats Ama as an opponent, and the Ama made to play the same moves every time.
-- Parts of the AI follow Ama. Which parts is listed in [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt).
 
 ## Juraic playing 2P of the real game (Windows, a trial)
 
@@ -178,7 +174,6 @@ During a match, the number won is shown between the two fields: up to five as a 
 - 入力方式 defaults to キー（スキャンコード）. Assign a keyboard to the 2P side in the real game.
 - The kind and the level of the AI can be changed on that screen. Each time it opens, they start from those of the 2P side in the settings.
 - Install the [ViGEmBus driver](#installing-the-virtual-pad-driver-vigembus) if you select 仮想パッド（非推奨）.
-- The strength of the levels and the measurement in the section [The versus AI "Juraic"](#the-versus-ai-juraic) do not hold in this mode. The win rate against the real game has not been measured.
 - The following parts for investigating bugs are built only with `JURAIC_REALGAME_DEBUG=ON` in CMake. The released packages do not have them.
   - The record of each reading, written to `realgame\<date and time>` next to the executable. It can exceed 2 GB in one session.
   - Saving a picture of the real game's screen with the S key
@@ -261,9 +256,7 @@ How to build (Windows, Linux, Mac, Android), how to run the tests, and the folde
 [MIT License](LICENSE) © 2026 Nikque
 
 - The bundled pictures and music (`media/`) can be used under the same terms. How they were made is in [media/README.md](media/README.md).
-- Parts of the versus AI follow [Ama](https://github.com/citrus610/ama) (MIT License, Copyright (c) 2023
-  citrus610). Which parts is listed in [licenses/Ama-NOTICE.txt](licenses/Ama-NOTICE.txt), and Ama's licence is in
-  [licenses/Ama-LICENSE.txt](licenses/Ama-LICENSE.txt).
+- The [licenses directory](licenses/) contains the copyright notices and licenses for code used by the versus AI.
 - The Linux version contains SDL 3 (zlib License), stb (MIT or public domain), dr_libs (public domain or MIT-0)
   and BIZ UDPGothic (SIL Open Font License 1.1). Their licences are in `licenses/`.
 - The Windows version also contains SDL 3, for reading controllers.

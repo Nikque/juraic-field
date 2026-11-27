@@ -43,7 +43,7 @@ inline void repliesOf(const GameField& field, const Rules& rules, const Timing& 
     Trials trials;
     BitField after[W * MAX_COLORS];
     detect(field, rules, timing, p.trialMaxAdd, trials, after);
-    buildValue(field, rules, timing, p, &out.main);
+    readMainChain(field, rules, timing, p, &out.main);
     for (int i = 0; i < trials.count; ++i) {
         const Trial& t = trials.item[i];
         if (t.chains < rules.chainRequirement) continue;
@@ -51,7 +51,7 @@ inline void repliesOf(const GameField& field, const Rules& rules, const Timing& 
         left.f = after[i];
         Reply& r = out.item[out.count++];
         r.points = t.points, r.frames = t.frames, r.added = t.added, r.x = t.x, r.color = t.color, r.mainAfter = 0;
-        buildValue(left, rules, timing, p, &r.mainAfter);
+        readMainChain(left, rules, timing, p, &r.mainAfter);
     }
 }
 

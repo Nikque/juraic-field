@@ -59,7 +59,7 @@ inline bool keepsSetupMain(const Observation& o, const Duel& d, const Plan& plan
     if (self.moves != o.self().moves + plan.count || self.chain.chains != plan.chains || self.scoring.allClear ||
         self.phase != DuelPhase::Control || self.fallen || self.incoming.total()) return false;
     int main = 0;
-    buildValue(self.field, o.rules, o.timing, p, &main);
+    readMainChain(self.field, o.rules, o.timing, p, &main);
     return main >= required && main > self.scoring.score - o.self().scoring.score;
 }
 
@@ -80,7 +80,7 @@ unsigned preparationChoices(const Observation& o, const PlanSet& mine, const Pla
         if (b.sum[id] * 1000 >= best * (1000 - slack)) eligible |= 1u << id;
     }
     int main = 0;
-    buildValue(o.self().field, o.rules, o.timing, p, &main);
+    readMainChain(o.self().field, o.rules, o.timing, p, &main);
     const int required = int((int64_t(main) * std::clamp(p.x3PokeKeep, 0, 100) + 99) / 100);
     if (stop()) return 0;
     const SetupThreat threat = setupThreat(o, mine, theirs, p, seed);

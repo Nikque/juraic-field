@@ -81,46 +81,109 @@ inline SpawnInput tallSpawnInput(const GameField& field, Placement target, const
     return heldPlacementInput(field, spawnPair(timing), target, timing, speed);
 }
 
-// The way over soonest to `target` that a search finds (InputPlanner::planSure with fastest: FastestSearch, within
-// FASTEST_READ_STATES states, and no more than `states` - the seat's own search within a frame - when that is above 0):
-// the frames from `from` to the end of its landing as FastestSearch counts it (end; 0: none found sooner than the straight
-// way, or no way), to its lock (lock), and its points of the down key (soft). The results of the last field, frame and pair
-// are kept: the plans of a choice put the same pair on the same field again and again.
 struct FastestWay {
     int end = 0, lock = 0, soft = 0;
 };
-constexpr int FASTEST_READ_STATES = 4000;
-inline FastestWay fastestEnd(const GameField& field, const PairControl& from, int64_t fromFrame, Placement target, const Timing& timing,
-                             int speed, int states = 0) {
-    const int limit = states > 0 ? std::min(states, FASTEST_READ_STATES) : FASTEST_READ_STATES;
-    struct Kept {
-        GameField field;
-        int64_t frame = -1;
+
+// Route inputs depend on occupied cells and the state of the pair. Their
+// frame counts are relative to that state, so the absolute frame is not a key.
+template<size_t buckets>
+class FastestWayCache {
+public:
+    template<class Compute>
+    FastestWay get(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speed,
+                   int limit, Compute compute) {
+        const FieldBits occupied = field.f.occupied();
+        unsigned ceiling = 0;
+        for (int x = 0; x < W; ++x) ceiling |= unsigned(field.row14[x] != EMPTY) << x;
+        uint64_t key = occupied.low() ^ std::rotl(occupied.high(), 25) ^ uint64_t(ceiling);
+        Bucket& bucket = table[splitmix64(key) % buckets];
+        for (auto& slot : bucket.slots) {
+            if (slot.known && slot.occupied == occupied && slot.ceiling == ceiling && slot.speed == speed &&
+                slot.limit == limit && slot.from == from && slot.timing == timing) {
+                return lookup(slot, target, compute);
+            }
+        }
+        Slot& slot = bucket.slots[bucket.next];
+        bucket.next = (bucket.next + 1) % bucket.slots.size();
+        slot.occupied = occupied;
+        slot.ceiling = ceiling;
+        slot.speed = speed;
+        slot.limit = limit;
+        slot.from = from;
+        slot.timing = timing;
+        slot.known = 0;
+        return lookup(slot, target, compute);
+    }
+
+private:
+    struct Slot {
+        FieldBits occupied{};
+        unsigned ceiling = 0, known = 0;
+        PairControl from{};
         Timing timing{};
-        int speed = -1, limit = -1;
-        PairControl from{}; // (every field of the pair: where it is, how it moves, and the clocks of its landing)
-        unsigned known = 0;
-        FastestWay way[PLACEMENTS]{};
+        int speed = 0, limit = 0;
+        std::array<FastestWay, PLACEMENTS> ways{};
     };
-    static thread_local Kept kept;
-    if (kept.frame != fromFrame || kept.speed != speed || kept.limit != limit || !(kept.from == from) || !(kept.timing == timing) ||
-        !(kept.field == field))
-        kept.field = field, kept.frame = fromFrame, kept.timing = timing, kept.speed = speed, kept.limit = limit, kept.from = from, kept.known = 0;
-    const int id = placementId(target);
-    if (kept.known >> id & 1) return kept.way[id];
-    kept.known |= 1u << id;
-    FastestWay& way = kept.way[id] = {};
-    static thread_local InputPlanner planner;
-    static thread_local InputPath path;
-    if (!planner.plan(field, from, target, timing, speed, path)) return way;
-    const int now = FastestSearch::ends(field, from, path.buttons, timing, speed);
-    static thread_local FastestSearch search;
-    search.maxStates = limit, search.low = false, search.stop = nullptr;
-    if (now <= 1 || search.estimate(field, from, target, timing, speed) >= now) return way;
-    static thread_local std::vector<uint8_t> buttons;
-    int soft = 0, found = 0;
-    if (search.find(field, from, target, timing, speed, now - 1, buttons, soft, found)) way = {found, int(buttons.size()), soft};
-    return way;
+    struct Bucket {
+        std::array<Slot, 4> slots;
+        size_t next = 0;
+    };
+    std::array<Bucket, buckets> table{};
+
+    template<class Compute>
+    static FastestWay lookup(Slot& slot, Placement target, Compute compute) {
+        const int id = placementId(target);
+        if (!(slot.known >> id & 1)) {
+            slot.ways[id] = compute();
+            slot.known |= 1u << id;
+        }
+        return slot.ways[id];
+    }
+};
+
+// The way over soonest to `target` that a search finds (InputPlanner::planSure with fastest: FastestSearch, within
+// FASTEST_READ_STATES states, and no more than `states` - the seat's own search within a frame - when that is above 0):
+// the frames from `from` to the end of its landing as FastestSearch counts it (end; 0: none found sooner than the straight
+// way, or no way), to its lock (lock), and its points of the down key (soft).
+constexpr int FASTEST_READ_STATES = 4000;
+inline FastestWay fastestEnd(const GameField& field, const PairControl& from, int64_t, Placement target, const Timing& timing,
+                             int speed, int states = 0) {
+#ifdef JURAIC_DECISION_METRICS
+    FastestRequestMetrics requestMetrics;
+#endif
+    const int limit = states > 0 ? std::min(states, FASTEST_READ_STATES) : FASTEST_READ_STATES;
+    static thread_local FastestWayCache<16> cache;
+    return cache.get(field, from, target, timing, speed, limit, [&]() -> FastestWay {
+        static thread_local InputPlanner planner;
+        static thread_local InputPath path;
+        if (!planner.plan(field, from, target, timing, speed, path)) return {};
+        const int now = FastestSearch::ends(field, from, path.buttons, timing, speed);
+        static thread_local FastestSearch search;
+        search.maxStates = limit;
+        static thread_local std::vector<uint8_t> buttons;
+        int soft = 0, found = 0;
+        if (search.findSooner(field, from, target, timing, speed, now, buttons, soft, found))
+            return {found, int(buttons.size()), soft};
+        return {};
+    });
+}
+
+inline FastestWay fastestBound(const GameField& field, const PairControl& from, Placement target, const Timing& timing, int speed) {
+#ifdef JURAIC_DECISION_METRICS
+    metrics::Scope measure(metrics::Part::ExBound);
+    metrics::add(metrics::Part::ExBoundCalls);
+#endif
+    static thread_local FastestWayCache<64> cache;
+    return cache.get(field, from, target, timing, speed, 0, [&]() -> FastestWay {
+#ifdef JURAIC_DECISION_METRICS
+        metrics::add(metrics::Part::ExBoundActual);
+#endif
+        static thread_local FastestSearch search;
+        int lock = 0;
+        const int end = search.estimate(field, from, target, timing, speed, &lock);
+        return {end, lock, 0};
+    });
 }
 
 inline SpawnInput picturePlacementInput(InputPlanner& planner, const GameField& field, PairControl from,
@@ -438,10 +501,9 @@ struct Duel {
                 const PairControl from = seen ? inHand[i].pair : spawnPair(*timing);
                 const int64_t at = seen ? inHand[i].frame : (ready >= 0 ? ready : p.spawnFrame) + wait[i];
                 if (fastestSeat[i] == Observation::FASTEST_BOUND) {
-                    static thread_local FastestSearch bound;
-                    int lock = 0;
-                    soonest = at + bound.estimate(p.field, from, target, *timing, rules->speedPercent, &lock) - 1;
-                    soonestLock = at + lock - 1;
+                    const FastestWay bound = fastestBound(p.field, from, target, *timing, rules->speedPercent);
+                    soonest = at + bound.end - 1;
+                    soonestLock = at + bound.lock - 1;
                 } else if (seen && inHand[i].wayTarget == placementId(target) && inHand[i].wayCheck >= 0) {
                     soonest = inHand[i].wayCheck;
                     recorded = true;

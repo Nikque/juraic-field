@@ -59,7 +59,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, int
         if (a.phase == DuelPhase::Dead) return 0;
         for (const auto& [field, points] : reserves) if (field == a.field) return points;
         int points = 0;
-        buildValue(a.field, o.rules, o.timing, joined, &points);
+        readMainChain(a.field, o.rules, o.timing, joined, &points);
         reserves.emplace_back(a.field, points);
         return points;
     };

@@ -30,6 +30,7 @@ enum class TsumoCorrection : uint8_t {
 constexpr int MAX_MARGIN_STEPS = 16;
 
 struct Rules {
+    bool operator==(const Rules&) const = default;
     // Colours in play: palette[0 .. colors-1] (cell codes 1..5).
     int colors = 4;
     std::array<Cell, MAX_COLORS> palette{1, 2, 3, 4, 5};

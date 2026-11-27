@@ -1,3 +1,6 @@
+#ifdef JURAIC_DECISION_METRICS
+#include "eval_fixed.h"
+#endif
 // Matches between two AIs without a screen.
 //
 //   ai_match [--pairs N] [--threads T] [--seed S] [--a NAME] [--b NAME]
@@ -6,6 +9,7 @@
 //
 // --param changes a value of ai/params.h for both sides, --param-a and
 // --param-b for one side (a name=value pair, or a file of such lines).
+// --primary-routes uses the real game foreground search limit for Ex (also in its reading).
 // --same-seeds gives both agents the same random numbers in a round: for a
 // setting measured against the AI itself (--a x3 --b x3 --param-a ...). X3 has
 // little chance of its own, so the two then play the same placements until the
@@ -43,6 +47,7 @@
 #define sscanf_s sscanf
 #endif
 #include "../ai/agents.h"
+#include "../play/memory/primary_timing14.h"
 #include "../ai/answer.h"
 #include "../generator/thread_pool.h"
 #include "../play/replay.h"
@@ -77,8 +82,16 @@ struct Options {
     bool kinds = false;      // --kinds
     bool traceCrush = false; // --trace-crush
     bool traceAnswers = false; // --trace-answers
+    bool primaryRoutes = false; // --primary-routes uses the live foreground limit for Ex routes.
     bool exA = false, exB = false; // --ex-a, --ex-b: that agent takes the way over soonest (PlacementAgent::fastestWays, the Ex of play/level_ex.h)
 };
+
+void configureRoutes(ai::Agent* agent, bool ex, bool primaryRoutes) {
+    if (auto* placing = dynamic_cast<ai::PlacementAgent*>(agent)) {
+        placing->fastestWays = ex;
+        if (ex && primaryRoutes) placing->fastestStates = play::realgame::PRIMARY_FASTEST_NOW14;
+    }
+}
 
 struct RoundRequest {
     int pair = -1, aSeat = -1;
@@ -314,8 +327,8 @@ bool runMatch(const Options& opt, MatchResult& match) {
     const auto start = std::chrono::steady_clock::now();
     const auto worker = [&] {
         const std::unique_ptr<ai::Agent> a = ai::makeConfiguredAgent(opt.a, opt.paramsA), b = ai::makeConfiguredAgent(opt.b, opt.paramsB);
-        if (auto* p = dynamic_cast<ai::PlacementAgent*>(a.get())) p->fastestWays = opt.exA;
-        if (auto* p = dynamic_cast<ai::PlacementAgent*>(b.get())) p->fastestWays = opt.exB;
+        configureRoutes(a.get(), opt.exA, opt.primaryRoutes);
+        configureRoutes(b.get(), opt.exB, opt.primaryRoutes);
         for (;;) {
             const int k = next.fetch_add(1);
             if (k >= opt.pairs) break;
@@ -601,6 +614,9 @@ int selfTest(Options opt) {
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef JURAIC_DECISION_METRICS
+    if (argc > 1 && std::string_view(argv[1]) == "--eval-fixed") return juraic::eval_fixed::run(argc, argv);
+#endif
     Options opt;
     RoundRequest request;
     bool test = false, cancelSet = false;
@@ -629,6 +645,7 @@ int main(int argc, char** argv) {
         else if (arg == "--self-test") test = true;
         else if (arg == "--same-seeds") opt.sameSeeds = true;
         else if (arg == "--own-tsumo") opt.ownTsumo = true;
+        else if (arg == "--primary-routes") opt.primaryRoutes = true;
         else if (arg == "--ex-a") opt.exA = true;
         else if (arg == "--ex-b") opt.exB = true;
         else if (arg == "--kinds") opt.kinds = true;

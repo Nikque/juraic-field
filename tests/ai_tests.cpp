@@ -7119,6 +7119,12 @@ int main(int argc, char** argv) {
             testR6Changes(argc == 3 ? std::string(argv[2]) : std::string());
             return 0;
         }
+        if (argc == 2 && std::string(argv[1]) == "eval-focus") {
+            testQuickTrials();
+            testBuild();
+            benchDetect();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "bench") {
             if (argc > 2 && std::string(argv[2]) == "build") {
                 // further arguments: name=value lines for ai/params.h

@@ -800,6 +800,7 @@ struct SideTrack {
     juraic::Pair colors{};     // its colours (the child EMPTY while not known)
     PairSeen pair;             // as seen in the last reading (seen false: not seen there)
     PairSeen lastSeen;         // as seen last
+    int64_t lastSeenAt = -1;
     int pairs = 0;             // pairs this side has been given since the round began
     int64_t spawnedAt = -1;    // the frame in which the last of them was seen first
     int64_t spawnedBefore = -1; // ... and the one before it
@@ -1280,6 +1281,7 @@ private:
             t.pair = contains(resting, t.under) ? readPair(field, t.under, t.colors, &t.lastSeen, true) : PairSeen{};
             if (t.pair.seen) {
                 t.lastSeen = t.pair;
+                t.lastSeenAt = at;
                 t.missedFor = 0;
                 if (t.pair.childHidden) t.pair.colors.child = t.colors.child;
                 else t.colors.child = t.pair.colors.child;
@@ -1638,6 +1640,7 @@ private:
         t.inHand = true;
         t.under = resting;
         t.pair = t.lastSeen = fresh;
+        t.lastSeenAt = at;
         t.colors = fresh.colors;
         if (knows(s, index)) {
             if (fresh.colors.axis != pairOf(s, index).axis) ++doubts;

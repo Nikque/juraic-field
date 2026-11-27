@@ -58,6 +58,9 @@ bool runRecordedRound(const Options& opt, const RoundRequest& request) {
         std::array<std::vector<ai::X3Agent::PartNote>, 2> audited;
         auto a = ai::makeConfiguredAgent(opt.a, opt.paramsA), b = ai::makeConfiguredAgent(opt.b, opt.paramsB);
         if (!a || !b) return false;
+#ifdef JURAIC_DECISION_METRICS
+        if (auto* x3 = dynamic_cast<ai::X3Agent*>(a.get())) x3->recordDecisionMetrics = true;
+#endif
         const auto config = ai::configuredParams(opt.a, opt.paramsA);
         if (ai::configuredParams(opt.a, opt.paramsA).lv38FireOrLose > 0) {
             auto* candidate = dynamic_cast<ai::X3Agent*>(a.get());
@@ -77,8 +80,9 @@ bool runRecordedRound(const Options& opt, const RoundRequest& request) {
             candidate->cutAnswers = &cutAnswers;
             candidate->cutDecisions = &cutDecisions;
         }
-        if (auto* p = dynamic_cast<ai::PlacementAgent*>(a.get())) p->fastestWays = opt.exA;
-        if (auto* p = dynamic_cast<ai::PlacementAgent*>(b.get())) p->fastestWays = opt.exB;
+        if (auto* x3 = dynamic_cast<ai::X3Agent*>(a.get())) x3->cutDecisions = &cutDecisions;
+        configureRoutes(a.get(), opt.exA, opt.primaryRoutes);
+        configureRoutes(b.get(), opt.exB, opt.primaryRoutes);
 
         Rng rng(opt.seed, MATCH_STREAM + uint64_t(request.pair));
         const uint64_t seed0 = rng.next() % 1000000000ull;
@@ -140,7 +144,7 @@ bool runRecordedRound(const Options& opt, const RoundRequest& request) {
         holdings << "frame,move,colours,main,tail_points,tail_waves,tail_560_points,tail_560_waves,head_points,head_waves\n";
         for (const auto& d : cutDecisions) {
             times << d.frame << ',' << d.move << ',' << d.nanoseconds << '\n';
-            if (!d.quiet) continue;
+            if (!d.quiet || !config.lv38Midgame) continue;
             const auto cut = ai::lv38_cut_build::measure(d.field, opt.settings.rules, replay.timing(), config);
             holdings << d.frame << ',' << d.move << ',' << d.colours << ',' << cut.main << ','
                      << cut.tail.points << ',' << cut.tail.waves << ',' << cut.lowerTail.points << ',' << cut.lowerTail.waves

@@ -55,7 +55,7 @@ int preferCommittedAnswer(const Observation& o, const PlanSet& mine, const PlanS
     const Duel standing = replay(*original, nullptr);
     if (stop() || !complete(standing, *original) || burden(standing.player[me])) return ordinary;
     int ordinaryReserve = 0;
-    buildValue(standing.player[me].field, o.rules, o.timing, p, &ordinaryReserve);
+    readMainChain(standing.player[me].field, o.rules, o.timing, p, &ordinaryReserve);
     if (!thin(ordinaryReserve, original->points)) return ordinary;
 
     struct Reply { Plan route; int own, fall, enemy; bool reached, closesRival; };
@@ -109,7 +109,7 @@ int preferCommittedAnswer(const Observation& o, const PlanSet& mine, const PlanS
         if (stop()) return ordinary;
         if (!complete(idle, *fire) || burden(idle.player[me]) || burden(idle.player[him]) < burden(standing.player[him])) continue;
         int reserve = 0;
-        buildValue(idle.player[me].field, o.rules, o.timing, p, &reserve);
+        readMainChain(idle.player[me].field, o.rules, o.timing, p, &reserve);
         if (!thin(reserve, fire->points) || int64_t(ordinaryReserve - reserve) * 1000 > int64_t(original->points) * p.x3GuardNear) continue;
 
         int worst = 0;

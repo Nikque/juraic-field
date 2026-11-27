@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 
 #include "exchange.h"
 
@@ -22,7 +23,7 @@ int offset(const Observation& o, const Duel& afterChain, const PlanSet& mine, co
         rival.phase != DuelPhase::Control || rival.spawnFrame <= o.frame || stop()) return -1;
 
     int main = 0;
-    buildValue(o.self().field, o.rules, o.timing, p, &main);
+    readMainChain(o.self().field, o.rules, o.timing, p, &main);
     if (main < 6000) return -1;
     const int keep = p.lv38Midgame && p.lv38Plan11 > 0 ? p.lv38ResponseKeep : 85;
     KnownReplay bounded{stop};
@@ -43,7 +44,7 @@ int offset(const Observation& o, const Duel& afterChain, const PlanSet& mine, co
         if (end.player[1 - me].phase != DuelPhase::Control || settled.phase != DuelPhase::Control ||
             settled.fallen || settled.incoming.total() || stop()) return;
         int reserve = 0;
-        buildValue(settled.field, o.rules, o.timing, p, &reserve);
+        readMainChain(settled.field, o.rules, o.timing, p, &reserve);
         const int points = settled.scoring.score - o.self().scoring.score;
         if (newlyEligible && keepsReserve(points, reserve, main, p.lv38ResponseKeep) &&
             !keepsReserve(points, reserve, main, 85)) ++*newlyEligible;
@@ -102,6 +103,7 @@ template<class Stop>
 int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, const PlanSet& theirs,
            int ordinary, unsigned legal, int arriving, const Params& p, uint64_t seed, Stop stop,
            int* newlyEligible = nullptr) {
+    metrics::Scope scope(metrics::Part::Response);
     const int me = o.me, him = 1 - me;
     if (o.players != 2 || p.handWait || ordinary < 0 || !(legal >> ordinary & 1u) || !mine.knownCount ||
         arriving < W || arriving > 5 * W || o.self().incoming.confirmed || o.opponent().incoming.total() ||
@@ -120,10 +122,10 @@ int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, co
         baseline.state != RoundState::Playing || stop()) return ordinary;
     if (own.chain.chains >= 5) {
         int before = 0, reserve = 0, opponentMain = 0;
-        buildValue(o.self().field, o.rules, o.timing, p, &before);
-        buildValue(own.field, o.rules, o.timing, p, &reserve);
+        readMainChain(o.self().field, o.rules, o.timing, p, &before);
+        readMainChain(own.field, o.rules, o.timing, p, &reserve);
         if (int64_t(reserve) * 100 >= int64_t(before) * 85) return ordinary;
-        buildValue(afterChain.player[him].field, o.rules, o.timing, p, &opponentMain);
+        readMainChain(afterChain.player[him].field, o.rules, o.timing, p, &opponentMain);
         // Preserve a main that can overwhelm what the opponent demonstrably holds.
         const int counter = rival.fallen + rival.incoming.total();
         if (int64_t(counter) * o.rules.rateAt(o.frame) > opponentMain) return ordinary;

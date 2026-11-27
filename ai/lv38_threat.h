@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 
 #include "exchange.h"
 #include <limits>
@@ -62,6 +63,7 @@ inline bool reactsInTime(int64_t answerSpawn, int64_t check, int64_t seen, int a
 template<class Stop>
 int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, const BuildResult& build,
            int ordinary, unsigned choices, const Params& p, uint64_t seed, Stop stop, int ahead = 1) {
+    metrics::Scope scope(metrics::Part::Threat);
     const int me = o.me, him = 1 - me;
     if (!p.lv38Midgame || o.players != 2 || p.handWait || build.cut || ordinary < 0 || !(choices >> ordinary & 1) ||
         !mine.knownCount || !theirs.knownCount || o.busyLeft[me] || o.self().incoming.total() ||
@@ -71,7 +73,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, con
     if (std::none_of(attacks.begin(), attacks.end(), [](const Plan* fire) { return fire != nullptr; })) return ordinary;
 
     int main = 0;
-    buildValue(o.self().field, o.rules, o.timing, p, &main);
+    readMainChain(o.self().field, o.rules, o.timing, p, &main);
     if (main < 6000 || o.self().field.f.count() + 2 * W < 52 || stop()) return ordinary;
     const int rate = o.rules.rateAt(o.frame);
     KnownReplay replay{stop};
@@ -118,7 +120,7 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, con
                 place(quiet, placement(next), mine.pair[1]);
                 if (quiet.dead() || anyClear(quiet.f, o.rules)) continue;
                 int points = 0;
-                buildValue(quiet, o.rules, o.timing, p, &points);
+                readMainChain(quiet, o.rules, o.timing, p, &points);
                 if (points <= reserve) continue;
                 reserve = points;
                 moves.path[1] = first;
@@ -167,8 +169,8 @@ int prefer(const Observation& o, const PlanSet& mine, const PlanSet& theirs, con
             now.reachable = true;
             now.burden = burden;
             now.returned = enemy.fallen + enemy.incoming.total();
-            buildValue(self.field, o.rules, o.timing, p, &now.reserve);
-            buildValue(enemy.field, o.rules, o.timing, p, &now.enemyReserve);
+            readMainChain(self.field, o.rules, o.timing, p, &now.reserve);
+            readMainChain(enemy.field, o.rules, o.timing, p, &now.enemyReserve);
             if (!best.reachable || (now.holds(main, rate) && !best.holds(main, rate)) ||
                 (now.holds(main, rate) == best.holds(main, rate) && now.margin(rate) > best.margin(rate))) best = now;
         }

@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 
 #include "preparation.h"
 #include <tuple>
@@ -26,6 +27,7 @@ template<class Stop>
 int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, const PlanSet& theirs,
            unsigned legal, int ordinary, int arriving, int rate, const Params& p, uint64_t seed,
            uint64_t beamSeed, Builder& builder, Stop stop, Note& note) {
+    metrics::Scope scope(metrics::Part::AnswerBuild);
     const int me = o.me;
     const auto& rival = afterChain.player[1 - me];
     const auto& self = o.self();
@@ -55,7 +57,7 @@ int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, co
     window.confirm = confirm;
     window.offsetPoints = int64_t(arriving) * rate - self.scoring.pool;
     window.returnPoints = window.offsetPoints + int64_t(W) * rate;
-    buildValue(self.field, o.rules, o.timing, p, &window.main);
+    readMainChain(self.field, o.rules, o.timing, p, &window.main);
     KnownReplay replay{stop};
     const Plan* immediateMain = nullptr;
     Wave firstWave;
@@ -88,7 +90,7 @@ int prefer(const Observation& o, const Duel& afterChain, const PlanSet& mine, co
                 own.moves != self.moves + plan.count || own.chain.chains < 1 || own.chain.chains > 4 ||
                 own.scoring.allClear || own.fallen || own.incoming.total()) continue;
             int reserve = 0;
-            buildValue(own.field, o.rules, o.timing, p, &reserve);
+            readMainChain(own.field, o.rules, o.timing, p, &reserve);
             if (int64_t(reserve) * 2 >= window.main && !stop()) {
                 note.status = Note::VisibleAnswer;
                 return ordinary;

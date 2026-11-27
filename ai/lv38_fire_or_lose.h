@@ -1,4 +1,5 @@
 #pragma once
+#include "decision_metrics.h"
 #include "build.h"
 #include "observe.h"
 #include <bit>
@@ -35,6 +36,7 @@ inline bool rivalIsFiring(const Observation& o) {
 }
 
 inline Decision evaluate(const Observation& o, unsigned legal, int ordinary, const Params& p) {
+    metrics::Scope scope(metrics::Part::FireOrLose);
     Decision decision{o.frame, o.self().moves + 1, ordinary};
     if (ordinary < 0 || ordinary >= PLACEMENTS || !(legal >> ordinary & 1u) ||
         o.players != 2 || o.self().phase != Phase::Control ||
@@ -45,7 +47,7 @@ inline Decision evaluate(const Observation& o, unsigned legal, int ordinary, con
     Pair pairs[3];
     if (copySearchPairs(o, o.me, true, pairs, 3) != 3) return decision;
 
-    buildValue(own.field, o.rules, o.timing, p, &decision.main);
+    readMainChain(own.field, o.rules, o.timing, p, &decision.main);
     const auto substantial = [&](const TurnResult& chain) {
         return chain.chains >= 5 && int64_t(chain.points) * 100 >= int64_t(decision.main) * 80;
     };

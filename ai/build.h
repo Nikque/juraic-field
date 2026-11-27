@@ -24,6 +24,9 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#ifdef JURAIC_DECISION_METRICS
+#include "decision_metrics.h"
+#endif
 
 namespace juraic::ai {
 
@@ -38,10 +41,50 @@ inline unsigned differentFields(unsigned legal, Pair pair) { return pair.axis ==
 inline size_t fieldKey(const GameField& g) {
     const size_t rows = KeyHash()(g.f.key());
     uint64_t top = 0;
+    if (g.row14 == std::array<Cell, W>{}) return rows;
     for (int x = 0; x < W; ++x) top |= uint64_t(g.row14[size_t(x)] & 15) << (4 * x);
     if (!top) return rows;
     return rows ^ size_t(splitmix64(top));
 }
+
+#ifdef JURAIC_DECISION_METRICS
+struct EvalBoardTrace {
+    using Board = std::array<uint64_t, 5>;
+    uint64_t decision = 0;
+    std::vector<Board> evaluated;
+
+    static EvalBoardTrace& local() {
+        static thread_local EvalBoardTrace trace;
+        return trace;
+    }
+
+    void record(const GameField& field) {
+        const auto current = metrics::id();
+        if (decision != current) {
+            decision = current;
+            evaluated.clear();
+        }
+        const auto bits = field.f.key();
+        uint64_t high = bits.b;
+        for (int x = 0; x < W; ++x) high |= uint64_t(field.row14[size_t(x)]) << (32 + 4 * x);
+        evaluated.push_back({bits.a[0], bits.a[1], bits.a[2], bits.a[3], high});
+    }
+};
+
+// Call after the decision timer stops, while its metrics are still active.
+// Equal boards are counted regardless of evaluator options or source caller.
+inline void finishEvalRepeats() {
+    if (!metrics::active()) return;
+    auto& trace = EvalBoardTrace::local();
+    if (trace.decision != metrics::id() || trace.evaluated.empty()) return;
+    auto& boards = trace.evaluated;
+    std::sort(boards.begin(), boards.end());
+    uint64_t repeats = 0;
+    for (size_t i = 1; i < boards.size(); ++i) repeats += boards[i] == boards[i - 1];
+    metrics::add(metrics::Part::EvalRepeat, repeats);
+    boards.clear();
+}
+#endif
 
 // The bases human players build on: the forms a round is started with, as they
 // are named and drawn in guides for players (folds such as GTR and its
@@ -138,14 +181,58 @@ struct BuildTrials {
     FirstWaves first;
 };
 
+struct BuildFloor {
+    int value, lost;
+    bool rejected = false;
+};
+
+inline bool safeFloorWeights(const Params& p) {
+    // Keep the reordered integer sums in range even with user-entered
+    // weights. A placement has at most 14 cells in a column.
+    for (int weight : {p.evChain, p.evKeyedWave, p.evKey, p.evFireHeight, p.evKeyed,
+                       p.evStand, p.evFire, p.evLink, p.evThird, p.evBase, p.evCentre,
+                       p.evCliff, p.evValley, p.evHill})
+        if (weight < -32768 || weight > 32768) return false;
+    return p.evThirdFrom >= -32 && p.evThirdFrom <= 32 && p.evCliffFrom >= -32 && p.evCliffFrom <= 32;
+}
+
+inline bool canSkipKeys(const Trial* trials, int count, int longest, int best, int shape,
+                        const BitField& field, const Params& p, const BuildFloor& floor) {
+    // Even including the trigger and the key, four different pieces disappear
+    // per wave. The board's 13th row counts here because it can fall into play.
+    const int pieces = BitField::cells(field.normal());
+    int64_t upper = best;
+    for (int i = 0; i < count; ++i) {
+        const Trial& t = trials[i];
+        if (t.chains + 1 < longest) continue;
+        const int lastWave = (pieces + t.added + 1) / 4;
+        if (lastWave <= t.chains) continue;
+        const int more = p.evKeyedWave >= 0 ? lastWave - t.chains : 1;
+        const int64_t keyed = int64_t(t.chains) * p.evChain + int64_t(more) * p.evKeyedWave -
+                              int64_t(t.added) * p.evKey + int64_t(t.y) * p.evFireHeight - p.evKeyed;
+        upper = std::max(upper, keyed);
+    }
+    return upper + shape - floor.lost < floor.value;
+}
+
 // The value of a field for building (larger is better). Only the field: what
 // was lost on the way to it is kept in the node. mainPoints, when given,
 // receives the points of the largest chain a trial drop starts (the main chain
 // as far as it can be seen on the field; with evKeyed, key pieces included).
 // (The points of a trial drop and the terms for valleys and hills are put together
 // as in Ama's evaluation: licenses/Ama-NOTICE.txt.)
+template<bool MainOnly = false>
 inline int buildValue(BuildTrials& scratch, const GameField& g, const Rules& rules, const Timing& timing, const Params& p, int* mainPoints = nullptr,
-                      KeyPlan* mainTrigger = nullptr, bool building = false, BuildCuts* cuts = nullptr) {
+                      KeyPlan* mainTrigger = nullptr, bool building = false, BuildCuts* cuts = nullptr
+                      , BuildFloor* floor = nullptr
+                      ) {
+#ifdef JURAIC_DECISION_METRICS
+    if (metrics::active()) {
+        metrics::add(metrics::Part::EvalCalls);
+        metrics::add(metrics::Part::EvalActual);
+        if (metrics::current()->collectBoards) EvalBoardTrace::local().record(g);
+    }
+#endif
     int h[W];
     g.heights(h);
     int v = 0;
@@ -172,14 +259,16 @@ inline int buildValue(BuildTrials& scratch, const GameField& g, const Rules& rul
         const Trial& t = trials.item[i];
         recordMain(t, i);
         if (t.chains > longest) longest = t.chains;
-        if (t.chains < 2) continue;
-        const int value = t.chains * p.evChain - t.added * p.evKey + t.y * p.evFireHeight;
-        if (value > best) best = value;
+        if constexpr (!MainOnly) {
+            if (t.chains < 2) continue;
+            const int value = t.chains * p.evChain - t.added * p.evKey + t.y * p.evFireHeight;
+            if (value > best) best = value;
+        }
     }
     // A key piece left out is a debt: the fuller the field, the less room and time to pay it. (With
     // two or more left out a short attack is hard to answer, with one it is easier. So one at most
     // is counted; from keyNoneFrom cells on, none.)
-    if (useKeys) {
+    const auto readKeys = [&] {
         // The same chains carried on with a key piece (detect.h): a chain that one piece more
         // would make longer is worth the waves that stand, evKeyedWave for each wave the key
         // piece adds, less evKeyed for it. Tried for the longest chains first (those one wave
@@ -196,14 +285,19 @@ inline int buildValue(BuildTrials& scratch, const GameField& g, const Rules& rul
                 const Trial& t = plan.t;
                 // (the main chain as the moves by kind see it: a chain cut on purpose is still the main chain)
                 recordMain(t, i, &plan);
-                if (t.chains < 2) continue;
-                // (the waves that stand count in full, the waves the key piece adds count evKeyedWave each)
-                const int value = waves * p.evChain + (t.chains - waves) * p.evKeyedWave - t.added * p.evKey + t.y * p.evFireHeight - p.evKeyed;
-                if (value > best) best = value;
+                if constexpr (!MainOnly) {
+                    if (t.chains < 2) continue;
+                    // The waves that stand count in full, the keyed waves at their own rate.
+                    const int value = waves * p.evChain + (t.chains - waves) * p.evKeyedWave - t.added * p.evKey + t.y * p.evFireHeight - p.evKeyed;
+                    if (value > best) best = value;
+                }
             }
-    }
+    };
+    const bool deferKeys = floor && !readMain && useKeys && rules.clearCount == 4;
+    if (useKeys && !deferKeys) readKeys();
     if (mainPoints) *mainPoints = main.t.points;
     if (mainTrigger) *mainTrigger = main;
+    if constexpr (MainOnly) return 0;
     if (cuts) *cuts = BuildCuts{{}, {}, main.t.points};
     if (scanTail && main.t.points > 0) {
         if (tail) {
@@ -224,7 +318,7 @@ inline int buildValue(BuildTrials& scratch, const GameField& g, const Rules& rul
             if (building) best = std::max(best, value + int(int64_t(p.evKeyed) * (p.lv38CutWeight - 100) / 100));
         }
     }
-    v += best;
+    if (!deferKeys) v += best;
     if (p.evStand) {
         // An answer at hand. The main chain may be cut by key pieces, but a short attack must be
         // answered with what stands (seen: at 56 and 62 cells a chain of thirteen cut by key pieces
@@ -278,6 +372,14 @@ inline int buildValue(BuildTrials& scratch, const GameField& g, const Rules& rul
         if (h[x] < h[x - 1] && h[x] < h[x + 1]) v -= p.evValley * (std::min(h[x - 1], h[x + 1]) - h[x]);
         if (h[x] > h[x - 1] && h[x] > h[x + 1]) v -= p.evHill * (h[x] - std::max(h[x - 1], h[x + 1]));
     }
+    if (deferKeys) {
+        if (canSkipKeys(trials.item, trials.count, longest, best, v, g.f, p, *floor)) {
+            floor->rejected = true;
+            return 0;
+        }
+        readKeys();
+        return v + best;
+    }
     return v;
 }
 
@@ -285,6 +387,14 @@ inline int buildValue(const GameField& g, const Rules& rules, const Timing& timi
                       KeyPlan* mainTrigger = nullptr, bool building = false, BuildCuts* cuts = nullptr) {
     BuildTrials scratch;
     return buildValue(scratch, g, rules, timing, p, mainPoints, mainTrigger, building, cuts);
+}
+
+// This entry is for callers that consume only the largest chain's points
+// (and optionally its trigger). The trial selection is shared with buildValue.
+inline void readMainChain(const GameField& g, const Rules& rules, const Timing& timing, const Params& p,
+                          int* points, KeyPlan* trigger = nullptr) {
+    BuildTrials scratch;
+    buildValue<true>(scratch, g, rules, timing, p, points, trigger);
 }
 
 constexpr int HORIZONS = 24; // depths for which a search also reports what a shallower one finds
@@ -347,7 +457,7 @@ public:
     Crew(int helpers, Start&& start) {
         try {
             threads.reserve(size_t(helpers > 0 ? helpers : 0)); // (push_back below does not reallocate)
-            for (int i = 0; i < helpers; ++i) threads.push_back(start([this] { work(nullptr); }));
+            for (int i = 0; i < helpers; ++i) threads.push_back(start([this, i] { work(nullptr, i); }));
         } catch (...) {
             close();
             throw;
@@ -356,27 +466,41 @@ public:
     ~Crew() { close(); }
     Crew(const Crew&) = delete;
     Crew& operator=(const Crew&) = delete;
-    int helpers() const { return int(threads.size()); }
+    int helpers() const {
+        std::lock_guard<std::mutex> lock(m);
+        return int(threads.size());
+    }
+    // A process shares helpers across its builders. Jobs advertise how many may take their work.
+    static Crew& shared(int requested) {
+        static Crew pool(0);
+        std::lock_guard<std::mutex> lock(pool.m);
+        while (int(pool.threads.size()) < requested) {
+            const int index = int(pool.threads.size());
+            pool.threads.emplace_back([&sharedPool = pool, index] { sharedPool.work(nullptr, index); });
+        }
+        return pool;
+    }
 
     // fn(k) for k = 0 .. parts - 1, each once, by this thread and the others; back when all are done.
     // quick: the parts are short, and a thread that waits for a job of its own may take them. A part
     // that is not quick (a whole queue) is begun only by a thread that has nothing of its own to wait
     // for, or by the thread that gave it: a queue must not wait for a thread gone into another one.
     template <class F>
-    void each(size_t parts, F&& fn, bool quick = true) {
-        if (threads.empty() || parts < 2) {
+    void each(size_t parts, F&& fn, bool quick = true, int helpers = -1) {
+        if (helpers < 0) helpers = this->helpers();
+        if (helpers == 0 || parts < 2) {
             for (size_t k = 0; k < parts; ++k) fn(k);
             return;
         }
         Job job;
-        job.parts = parts, job.quick = quick;
+        job.parts = parts, job.quick = quick, job.helpers = helpers;
         job.run = [&fn](size_t k) { fn(k); };
         {
             std::lock_guard<std::mutex> lock(m);
             jobs.push_back(&job);
         }
         cv.notify_all();
-        work(&job);
+        work(&job, -1);
     }
 
 private:
@@ -390,19 +514,20 @@ private:
     }
     struct Job {
         size_t parts = 0, next = 0; // parts in all, and the first that nobody has taken
+        int helpers = 0;
         int active = 0;             // parts that are being worked on
         bool quick = true;
         std::function<void(size_t)> run;
     };
     // own = null: a helper, until the crew closes. Otherwise the thread that gave `own`, until all of it is done.
-    void work(Job* own) {
+    void work(Job* own, int worker) {
         std::unique_lock<std::mutex> lock(m);
         for (;;) {
             Job* job = nullptr;
             if (own && own->next < own->parts) job = own;
             else
                 for (Job* j : jobs)
-                    if (j->next < j->parts && (j->quick || !own)) {
+                    if (worker < j->helpers && j->next < j->parts && (j->quick || !own)) {
                         job = j;
                         break;
                     }
@@ -421,7 +546,7 @@ private:
         if (own) jobs.erase(std::find(jobs.begin(), jobs.end(), own));
     }
 
-    std::mutex m;
+    mutable std::mutex m;
     std::condition_variable cv;
     std::vector<Job*> jobs;
     std::vector<std::thread> threads;
@@ -456,25 +581,22 @@ public:
         const int depth = p.depth();
         const int shared = queues > 1 && p.beamShare ? std::min(knownCount, depth) : 0;
         const std::atomic<Clock::rep>* stop = timed.load(std::memory_order_relaxed) ? &stopAt : nullptr;
-        // The helpers stay from one search of this Builder to the next: in the game a choice makes two or three
-        // searches, each with up to a few dozen threads, and starting and joining them every time would be work for
-        // nothing. They wait without using a processor between searches, and end
-        // with the Builder. A search that asks for another number of threads gets a crew of that size.
-        const int helpers = threads > 1 ? threads - 1 : 0;
-        if (helpers > 0 && (!crew || crew->helpers() != helpers)) crew = std::make_unique<Crew>(helpers);
-        Crew* help = helpers > 0 ? crew.get() : nullptr;
+        const unsigned cores = std::thread::hardware_concurrency();
+        const int limit = cores ? int(cores - 1) : 0;
+        const int helpers = threads > 1 ? std::min(threads - 1, limit) : 0;
+        Crew* help = helpers ? &Crew::shared(helpers) : nullptr;
         if (shared) {
             start(common, root, p, slots);
-            layers(common, 0, shared, known, knownCount, rules, timing, p, seed, 0, stop, help, answer, cutDepth, slots);
+            layers(common, 0, shared, known, knownCount, rules, timing, p, seed, 0, stop, help, helpers, answer, cutDepth, slots);
         }
         const auto run = [&](size_t q) {
             Work& w = work[q];
             if (shared) resume(w, common, p, slots);
             else start(w, root, p, slots);
-            layers(w, shared, depth, known, knownCount, rules, timing, p, seed, int(q), stop, help, answer, cutDepth, slots);
+            layers(w, shared, depth, known, knownCount, rules, timing, p, seed, int(q), stop, help, helpers, answer, cutDepth, slots);
         };
         // (a queue is a long part: begun by a thread with nothing else to do, see Crew::each)
-        if (help && queues > 1) help->each(size_t(queues), run, false);
+        if (help && queues > 1) help->each(size_t(queues), run, false, helpers);
         else
             for (int q = 0; q < queues; ++q) run(size_t(q));
         BuildResult r;
@@ -598,14 +720,17 @@ private:
         int lost = 0;   // what the way here has cost
         int order = 0;  // the order the nodes of a layer were made in
         int8_t first = -1;
-        int64_t answerSpawn = 0;
-        int cutMain = 0, fullValue = 0;
-        bool cutShape = false, extra = false;
+        bool extra = false;
+    };
+    struct CutValue {
+        int cutMain, fullValue;
+        bool cutShape;
     };
     // A field made by a part of a layer, with its key, and what that part found on the way.
     struct Made {
         Node node;
         uint64_t key = 0;
+        int64_t spawn = 0;
     };
     struct Tally {
         int best[PLACEMENTS]; // as Work::best, of the fields of this part alone
@@ -622,9 +747,18 @@ private:
         unsigned shortOffset = 0, shortReturn = 0;
         std::array<unsigned, HORIZONS> cutPlacements{};
         std::vector<Node> layer, next;
+        std::vector<int64_t> answerLayer, answerNext;
+        std::vector<CutValue> cutValues;
+        std::vector<int> floor;
         std::vector<std::vector<Made>> made; // the fields of a layer by the part that made them (with a Crew)
         std::vector<Tally> tally;
         std::vector<uint64_t> seen;
+        std::vector<size_t> occupied;
+        void clearSeen(size_t slots) {
+            for (size_t i : occupied) seen[i] = 0;
+            occupied.clear();
+            seen.resize(slots);
+        }
         int best[PLACEMENTS]{}; // -1 = this first placement was not made or loses at once
         int at[PLACEMENTS][HORIZONS]{}; // the largest chain fired with the placement of that number below it
         int deepest[PLACEMENTS]{}; // the best value of a field below it in the deepest layer that has one; INT32_MIN = none
@@ -636,18 +770,22 @@ private:
     Work common; // the layers of the known pairs, when the queues share them
     std::atomic<Clock::rep> stopAt{0}; // (the time on the clock, as the count of its time_since_epoch)
     std::atomic<bool> timed{false};
-    std::unique_ptr<Crew> crew; // the threads beside the one that searches, kept between searches (null: none were asked for yet)
     static bool expired(const std::atomic<Clock::rep>* stop) {
         return stop && Clock::now().time_since_epoch().count() >= stop->load(std::memory_order_relaxed);
     }
 
     // A table of the fields of one layer: true when the key is new.
-    static bool insert(std::vector<uint64_t>& seen, uint64_t key) {
+    static bool insert(Work& w, uint64_t key) {
+        auto& seen = w.seen;
         key |= 1;
         const size_t mask = seen.size() - 1;
         for (size_t i = size_t(key >> 20) & mask;; i = (i + 1) & mask) {
             if (seen[i] == key) return false;
-            if (!seen[i]) return seen[i] = key, true;
+            if (!seen[i]) {
+                w.occupied.push_back(i);
+                seen[i] = key;
+                return true;
+            }
         }
     }
 
@@ -662,7 +800,7 @@ private:
         w.digRoots = 0;
         w.shortOffset = w.shortReturn = 0;
         w.cutPlacements.fill(0);
-        w.seen.assign(slotsFor(p, cutSlots), 0);
+        w.clearSeen(slotsFor(p, cutSlots));
         w.nodes = 0, w.cut = false, w.layers = 0;
         for (int id = 0; id < PLACEMENTS; ++id) {
             w.best[id] = -1, w.deepest[id] = INT32_MIN;
@@ -678,13 +816,14 @@ private:
         w.shortOffset = from.shortOffset;
         w.shortReturn = from.shortReturn;
         w.cutPlacements = from.cutPlacements;
-        w.seen.assign(slotsFor(p, cutSlots), 0);
+        w.clearSeen(slotsFor(p, cutSlots));
         w.nodes = from.nodes, w.cut = from.cut, w.layers = from.layers;
         for (int id = 0; id < PLACEMENTS; ++id) {
             w.best[id] = from.best[id], w.deepest[id] = from.deepest[id];
             for (int n = 0; n < HORIZONS; ++n) w.at[id][n] = from.at[id][n];
         }
         w.layer = from.layer;
+        w.answerLayer = from.answerLayer;
     }
 
     static bool betterNode(const Node& a, const Node& b) {
@@ -710,21 +849,27 @@ private:
     // underneath still has to compete with those under the ordinary moves.
     static void trimLayer(std::vector<Node>& nodes, size_t keep, unsigned digRoots) {
         if (nodes.size() <= keep) return;
-        const auto middle = nodes.begin() + std::ptrdiff_t(keep);
-        if (!digRoots) {
-            std::nth_element(nodes.begin(), middle, nodes.end(), betterNode);
-        } else {
-            const Node* best = nullptr;
-            for (const Node& node : nodes) {
-                if ((digRoots >> node.first & 1) && (!best || betterNode(node, *best))) best = &node;
-            }
-            const int order = best ? best->order : -1;
-            std::nth_element(nodes.begin(), middle, nodes.end(), [&](const Node& a, const Node& b) {
-                const bool keepA = a.order == order, keepB = b.order == order;
-                return keepA != keepB ? keepA : betterNode(a, b);
-            });
+        struct Rank { int value, order; size_t index; };
+        static thread_local std::vector<Rank> ranks;
+        static thread_local std::vector<Node> retained;
+        ranks.clear();
+        retained.clear();
+        ranks.reserve(nodes.size());
+        retained.reserve(keep);
+        const Node* digging = nullptr;
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const Node& node = nodes[i];
+            ranks.push_back({node.value, node.order, i});
+            if ((digRoots >> node.first & 1u) && (!digging || betterNode(node, *digging))) digging = &node;
         }
-        nodes.resize(keep);
+        const int preferred = digging ? digging->order : -1;
+        std::nth_element(ranks.begin(), ranks.begin() + std::ptrdiff_t(keep), ranks.end(), [preferred](const Rank& a, const Rank& b) {
+            const bool keepA = a.order == preferred, keepB = b.order == preferred;
+            if (keepA != keepB) return keepA;
+            return a.value != b.value ? a.value > b.value : a.order < b.order;
+        });
+        for (size_t i = 0; i < keep; ++i) retained.push_back(nodes[ranks[i].index]);
+        nodes.swap(retained);
     }
 
     // With a Crew: the fields of a layer are made in parts of MAKE_GRAIN fields of the layer before
@@ -738,11 +883,13 @@ private:
     // fields of a layer are made first, each new one once and in the order of the layer before, and
     // valued afterwards, every field by itself: what is found does not depend on who does which part.
     static void layers(Work& w, int from, int to, const Pair* known, int knownCount, const Rules& rules, const Timing& timing, const Params& p,
-                       uint64_t seed, int q, const std::atomic<Clock::rep>* stop, Crew* crew,
+                       uint64_t seed, int q, const std::atomic<Clock::rep>* stop, Crew* crew, int helpers,
                        const BuildAnswerWindow* answer, int cutDepth, int slots) {
         const int width = p.width();
         // beamSift: the key piece part is most of the time a field takes (about 2.5 of 4.1 microseconds).
         // A layer is valued without it first, and in full only for the best beamSift x width fields.
+        const bool bounded = !crew && !stop && rules.clearCount == 4 && p.keyRuns > 0 &&
+                             p.evKeyed && safeFloorWeights(p);
         Params light = p;
         light.evKeyed = 0;
         const bool sift = p.beamSift > 0 && p.evKeyed > 0;
@@ -750,7 +897,8 @@ private:
         for (int depth = from; depth < to && !w.cut && !w.layer.empty(); ++depth) {
             const Pair pair = queuePair(known, knownCount, rules, p, q, depth, rng);
             w.next.clear();
-            if (depth) std::fill(w.seen.begin(), w.seen.end(), 0);
+            if (answer) w.answerNext.clear();
+            if (depth) w.clearSeen(w.seen.size());
             // Params::beamLastValues = 0: the fields of the last layer are made for the chains their
             // placements fire, and for nothing else: no field comes after them, so they need not be
             // told apart, valued or put in order (a sixteenth of the values of a search 16 deep).
@@ -760,11 +908,16 @@ private:
             // The field n of the layer before with the pair on placement `id`, into c. False: no field
             // of the next layer (it loses, its third column is too high, or its chain ends the line).
             // What the chain is worth goes to t whenever the field does not lose.
-            const auto child = [&](const Node& n, int id, Node& c, Tally& t) {
-                c = n;
-                const PlaceResult placed = place(c.g, placement(id), pair);
+            const auto child = [&](const Node& n, int id, const int (&heights)[W], Node& c, Tally& t
+                                   , int64_t& nextSpawn
+                                   ) {
+                c.g = n.g;
+                c.first = n.first;
+                c.extra = n.extra;
+                const Placement target = placement(id);
+                const PlaceResult placed = placeAtHeights(c.g, target, pair, heights[target.x], heights[target.childX()]);
                 Trial chain;
-                if (rules.clearCount != 4 || c.g.f.hasClear()) runTrialChain(c.g.f, rules, timing, chain, false);
+                resolveBuildChild(c.g.f, rules, timing, chain);
                 if (c.g.dead()) return false;
                 if (p.beamThirdMax < 12 && detail::countBits(c.g.f.occupied().column(DEATH_X)) > p.beamThirdMax) return false;
                 if (depth == 0) c.first = int8_t(id);
@@ -773,17 +926,20 @@ private:
                 if (worth > t.at[c.first]) t.at[c.first] = worth;
                 if (chain.points >= p.beamEndPoints) return false; // a big chain ends the line
                 if (answer) {
+                    int64_t& spawn = nextSpawn;
+                    const int64_t previousSpawn = depth ? w.answerLayer[n.order] : 0;
+                    spawn = previousSpawn;
                     if (!depth) {
-                        c.answerSpawn = chain.chains ? 0 : answer->nextSpawn[id];
-                        if (c.answerSpawn - timing.nextFrames >= answer->confirm) c.answerSpawn = 0;
-                    } else if (n.answerSpawn > 0) {
+                        spawn = chain.chains ? 0 : answer->nextSpawn[id];
+                        if (spawn - timing.nextFrames >= answer->confirm) spawn = 0;
+                    } else if (previousSpawn > 0) {
                         const auto x = placement(id).x;
                         const int move = timing.placeFrames(x, placed.lockY);
-                        c.answerSpawn = n.answerSpawn + move + timing.splitFrames(placed.split, x, placed.lockY);
+                        spawn = previousSpawn + move + timing.splitFrames(placed.split, x, placed.lockY);
                         if (chain.chains >= rules.chainRequirement && chain.chains <= 4 && c.g.f.count() &&
                                    chain.points >= answer->offsetPoints && !(t.shortReturn >> c.first & 1u)) {
                             int reserve = 0;
-                            buildValue(c.g, rules, timing, p, &reserve);
+                            readMainChain(c.g, rules, timing, p, &reserve);
                             if (int64_t(reserve) * 2 >= answer->main) {
                                 t.shortOffset |= 1u << c.first;
                                 if (chain.points >= answer->returnPoints) t.shortReturn |= 1u << c.first;
@@ -793,8 +949,8 @@ private:
                         // already settled, a pair can answer even when its spawn
                         // or lock comes after confirmation. A line that fires
                         // cannot use the same forecast for another reply.
-                        if (chain.chains || c.answerSpawn - timing.nextFrames >= answer->confirm)
-                            c.answerSpawn = 0;
+                        if (chain.chains || spawn - timing.nextFrames >= answer->confirm)
+                            spawn = 0;
                     }
                 }
                 c.lost = n.lost + p.evWaste * chain.chains;
@@ -804,12 +960,18 @@ private:
             };
             // Every placement of the pair on field n, into c: made(c) for each field of the next layer (none when the
             // layer is blind).
-            const auto children = [&](const Node& n, Node& c, Tally& t, const auto& made) {
-                const unsigned legal = differentFields(legalPlacements(n.g), pair);
+            const auto children = [&](const Node& n, Node& c, Tally& t, const auto& made
+                                       , int64_t& spawn
+                                       ) {
+                int heights[W];
+                n.g.heights(heights);
+                const unsigned legal = differentFields(legalPlacements(n.g, heights), pair);
                 for (int id = 0; id < PLACEMENTS; ++id) {
                     if (!(legal >> id & 1)) continue;
                     ++t.nodes;
-                    if (child(n, id, c, t) && !blind) made(c);
+                    if (child(n, id, heights, c, t
+                              , spawn
+                              ) && !blind) made(c);
                 }
             };
             const auto take = [&](const Tally& t) {
@@ -825,6 +987,7 @@ private:
             if (!crew || parents < MAKE_FROM) {
                 Tally t;
                 Node c;
+                int64_t spawn = 0;
                 for (const Node& n : w.layer) {
                     if (depth && expired(stop)) {
                         // Out of time. The chains found so far stand (they are real ones); the fields of
@@ -833,10 +996,11 @@ private:
                         break;
                     }
                     children(n, c, t, [&](Node& made) {
-                        if (!insert(w.seen, fieldKey(made.g))) return;
+                        if (!insert(w, fieldKey(made.g))) return;
                         made.order = int(w.next.size());
                         w.next.push_back(made);
-                    });
+                        if (answer) w.answerNext.push_back(spawn);
+                    }, spawn);
                 }
                 take(t);
             } else {
@@ -859,10 +1023,10 @@ private:
                             children(w.layer[i], c.node, t, [&](const Node& made) {
                                 c.key = fieldKey(made.g);
                                 out.push_back(c);
-                            });
+                            }, c.spawn);
                     }
                     w.tally[k] = t;
-                });
+                }, true, helpers);
                 for (size_t k = 0; k < parts; ++k) {
                     if (w.tally[k].late) w.cut = true; // (out of time, as above)
                     else take(w.tally[k]);
@@ -870,9 +1034,10 @@ private:
                 if (!w.cut)
                     for (size_t k = 0; k < parts; ++k)
                         for (Made& c : w.made[k]) {
-                            if (!insert(w.seen, c.key)) continue;
+                            if (!insert(w, c.key)) continue;
                             c.node.order = int(w.next.size());
                             w.next.push_back(c.node);
+                            if (answer) w.answerNext.push_back(c.spawn);
                         }
             }
             if (w.cut) break;
@@ -882,20 +1047,55 @@ private:
             }
             {
                 // The values of the fields (nearly all of the time of a search). False: out of time.
+#ifdef JURAIC_DECISION_METRICS
+                metrics::Scope evaluationTimer(metrics::Part::EvalBatch);
+#endif
                 const Params& how = sift ? light : p;
+                if (readCuts) w.cutValues.resize(w.next.size());
+                const auto cutFor = [&](Node& n) -> CutValue& { return w.cutValues[n.order]; };
+                // No extra slots, forced digging root, deadline, or sift
+                // pass can consult a discarded score on this path.
+                const bool prune = bounded && !readCuts && !sift && !w.digRoots && w.next.size() > size_t(width) &&
+                    (depth || !p.readMidgame || width < 16 || knownCount == 0);
+                auto& top = w.floor;
+                if (prune) top.clear();
+                const auto worse = std::greater<int>{};
                 const auto value = [&](size_t begin, size_t end) {
-                    BuildTrials scratch;
+                    static thread_local BuildTrials scratch;
+                    const auto scalar = [&](const GameField& field) {
+                        return buildValue(scratch, field, rules, timing, how, nullptr, nullptr, !sift);
+                    };
                     for (size_t i = begin; i < end; ++i) {
                         if (depth && i % PLACEMENTS == 0 && expired(stop)) return false;
                         Node& c = w.next[i];
                         if (readCuts) {
                             BuildCuts cuts;
-                            c.fullValue = buildValue(scratch, c.g, rules, timing, p, nullptr, nullptr, true, &cuts) - c.lost;
-                            c.cutMain = cuts.main;
-                            c.cutShape = cuts.count() > 0;
-                            c.value = sift ? buildValue(scratch, c.g, rules, timing, how) - c.lost : c.fullValue;
+                            auto& cut = cutFor(c);
+                            cut.fullValue = buildValue(scratch, c.g, rules, timing, p, nullptr, nullptr, true, &cuts) - c.lost;
+                            cut.cutMain = cuts.main;
+                            cut.cutShape = cuts.count() > 0;
+                            c.value = sift ? scalar(c.g) - c.lost : cut.fullValue;
                         } else {
-                            c.value = buildValue(scratch, c.g, rules, timing, how, nullptr, nullptr, !sift) - c.lost;
+                            if (prune) {
+                                if (top.size() < size_t(width)) {
+                                    c.value = scalar(c.g) - c.lost;
+                                    top.push_back(c.value);
+                                    std::push_heap(top.begin(), top.end(), worse);
+                                } else {
+                                    BuildFloor floor{top.front(), c.lost};
+                                    const int value = buildValue(scratch, c.g, rules, timing, how, nullptr, nullptr, true, nullptr, &floor);
+                                    if (floor.rejected) c.value = INT32_MIN;
+                                    else {
+                                        c.value = value - c.lost;
+                                        if (c.value > top.front()) {
+                                            std::pop_heap(top.begin(), top.end(), worse);
+                                            top.back() = c.value;
+                                            std::push_heap(top.begin(), top.end(), worse);
+                                        }
+                                    }
+                                }
+                            } else
+                                c.value = scalar(c.g) - c.lost;
                         }
                     }
                     return true;
@@ -910,7 +1110,7 @@ private:
                         if (!all.load(std::memory_order_relaxed)) return;
                         const size_t begin = k * VALUE_GRAIN, end = begin + VALUE_GRAIN < count ? begin + VALUE_GRAIN : count;
                         if (!value(begin, end)) all = false;
-                    });
+                    }, true, helpers);
                     valued = all;
                 }
                 if (!valued) {
@@ -930,19 +1130,20 @@ private:
                     }
                 }
             }
+            const auto cutFor = [&](const Node& n) -> const CutValue& { return w.cutValues[n.order]; };
             if (tellCuts) {
                 int bestMain = 0;
-                for (const Node& n : w.next) bestMain = std::max(bestMain, n.cutMain);
+                for (const Node& n : w.next) bestMain = std::max(bestMain, cutFor(n).cutMain);
                 for (const Node& n : w.next)
-                    if (n.cutShape && int64_t(n.cutMain) * 1000 >= int64_t(bestMain) * p.lv38CutKeep)
+                    if (cutFor(n).cutShape && int64_t(cutFor(n).cutMain) * 1000 >= int64_t(bestMain) * p.lv38CutKeep)
                         w.cutPlacements[depth] |= 1u << n.first;
             }
             std::vector<Node> marked;
             if (slots) {
                 for (const Node& n : w.next)
-                    if (n.cutShape) {
+                    if (cutFor(n).cutShape) {
                         marked.push_back(n);
-                        marked.back().value = n.fullValue;
+                        marked.back().value = cutFor(n).fullValue;
                     }
                 // The ordinary beam retains its full width and its own pruning order.
                 // Extra parents are appended behind it, so they cannot replace an ordinary node during deduplication.
@@ -952,14 +1153,18 @@ private:
             if (sift) {
                 const size_t keep = size_t(width) * size_t(p.beamSift);
                 trimLayer(w.next, keep, w.digRoots);
-                BuildTrials scratch;
+#ifdef JURAIC_DECISION_METRICS
+                metrics::Scope evaluationTimer(metrics::Part::EvalBatch);
+#endif
+                static thread_local BuildTrials scratch;
                 for (Node& n : w.next)
-                    n.value = readCuts ? n.fullValue : buildValue(scratch, n.g, rules, timing, p, nullptr, nullptr, true) - n.lost;
+                    n.value = readCuts ? cutFor(n).fullValue : buildValue(scratch, n.g, rules, timing, p, nullptr, nullptr, true) - n.lost;
             }
             trimLayer(w.next, size_t(width), w.digRoots);
             std::sort(w.next.begin(), w.next.end(), betterNode);
             if (slots) keepCutSlots(w.next, marked, slots);
             w.layer.swap(w.next);
+            if (answer) w.answerLayer.swap(w.answerNext);
             w.layers = depth + 1;
             {
                 unsigned here = 0;
